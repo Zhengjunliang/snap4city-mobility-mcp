@@ -1,0 +1,19 @@
+[project]
+name = "snap4city-mobility-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Junliang Zheng", email = "junliang.zheng01@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp<3",
+]
+
+[project.scripts]
+snap4city-mobility-mcp = "snap4city_mobility_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"

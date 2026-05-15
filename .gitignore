@@ -1,0 +1,30 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+
+# Build outputs
+build/
+dist/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Secrets — important! Snap4City token will live here later
+.env
+.env.local
+
+# Project-local AI assistant config
+.omc/
+.claude/
+CLAUDE.md
