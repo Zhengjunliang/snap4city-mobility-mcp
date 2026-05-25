@@ -1389,10 +1389,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "httpx" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fastmcp", specifier = "<3" }]
+requires-dist = [
+    { name = "fastmcp", specifier = "<3" },
+    { name = "httpx", specifier = ">=0.28.1" },
+]
 
 [[package]]
 name = "sortedcontainers"
