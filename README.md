@@ -1,14 +1,14 @@
 # snap4city-mobility-mcp
 
-FastMCP server exposing a **mobility advisor tool** for the Snap4City Agentic LLM. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
+**Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip question → the agent calls this tool → the tool orchestrates Snap4City routing / parking / public-transport microservices → returns multi-modal options to be rendered by a Snap4City dashboard widget.
+User asks a trip question → Langgraph agent calls remote MCP server's tools (geocoding + routing) → returns multi-modal options to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed VPN-only; this project ships only the **client + Langgraph orchestrator + CLI glue**.
 
 ---
 
 ## Status
 
-**Phase 3** — hello-world tools (`greet` + `fake_route`) implemented and verified via MCP Inspector + HTTP smoke client. Real Snap4City API integration is the next phase.
+**Phase 4 closed (2026-05-25) → Phase 5 §2 切远程 server 进行中**. 本地 stand-in MCP server 已退役, 改用 referente 内网 dashboard at `http://localhost:8000` (VPN+SSH tunnel 前提)。详见 [docs/next-phase.md](docs/next-phase.md)。
 
 ---
 
@@ -77,8 +77,8 @@ uv sync
 ### Option A — Don't activate (recommended for newcomers to `uv`)
 
 ```powershell
-PS D:\...\snap4city-mobility-mcp> uv run fastmcp dev src/snap4city_mobility_mcp/server.py:mcp
-PS D:\...\snap4city-mobility-mcp> uv run python scripts/smoke_client.py
+PS D:\...\snap4city-mobility-mcp> uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
 ```
 
 Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
@@ -88,13 +88,13 @@ Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
 ```powershell
 # PowerShell
 PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> fastmcp dev src/snap4city_mobility_mcp/server.py:mcp
+(.venv) PS D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
 ```
 
 ```cmd
 :: Windows cmd.exe
 D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> fastmcp dev src/snap4city_mobility_mcp/server.py:mcp
+(.venv) D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
 ```
 
 The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
@@ -105,62 +105,68 @@ The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` 
 
 ---
 
-## 5. Run modes — three ways
+## 5. Run modes
 
-### A. MCP Inspector (recommended for development)
+### 0. Prerequisite — VPN + SSH tunnel
 
-```powershell
-uv run fastmcp dev src/snap4city_mobility_mcp/server.py:mcp
-```
+The remote Snap4City MCP server is reachable only through UNIFI's Ateneo VPN plus an SSH jumphost. Bring the tunnel up **before anything else**:
 
-This launches the official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) — a browser-based debug UI that spawns the server as a subprocess over stdio and lets you call tools interactively.
+1. Connect FortiClient VPN to UNIFI Ateneo (see `Istruzioni_VPNAteneo_Win_V1.0_2020.pdf`).
+2. Open a **separate** PowerShell window and start the tunnel — leave it running for the whole session:
+   ```powershell
+   ssh -L 8000:192.168.1.117:8000 zheng@150.217.15.125
+   ```
+3. Sanity check the dashboard is reachable from your local machine:
+   ```powershell
+   Invoke-RestMethod http://localhost:8000/apps.json | ConvertTo-Json -Depth 8
+   ```
+   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`. If this fails, fix tunnel / VPN before continuing.
 
-1. Wait for the browser to open (typically `http://localhost:6274`).
-2. STDIO transport is preselected → click **Connect**.
-3. Open the **Tools** tab → click **List Tools**.
-4. Expect `greet` and `fake_route` to appear.
-5. Call `greet` with `{"name": "World"}` → expect `"Ciao World!"`.
-6. Call `fake_route` with `{"origin": "A", "destination": "B", "mode": "walk"}` → expect a `RouteOption` JSON with three fields (`mode`, `duration_min`, `summary`).
-7. Press `Ctrl+C` in the terminal to stop the Inspector.
+### Route orchestrator CLI
 
-> **Path-escape warning**: if you fill the Inspector's **Arguments** field manually, **use forward slashes** (`src/snap4city_mobility_mcp/server.py:mcp`). Backslashes are interpreted as escape characters and silently corrupt the path into `srcsnap4city_mobility_mcpserver.py`, which fails to load.
-
-### B. HTTP transport + smoke client (programmatic verification)
-
-In one terminal, start the server in HTTP mode:
+`snap4city-mobility-cli` is the project's single user-facing entry point — it runs the full Langgraph **trip orchestrator** end-to-end on one command line. Internally it opens a FastMCP `Client` over HTTP Streamable transport to the dashboard at `http://localhost:8000` (tunnel above), then chains a `locations`-style geocode tool → a `shortestpath`-style routing tool exposed by the remote `snap4agentic_advisor_native` server. No Inspector, no manual JSON-RPC — just `origin`, `destination`, `route_type` in / JSON route out.
 
 ```powershell
-uv run fastmcp run src/snap4city_mobility_mcp/server.py:mcp --transport http --port 8000
+# Happy path (foot, ~0.7 km in central Florence)
+uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+
+# Error short-circuit (unresolvable origin → geocode failure)
+uv run snap4city-mobility-cli "asdfqwer乱码xyz" "Piazza Duomo Firenze" foot_shortest
+
+# Same point as origin and destination (no route possible)
+uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Duomo Firenze" foot_shortest
 ```
 
-In a second terminal, run the smoke client:
+`route_type` is one of `foot_shortest` (default), `foot_quiet`, `car`, `public_transport`. The 3rd positional argument is optional.
 
-```powershell
-uv run python scripts/smoke_client.py
+Output shape (success):
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "origin": "...", "destination": "...", "route_type": "foot_shortest",
+    "origin_coord": "lat;lng", "destination_coord": "lat;lng",
+    "distance_km": 0.679, "eta": "HH:MM:SS",
+    "wkt_head": "LINESTRING(... first 80 chars ..."
+  },
+  "raw_journey": { ... full /shortestpath payload ... }
+}
 ```
 
-Expected output:
+Output shape (error short-circuit, any node fails):
 
-```
-greet -> Ciao Junliang!
-fake_route -> CallToolResult(..., RouteOption(mode='walk', duration_min=42, summary='S.Marta -> Duomo via walk'))
-```
-
-### C. Installed console script
-
-```powershell
-uv pip install -e .
-uv run snap4city-mobility-mcp
+```json
+{ "ok": false, "error": "geocode failed: HTTP 500 ..." }
 ```
 
-**What this does**:
+> **Purpose**: this CLI is for local development / debugging / demo. The referente team integrating Langgraph consumes the remote MCP server directly over HTTP Streamable transport. Conceptually, the CLI bundles a tunnel-aware FastMCP `Client` + the two-tool chain (geocode → routing) into one binary so you can sanity-check the whole stack without a UI.
 
-- `uv pip install -e .` — installs the package in **editable mode** (`-e`) from the current directory (`.`). No files are copied; a link pointing at `src/` is registered inside `.venv/`. Edits to `server.py` take effect immediately, no reinstall needed. As a side effect, a small launcher named `snap4city-mobility-mcp.exe` is generated in `.venv\Scripts\` (`.venv/bin/` on Unix).
-- `uv run snap4city-mobility-mcp` — runs that launcher (equivalent to `python -m snap4city_mobility_mcp.server`, just shorter). The server starts on **stdio** and blocks waiting for JSON-RPC frames — this is normal. Press `Ctrl+C` to exit.
-
-> If you activated the venv (§4 Option B), you can drop the `uv run` prefix and call `snap4city-mobility-mcp` directly. Without activation, `uv run` is required because `.venv\Scripts\` is not on your shell's `PATH`. If you see *`'snap4city-mobility-mcp' is not recognized as an internal or external command`* (or the Italian / localized equivalent), this is the cause.
-
-The console script exists because MCP host applications (any program that spawns an MCP server as a subprocess) prefer a single binary name over `python -m package.module`. Even if you don't use such a host yourself, this is the entry point that downstream integrators will reference.
+> **Fallback**: if `snap4city-mobility-cli` is not registered yet (e.g. `[project.scripts]` was just edited and `uv pip install -e .` has not been re-run), use the module form instead — it bypasses the `.exe` stub launcher but still relies on the same editable install from `uv sync`:
+> ```powershell
+> uv run python -m snap4city_mobility_mcp.cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+> ```
+> In practice, `uv run snap4city-mobility-cli` will trigger an automatic `uv sync` + editable-wheel rebuild on first call after a `pyproject.toml` change, so the launcher usually appears without manual reinstall.
 
 ---
 
@@ -168,48 +174,59 @@ The console script exists because MCP host applications (any program that spawns
 
 ```
 snap4city-mobility-mcp/
-├── pyproject.toml              # uv-managed project file, fastmcp<3 dep
+├── pyproject.toml              # uv-managed project file
 ├── uv.lock                     # exact-version lockfile (committed)
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
-├── src/
-│   └── snap4city_mobility_mcp/
-│       ├── __init__.py         # package version only
-│       └── server.py           # FastMCP instance + tools + main()
-└── scripts/
-    └── smoke_client.py         # HTTP-transport smoke test
+├── docs/
+│   ├── next-phase.md           # running plan (phase tracking)
+│   └── snap4city-api-notes.md  # field-by-field observations of the real API
+└── src/
+    └── snap4city_mobility_mcp/    # client-only package — MCP server itself is referente-managed (remote)
+        ├── __init__.py            # package version only
+        ├── orchestrator.py        # Langgraph 4-node StateGraph: resolve_origin → resolve_destination → compute_route → format_output
+        └── cli.py                 # console-script entry for snap4city-mobility-cli (thin wrapper around orchestrator)
 ```
 
 ---
 
-## 7. Tools currently exposed
+## 7. Tools consumed (remote)
 
-| Tool | Signature | Returns | Purpose |
-|---|---|---|---|
-| `greet` | `(name: str)` | `str` | Sanity check — proves transport + tool registration + round-trip |
-| `fake_route` | `(origin: str, destination: str, mode: Literal["walk","tpl","car"])` | `RouteOption` | Schema validation — proves `Literal` + `pydantic.BaseModel` correctly generate input/output schema. **Not real routing.** |
+This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://localhost:8000/apps.json` → `Client(config)`). FastMCP merges multi-server tool names with the server id as a prefix, so the names seen by the orchestrator look like `snap4agentic_advisor_native_<toolname>`.
 
-`RouteOption` shape:
+Live registry (run after VPN + SSH tunnel are up):
 
-```python
-class RouteOption(BaseModel):
-    mode: Literal["walk", "tpl", "car", "bike"]
-    duration_min: int
-    summary: str
+```powershell
+uv run python -c "
+import asyncio, json, httpx
+from fastmcp import Client
+async def main():
+    async with httpx.AsyncClient() as h:
+        cfg = (await h.get('http://localhost:8000/apps.json', timeout=10)).json()
+    async with Client(cfg) as c:
+        for t in await c.list_tools():
+            print(t.name, '—', (t.description or '').strip().splitlines()[0][:120])
+asyncio.run(main())
+"
 ```
+
+Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The two-tool chain the orchestrator drives is **a geocode tool** (input free text, output lat/lng) → **a routing tool** (input two coordinates + mode, output WKT linestring + distance + ETA).
 
 ---
 
 ## 8. Verification checklist
 
 - [ ] `uv sync` completes without error
-- [ ] Tool registration check:
+- [ ] VPN + SSH tunnel up; dashboard reachable:
   ```powershell
-  uv run python -c "from snap4city_mobility_mcp.server import mcp; import asyncio; print(list(asyncio.run(mcp.get_tools()).keys()))"
+  Invoke-RestMethod http://localhost:8000/apps.json | ConvertTo-Json -Depth 8
   ```
-  Expected: `['greet', 'fake_route']`
-- [ ] Inspector (§5A) connects; both tools visible; both tools return expected values
-- [ ] HTTP smoke client (§5B) prints the expected output
+  Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
+- [ ] End-to-end orchestrator check via CLI (Langgraph chain hits the remote MCP server over HTTP):
+  ```powershell
+  uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+  ```
+  Expected: `ok=true`, `summary.distance_km ≈ 0.68`. If `ok=false` with `"no route found (empty routes list)"` on the very first call, wait ≥ 5 s and retry — known transient km4city behavior (`docs/lessons.md` L3).
 
 ---
 
@@ -218,11 +235,11 @@ class RouteOption(BaseModel):
 | Symptom | Cause / Fix |
 |---|---|
 | `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
-| Inspector floods with `notifications/message` errors and the path looks like `srcsnap4city_mobility_mcpserver.py` | Backslash escape issue — re-read the path-escape warning in §5A and use forward slashes. |
-| `AttributeError: module 'snap4city_mobility_mcp' has no attribute 'main'` when running `snap4city-mobility-mcp` | Your `pyproject.toml` is outdated. The `[project.scripts]` entry must point to `snap4city_mobility_mcp.server:main`. Pull the latest code. |
-| `'snap4city-mobility-mcp' is not recognized as an internal or external command` (or the localized equivalent — Italian: *"non è riconosciuto come comando interno o esterno"*) | The venv is not activated, so `.venv\Scripts\` is not on `PATH`. Either prefix with `uv run` (`uv run snap4city-mobility-mcp`) or activate the venv first (see §4 Option B). |
-| stdio server appears to hang after startup | Normal — stdio servers block on stdin waiting for JSON-RPC frames. They are designed to be spawned by MCP host applications, not run interactively. |
-| Port 8000 already in use | `netstat -ano \| findstr 8000` to find the PID, then `taskkill /PID <pid> /F` to free it. Or change `--port` to e.g. 8765. |
+| `'snap4city-mobility-cli' is not recognized` after editing `pyproject.toml [project.scripts]` | The launcher binary in `.venv\Scripts\` was not regenerated. Run `uv pip install -e .` once to re-create it (or just `uv run snap4city-mobility-cli ...` — `uv run` auto-syncs and rebuilds the editable wheel on first call after a `pyproject.toml` change). Pure source-code edits don't need a re-install; only `[project.scripts]` additions/changes do. |
+| `apps.json` 404 / connection refused / timeout from `http://localhost:8000` | VPN 没连或 SSH tunnel 挂了。先确认 FortiClient 在线, 再确认那条 `ssh -L 8000:192.168.1.117:8000 zheng@150.217.15.125` 窗口没断 (会话超时 / 网络抖动都会让它沉默死亡)。 |
+| `routing failed: empty body (L3 stale didn't clear after retry)` 在 `car` 路径 (尤其中心步行街 Duomo→Santa Croce) | **referente 的 routing wrapper 已知 bug** (lesson L8): km4city 内部对 ZTL 区 car 返 `-2` 没被 wrapper 透传, 反吃成空 body。重试也不愈 (区别 transient L3)。换 `foot_shortest` / `foot_quiet` 走人行可绕过, 或等 referente 修。 |
+| `routing failed: successful (code=0)` | 历史 bug (Phase 5 §2 R4 retest 时踩过), 现已修复; 见 lesson L7。如果仍出现说明代码回退了。 |
+| Port 8000 already in use 起 SSH tunnel 报错 | 本机已经有别的进程占了 8000。`netstat -ano \| findstr 8000` 找 PID, `taskkill /PID <pid> /F` 释放; 或换 tunnel 本地端口 (`-L 8765:192.168.1.117:8000`), 然后 orchestrator 的 `MCP_URL` 也要改成 `http://localhost:8765/...`。 |
 | VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
 
 ---

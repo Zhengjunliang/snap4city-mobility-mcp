@@ -1,0 +1,1358 @@
+[
+  {
+    "name": "get_municipality_boundary",
+    "description": "Returns the boundary of a municipality. Includes 'wkt' string and 'bbox' (Bounding Box).",
+    "inputSchema": {
+      "properties": {
+        "province": {
+          "description": "Province or Metropolitan City the municipality belongs to. ONLY IN ITALIAN",
+          "type": "string"
+        },
+        "municipality": {
+          "description": "Exact name of the municipality. ONLY IN ITALIAN",
+          "type": "string"
+        }
+      },
+      "required": [
+        "province",
+        "municipality"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_service_categories",
+    "description": "Retrieves the list of valid Service Categories from the Snap4City Knowledge Base.\nUse this tool to find the correct category names required for search tools.",
+    "inputSchema": {
+      "properties": {
+        "mode": {
+          "default": "macro",
+          "description": "Determines the granularity of the categories returned. 'macro' returns only main high-level categories (e.g., Healthcare). 'detailed' returns specific subcategory (e.g., Hospital).",
+          "enum": [
+            "macro",
+            "detailed"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "address_search_location",
+    "description": "Locator swagger Searches for a specific address or poi by text, on snap4city database.\nReturns a GeoJSON FeatureCollection containing the geographic coordinates.",
+    "inputSchema": {
+      "properties": {
+        "search": {
+          "description": "The address, street, or place name to search for (e.g., 'Via Roma, Firenze'). Mandatory.",
+          "type": "string"
+        },
+        "logic": {
+          "default": "or",
+          "description": "Logical operator to combine search terms. Use 'and' for stricter results, 'or' for broader.",
+          "enum": [
+            "and",
+            "or"
+          ],
+          "type": "string"
+        },
+        "excludePOI": {
+          "default": true,
+          "description": "If true, excludes Points of Interest (POI), set to false ONLY when street are required",
+          "type": "boolean"
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return. set it high to have broader research",
+          "type": "integer"
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for the response.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "search"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "distance_from_coordinates",
+    "description": "Calculates the Haversine distance in meters between two GPS coordinates.\nReturns the distance in meters.",
+    "inputSchema": {
+      "properties": {
+        "sourcelatitude": {
+          "description": "Latitude of the starting position in decimal degrees (e.g., 45.4642). Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "sourcelongitude": {
+          "description": "Longitude of the starting position in decimal degrees (e.g., 9.1900). Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "destinationlatitude": {
+          "description": "Latitude of the destination position in decimal degrees. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "destinationlongitude": {
+          "description": "Longitude of the destination position in decimal degrees. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        }
+      },
+      "required": [
+        "sourcelatitude",
+        "sourcelongitude",
+        "destinationlatitude",
+        "destinationlongitude"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "coordinates_to_address",
+    "description": "Retrieves address information (reverse geocoding) for a specific GPS point.\nReturns a JSON containing address details like street, city, and country.",
+    "inputSchema": {
+      "properties": {
+        "latitude": {
+          "description": "Latitude of the GPS point to reverse geocode. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "longitude": {
+          "description": "Longitude of the GPS point to reverse geocode. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_info_dev",
+    "description": "Retrieves detailed information and realtime data about a specific service using its Service URI.\nReturns a GeoJSON description including main properties and time-varying data if available.",
+    "inputSchema": {
+      "properties": {
+        "serviceuri": {
+          "description": "The full URI of the service (e.g., 'http://...'). This is the unique identifier for the service.",
+          "type": "string"
+        },
+        "fromtime": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Start time for retrieving realtime data. Formats: 'n-day', 'n-hour', 'n-minute' or 'yyyy-mm-ddThh:mm:ss' (ISO 8601)."
+        },
+        "totime": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "End time for retrieving realtime data. Format: 'yyyy-mm-ddThh:mm:ss' (ISO 8601)."
+        },
+        "valuename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter response by a specific value name if the service provides multiple values."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions. If the requested language is not available, English is returned.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if the service requires it."
+        }
+      },
+      "required": [
+        "serviceuri"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_info",
+    "description": "Retrieves detailed information about a specific service using its Service URI.\nReturns a GeoJSON description containing main properties (name, address, type) and realtime data if available.",
+    "inputSchema": {
+      "properties": {
+        "serviceuri": {
+          "description": "The full Service URI (e.g., 'http://...') to retrieve information for. This field is mandatory.",
+          "type": "string"
+        },
+        "lang": {
+          "default": "en",
+          "description": "ISO 2-char language code for descriptions. Defaults to 'en' if the specific language is not available.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Bearer token for authorization if the service requires it."
+        }
+      },
+      "required": [
+        "serviceuri"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "routing",
+    "description": "Calculates the best route between two GPS coordinates based on the selected transportation mode.\nReturns routing information including path, duration, and instructions.",
+    "inputSchema": {
+      "properties": {
+        "startlatitude": {
+          "description": "Latitude of the starting point. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "startlongitude": {
+          "description": "Longitude of the starting point. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "endlatitude": {
+          "description": "Latitude of the destination point. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "endlongitude": {
+          "description": "Longitude of the destination point. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "routetype": {
+          "default": "car",
+          "description": "Type of transportation/route calculation.",
+          "enum": [
+            "car",
+            "public_transport",
+            "foot_quiet",
+            "foot_shortest"
+          ],
+          "type": "string"
+        },
+        "startdatetime": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date and time of the journey. Formats accepted: 'DD/MM/YYYY, HH:MM', ISO 8601, etc. Defaults to current time if omitted."
+        }
+      },
+      "required": [
+        "startlatitude",
+        "startlongitude",
+        "endlatitude",
+        "endlongitude"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "wkt_to_geojson",
+    "description": "Converts a Well-Known Text (WKT) geometry string into a GeoJSON object.\nReturns the GeoJSON dictionary including the bounding box (bbox).",
+    "inputSchema": {
+      "properties": {
+        "wkt": {
+          "description": "The Well-Known Text (WKT) string representation of the geometry (e.g., 'POINT(30 10)').",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "wkt"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "geojson_to_wkt",
+    "description": "Converts a GeoJSON string representation into Well-Known Text (WKT) format.\nReturns a dictionary containing the WKT string.",
+    "inputSchema": {
+      "properties": {
+        "geojson": {
+          "description": "The GeoJSON string to be converted (e.g., '{\"type\": \"Point\", \"coordinates\": [30, 10]}').",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "geojson"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "point_within_polygon",
+    "description": "Checks if a specific GPS point is located inside a given Polygon (WKT format).\nReturns a boolean result indicating if the point is inside the polygon area.",
+    "inputSchema": {
+      "properties": {
+        "pointlatitude": {
+          "description": "Latitude of the point to check. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "pointlongitude": {
+          "description": "Longitude of the point to check. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "polygon": {
+          "description": "The Polygon geometry described as a Well-Known Text (WKT) string (e.g., 'POLYGON((...))').",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pointlatitude",
+        "pointlongitude",
+        "polygon"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_search_along_path",
+    "description": "Retrieves a set of services located near or along a given GPS path (WKT).\nUseful for finding amenities along a route.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The geographic path described as a Well-Known Text (WKT) string (e.g., 'LINESTRING(11.2 43.7, 11.3 43.8)').",
+          "type": "string"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Service",
+          "description": "Semicolon-separated list of categories or macro-categories to filter (e.g., 'Accommodation;Healthcare'). Defaults to 'Service' (all), use get_service_categories to fetch all possible service"
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to be returned. Set to 0 for all results.",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter for IoT devices created with a specific model name."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_search_within_polygon",
+    "description": "Retrieves a set of services and devices contained within a specified WKT Polygon area.\nIdeal for geofencing or searching within specific district boundaries.",
+    "inputSchema": {
+      "properties": {
+        "polygon": {
+          "description": "The geographic area described as a Well-Known Text (WKT) Polygon (e.g., 'POLYGON((11.2 43.7, 11.3 43.7, 11.3 43.8, 11.2 43.7))').",
+          "type": "string"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Service",
+          "description": "Semicolon-separated list of categories or macro-categories to filter (e.g., 'Accommodation;Healthcare'). Defaults to 'Service'."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to be returned. Set to 0 for all results.",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter for IoT devices created with a specific model name."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "polygon"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_search_near_gps_position",
+    "description": "Retrieves a set of services or iot-device near a GPS position.\nReturns a complex structure including an array of URIs, raw grouped GeoJSON, and flattened GeoJSON.",
+    "inputSchema": {
+      "properties": {
+        "latitude": {
+          "description": "Latitude of the center GPS position. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "longitude": {
+          "description": "Longitude of the center GPS position. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "maxdistance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum search radius in Km (e.g., '0.5' == 500 m). Use 'inside' to search for geometries containing the point."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of categories to filter. Omit to return all."
+        },
+        "filterValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Advanced IoT search filters (e.g., 'status:Active;temperature>20')."
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of value names to return for each service."
+        },
+        "sortOnValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Criteria to sort results (e.g., 'temperature:desc')."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return.",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter for IoT devices created with a specific model name."
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unique Identifier filter."
+        },
+        "typeQuery": {
+          "anyOf": [
+            {
+              "const": "entity",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Specify 'entity' to search for IoT devices instead of services."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property for complex WKT geometries.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_search_near_service",
+    "description": "Retrieves a set of services or iot-device that are near a specific service (using its serviceUri).\nReturns a complex structure including an array of URIs, raw grouped GeoJSON, and flattened GeoJSON.",
+    "inputSchema": {
+      "properties": {
+        "serviceuri": {
+          "description": "The URI of the central service (e.g., http://www.disit.org/km4city/resource/...). Mandatory.",
+          "type": "string"
+        },
+        "maxdistance": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum search radius in Km (e.g., '0.1')."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of categories to filter. Omit to return all."
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Advanced IoT search filters (e.g., 'status:Active;temperature>20')."
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of value names to return for each service."
+        },
+        "sortOnValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Criteria to sort results (e.g., 'temperature:desc')."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return.",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter for IoT devices created with a specific model name."
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unique Identifier filter."
+        },
+        "typeQuery": {
+          "anyOf": [
+            {
+              "const": "entity",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Specify 'entity' to search for IoT devices instead of services."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property for complex WKT geometries.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "serviceuri"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_search_within_gps_area",
+    "description": "Retrieves a set of services or iot-device within a given GPS Area (Bounding Box).\nReturns a complex structure including an array of URIs, raw grouped GeoJSON, and flattened GeoJSON.",
+    "inputSchema": {
+      "properties": {
+        "latitudebottomleft": {
+          "description": "Bottom-Left Latitude of the bounding box.",
+          "type": "number"
+        },
+        "longitudebottomleft": {
+          "description": "Bottom-Left Longitude of the bounding box.",
+          "type": "number"
+        },
+        "latitudetopright": {
+          "description": "Top-Right Latitude of the bounding box.",
+          "type": "number"
+        },
+        "longitudetopright": {
+          "description": "Top-Right Longitude of the bounding box.",
+          "type": "number"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of categories to filter."
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Advanced IoT search filters (e.g., 'status:Active;temperature>20')."
+        },
+        "values": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semicolon-separated list of value names to return for each service."
+        },
+        "sortOnValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Criteria to sort results (e.g., 'temperature:desc')."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return.",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter for IoT devices created with a specific model name."
+        },
+        "uid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unique Identifier filter."
+        },
+        "typeQuery": {
+          "anyOf": [
+            {
+              "const": "entity",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Specify 'entity' to search for IoT devices instead of services."
+        },
+        "lang": {
+          "default": "en",
+          "description": "Language code for descriptions.",
+          "enum": [
+            "en",
+            "it",
+            "fr",
+            "de",
+            "es"
+          ],
+          "type": "string"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property for complex WKT geometries.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "latitudebottomleft",
+        "longitudebottomleft",
+        "latitudetopright",
+        "longitudetopright"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "transport_routes_search_near_gps_position",
+    "description": "Retrieves a list of public transport routes (buses, trams) that have a stop in a specified GPS area.\nReturns a JSON Object containing route details including lineNumber, routeUri, direction, agency, and polyline.",
+    "inputSchema": {
+      "properties": {
+        "latitude": {
+          "description": "Latitude of the center GPS position. Range: -90 to 90.",
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "longitude": {
+          "description": "Longitude of the center GPS position. Range: -180 to 180.",
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "agency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "URI of an agency to restrict the search to a specified transport operator."
+        },
+        "maxdistance": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "0.1",
+          "description": "Maximum search radius in Km (e.g., '0.1'). Use 'inside' to search for geometries containing the point."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return. Set to 0 for all results.",
+          "type": "integer"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property and 'polyline' (WKT geometry) for each route.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "transport_routes_search_within_gps_area",
+    "description": "Retrieves a list of public transport routes (buses, trams) that have a stop in a specified rectangular area.\nReturns a JSON Object containing route details including lineNumber, routeUri, direction, agency, and polyline.",
+    "inputSchema": {
+      "properties": {
+        "latitudebottomleft": {
+          "description": "Bottom-Left Latitude of the bounding box.",
+          "type": "number"
+        },
+        "longitudebottomleft": {
+          "description": "Bottom-Left Longitude of the bounding box.",
+          "type": "number"
+        },
+        "latitudetopright": {
+          "description": "Top-Right Latitude of the bounding box.",
+          "type": "number"
+        },
+        "longitudetopright": {
+          "description": "Top-Right Longitude of the bounding box.",
+          "type": "number"
+        },
+        "agency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "URI of an agency to restrict the search to a specified transport operator."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return. Set to 0 for all results.",
+          "type": "integer"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property and 'polyline' (WKT geometry) for each route.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "latitudebottomleft",
+        "longitudebottomleft",
+        "latitudetopright",
+        "longitudetopright"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "transport_routes_search_within_wkt_area",
+    "description": "Retrieves a list of public transport routes (buses, trams) that have a stop in a specified WKT geometric area.\nReturns a JSON Object containing route details including lineNumber, routeUri, direction, agency, and polyline.",
+    "inputSchema": {
+      "properties": {
+        "wktarea": {
+          "description": "A geographic area described as Well-Known Text (WKT) (e.g., 'POLYGON((...))'). Mandatory.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "agency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "URI of an agency to restrict the search to a specified transport operator."
+        },
+        "maxresults": {
+          "default": 100,
+          "description": "Maximum number of results to return. Set to 0 for all results.",
+          "type": "integer"
+        },
+        "geometry": {
+          "default": false,
+          "description": "If true, returns a 'hasGeometry' property and 'polyline' (WKT geometry) for each route.",
+          "type": "boolean"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "wktarea"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_agencies",
+    "description": "Retrieves a list of public transport agencies available on Snap4City.\nReturns a dictionary containing an array of agency objects with their names and URIs.",
+    "inputSchema": {
+      "properties": {
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token or Access Token for authorization if required."
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_lines",
+    "description": "Provides a list of the public transport lines available for a given transport agency.\nReturns an array of JSON objects containing line details (long name, short name, URI).",
+    "inputSchema": {
+      "properties": {
+        "agency": {
+          "description": "The URI of the public transport agency (e.g., 'http://www.disit.org/km4city/resource/AtF'). Mandatory.",
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "agency"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_routes_by_line",
+    "description": "Provides a list of the public transport routes available for a given line (and optionally agency).\nReturns an array of JSON objects containing route details, including the WKT geometry.",
+    "inputSchema": {
+      "properties": {
+        "line": {
+          "description": "URI or shortName of a public transport line. Mandatory.",
+          "type": "string"
+        },
+        "agency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "URI of the transport agency. If the 'line' parameter is a full URI, this is not needed."
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "line"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_stops_by_route",
+    "description": "Retrieves a list of public transport stops available for a given route.\nReturns a list containing two elements: an array of service URIs (the stops) and the full GeoJSON data.",
+    "inputSchema": {
+      "properties": {
+        "route": {
+          "description": "URI of the route whose bus stops are to be retrieved. Mandatory.",
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "route"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_stop_timeline",
+    "description": "Retrieves the timetable/timeline (scheduled arrivals and departures) for a specific public transport stop.\nReturns a simplified list of scheduled events.",
+    "inputSchema": {
+      "properties": {
+        "stop": {
+          "description": "The Service URI of the public transport stop. Mandatory.",
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "stop"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tpl_routes_by_stop",
+    "description": "Retrieves a list of public transport routes that pass through a specific bus stop.\nReturns an array of JSON objects containing route details, including the WKT geometry.",
+    "inputSchema": {
+      "properties": {
+        "stop": {
+          "description": "The Service URI of the public transport stop to find routes for. Mandatory.",
+          "type": "string"
+        },
+        "authentication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token for authorization if required."
+        }
+      },
+      "required": [
+        "stop"
+      ],
+      "type": "object"
+    }
+  }
+]

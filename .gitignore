@@ -27,7 +27,3 @@ htmlcov/
 # Project-local AI assistant config
 .omc/
 .claude/
-CLAUDE.md
-
-
-docs/
