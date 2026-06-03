@@ -15,6 +15,7 @@ __pycache__/
 # Build outputs
 build/
 dist/
+*.zip
 
 # Coverage
 .coverage
@@ -23,6 +24,10 @@ htmlcov/
 # Secrets — important! Snap4City token will live here later
 .env
 .env.local
+# Llama4 / ClearML auth artifacts (TokenManager writes token_stored.json to cwd)
+token_stored.json
+user_credentials.json
+clearml_config.json
 
 # Project-local AI assistant config
 .omc/

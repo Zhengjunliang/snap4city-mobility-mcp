@@ -1,17 +1,20 @@
 """Langgraph orchestrator — chain address_search_location + routing via remote MCP.
 
 Library module. Hits referente's remote `snap4agentic_advisor_native` MCP server
-over HTTP Streamable transport through a localhost SSH tunnel. CLI entry point
-lives in cli.py — this module exposes only run_trip().
+over HTTP Streamable transport. CLI entry point lives in cli.py — this module
+exposes only run_trip().
 
-Prerequisite: SSH tunnel `ssh -L 8000:192.168.1.117:8000 zheng@150.217.15.125`
-must be running. Dashboard at http://localhost:8000 exposes /apps.json with the
-multi-server config; we narrow to the `native` server and rewrite the internal
-IP to localhost (dashboard returns 192.168.1.117 which is unreachable from
-outside the VPN-routed network — only the tunnel exposes it).
+Runtime = Snap4City JupyterHub: the dashboard's intranet IP is directly reachable
+(verified: GET http://192.168.1.117:8000/apps.json → 200), so DASHBOARD_URL
+defaults to it — no VPN/SSH tunnel. Override with S4C_DASHBOARD_URL if the
+dashboard is exposed elsewhere.
+Dashboard /apps.json carries the multi-server config; we narrow to the `native`
+server and rewrite the internal IP (192.168.1.117:8000) to DASHBOARD_URL so the
+client hits whichever entry point the current environment exposes.
 """
 import asyncio
 import json
+import os
 from functools import partial
 from typing import Any, Literal, TypedDict
 
@@ -24,7 +27,10 @@ from langgraph.graph import END, StateGraph
 ROUTING_STALE_RETRIES = 1
 ROUTING_STALE_RETRY_DELAY_S = 6.0
 
-DASHBOARD_URL = "http://localhost:8000"
+# Runtime = JupyterHub: the intranet dashboard IP is directly reachable, so it's the
+# default. Override via S4C_DASHBOARD_URL if the dashboard is exposed elsewhere.
+DASHBOARD_URL = os.environ.get("S4C_DASHBOARD_URL", "http://192.168.1.117:8000")
+INTERNAL_DASHBOARD_URL = "http://192.168.1.117:8000"
 NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 
 
@@ -37,7 +43,7 @@ async def _build_config() -> dict[str, Any]:
         "mcpServers": {
             NATIVE_SERVER_ID: {
                 **native,
-                "url": native["url"].replace("http://192.168.1.117:8000", DASHBOARD_URL),
+                "url": native["url"].replace(INTERNAL_DASHBOARD_URL, DASHBOARD_URL),
             }
         }
     }

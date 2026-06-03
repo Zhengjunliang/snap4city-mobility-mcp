@@ -4,9 +4,11 @@
 
 ## TL;DR for the new conversation
 
-UNIFI Sistemi Distribuiti **elaborato Tipo A** (4-week mini-project): build a **FastMCP client + Langgraph orchestrator + CLI glue** that calls DISIT's Snap4City Agentic LLM tools. The MCP server itself is referente-managed (deployed VPN-only via dashboard at `http://localhost:8000` over SSH tunnel) — this project does not ship a server. User asks a trip question → Langgraph agent calls the remote tools → returns multimodal options → Snap4City dashboard widget renders.
+UNIFI Sistemi Distribuiti **elaborato Tipo A** (4-week mini-project): build a **FastMCP client + Langgraph orchestrator + CLI glue** that calls DISIT's Snap4City Agentic LLM tools. The MCP server itself is referente-managed (deployed on the intranet, reached directly from Snap4City JupyterHub at `192.168.1.117:8000`) — this project does not ship a server. User asks a trip question → Langgraph agent calls the remote tools → returns multimodal options → Snap4City dashboard widget renders.
 
-**Phase 4 完成 (2026-05-25)**, 进入 **Phase 5**, 当前 §2 (切远程 server) 执行中。Phase 4 的本地 stand-in (`server.py` + `_helpers.py`) 已在 Phase 5 §2 退役, 真实存活的 Phase 4 deliverable = `orchestrator.py` + `cli.py`。CLI 现走 HTTP Streamable transport 直打 referente dashboard, 不再 spawn stdio 子进程。
+**Phase 4 完成 (2026-05-25)**, 进入 **Phase 5**。Phase 4 的本地 stand-in (`server.py` + `_helpers.py`) 已在 Phase 5 §2 退役, 真实存活的 Phase 4 deliverable = `orchestrator.py` + `cli.py`。CLI 现走 HTTP Streamable transport 直打 referente dashboard, 不再 spawn stdio 子进程。
+
+**2026-06-03 更新**: Phase 5 §2 (切远程 server) 完成。运行环境确定为 **Snap4City JupyterHub** (referente 要求 Python 开发在专用 Jupyter 跑; JupyterHub 直连内网 MCP `192.168.1.117:8000` 不用 SSH tunnel; orchestrator 靠 `S4C_DASHBOARD_URL` env 切本地/Jupyter)。**Llama4 LLM 已接入** (Phase 5 §3 client 部分): endpoint `llama4-agentic-inference` (OpenAI 兼容 + 原生 tool calling), client = `src/snap4city_mobility_mcp/llm.py` 的 `Llama4Client`, JupyterHub 实测通 (0.33s)。详见 memory [[project-jupyterhub-runtime]] + `docs/lessons.md` L9/L10。
 
 ## Phase 4 deliverables (closed)
 
@@ -32,7 +34,9 @@ UNIFI Sistemi Distribuiti **elaborato Tipo A** (4-week mini-project): build a **
 
 1. ~~**切到 referente 远程 MCP server**~~ ✅ **完成 (2026-05-28)**. VPN+SSH tunnel 通, dashboard at `http://localhost:8000`, native server 25 工具全可达。本 stage 同时**彻底退役本地 stand-in** (`server.py` / `_helpers.py` 已删, `pyproject` server script 已删, `Sample tool.py` 移到 `docs/reference/`)。R0 探针 / R1 transport (StreamableHttp via Client(cfg)) / R2 签名适配 (`address_search_location` + `routing` + 坐标拆 float) / R3 删 stand-in / R4 端到端 (happy 0.68 km foot 通 / src==dst 正确捕 -2 / car-ZTL 揭露 referente wrapper bug → L8) / R5 文档全同步。沉淀: lessons L5 (apps.json 内网 IP) + L6 (FastMCP prefix policy) + L7 (envelope error_code=0 vs error_message=successful) + L8 (car-ZTL wrapper bug)。
 2. **pytest 单测网** (`pytest-asyncio` + `httpx.MockTransport`) — **首项的 §1 之后立刻接**。原放第 1 位; 切远程优先级压过, 因 stand-in 删完后 client 侧 mock 目标才稳定 (不再是 server 内部 tool 函数, 而是 transport 层 / Client.call_tool 返回结构)。覆盖目标: `orchestrator._resolve_endpoint` / `_compute_route` 各错误分支, `_first_coord` GeoJSON 顺序边界, transport mock 模拟 referente envelope。
-3. **接 LLM** — Langgraph 加 ChatModel 节点 (Claude / GPT / open model 待选), 解析自然语言 query "我要从 Duomo 走到 Santa Croce" → 拆 `origin` / `destination` / `route_type`, 喂入现有 4 节点 graph 前端。
+3. **接 LLM** — ✅ **client 完成 (2026-06-03)**. 模型已定 = Snap4City **Llama4** (`llama4-agentic-inference`, OpenAI 兼容 + tool calling), 不是 Claude/GPT。`llm.py` `Llama4Client.chat()` 就绪 + mock 测过。**剩余 = 接进 Langgraph**, 两条路待定 (用户表示先把现有确定性链在 JupyterHub 跑通再决定):
+   - **A. 确定性链不变 + LLM 只做 NLU**: 自然语言 "我要从 Duomo 走到 Santa Croce" → 拆 `origin`/`destination`/`route_type` 喂现有 4 节点 graph; LLM 另做输出叙述。简单可控。
+   - **B. 全 agentic loop**: 把 MCP geocode/routing 包成 OpenAI function schema 喂 LLM, LLM 自己决定调哪个工具 (`tool_choice="auto"` → `tool_calls` → 执行 → `role:"tool"` 回填)。灵活, 更贴 "agentic", 但更难控。
 4. **接 Snap4City dashboard** — 聊天界面调用 LLM agent, 地图组件渲染 `journey.routes[0].wkt` LINESTRING。Widget URL 模式待 referente 确认。
 5. ~~**替换 `_helpers.py` 为 referente 真版**~~ — **删项**: Phase 5 §1 (切远程) 同步把 `_helpers.py` 一起删了, 无对象可替换; `Sample tool.py` 已移到 `docs/reference/` 作为 referente 参考代码归档, 不抽取为 MCP tool (本项目 client-only)。
 
@@ -57,18 +61,20 @@ UNIFI Sistemi Distribuiti **elaborato Tipo A** (4-week mini-project): build a **
 
 Paste this prompt into a fresh session to bootstrap context:
 
-> 这是 UNIFI Sistemi Distribuiti elaborato Tipo A 的延续会话. 项目: snap4city-mobility-mcp (**Langgraph MCP client** for referente's remote Snap4City server). Phase 1-4 已完成, Phase 5 §1 (切远程 server + 退役本地 stand-in) 进行中。请按顺序读: `CLAUDE.md` → `README.md` → `docs/next-phase.md` → `docs/lessons.md` → `src/snap4city_mobility_mcp/orchestrator.py` → `src/snap4city_mobility_mcp/cli.py`。然后 `git log -5` + `git status`。准备好后告诉我目前 Phase 5 第几项 (切远程 server / pytest / LLM / dashboard), 我们决定本 stage 范围。
+> 这是 UNIFI Sistemi Distribuiti elaborato Tipo A 的延续会话. 项目: snap4city-mobility-mcp (**Langgraph MCP client** for referente's remote Snap4City server). Phase 1-4 完成, Phase 5 §1-2 (切远程 server) 完成; 运行环境已迁到 **Snap4City JupyterHub**, Llama4 agentic LLM client (`llm.py`) 已加。请按顺序读: `CLAUDE.md` (尤其 §5.1 运行模式) → `README.md` → `docs/next-phase.md` → `docs/lessons.md` (尤其 L9/L10) → `src/snap4city_mobility_mcp/orchestrator.py` → `src/snap4city_mobility_mcp/llm.py` → `src/snap4city_mobility_mcp/cli.py`。然后 `git log -5` + `git status`。准备好后告诉我下一步 (LLM 接进 Langgraph 的 A/B 方案 / pytest / dashboard), 我们决定本 stage 范围。
 
-Also verify env still works in the new session (前提: VPN + SSH tunnel 已开, 见 README §5 prerequisite):
+运行环境 = **Snap4City JupyterHub** (CLAUDE.md §5.1): 浏览器登录, 内网直连不用 VPN/SSH tunnel; conda 3.11 env (kernel `s4c`, 见 lessons L9); 跑前设 `S4C_USERNAME` / `S4C_PASSWORD` (MCP endpoint orchestrator 默认已指 `192.168.1.117:8000`, 改动用 `S4C_DASHBOARD_URL`)。LLM (Llama4) 真跑。
 
-```powershell
-Invoke-RestMethod http://localhost:8000/apps.json | ConvertTo-Json -Depth 8
+JupyterHub 内自检:
+
+```bash
+curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
 ```
 
 Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`. 然后跑一发 CLI smoke:
 
-```powershell
-uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+```bash
+snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
 ```
 
 Expected: `ok=true`, `summary.distance_km ≈ 0.68`. 偶发 `ok=false (no route found)` 间隔 ≥ 5s 重跑, 见 `docs/lessons.md` L3。

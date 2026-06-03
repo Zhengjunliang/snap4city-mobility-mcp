@@ -11,10 +11,16 @@ dependencies = [
     "fastmcp<3",
     "httpx>=0.28.1",
     "langgraph>=1.2.1",
+    "requests>=2.31",
 ]
 
 [project.scripts]
 snap4city-mobility-cli = "snap4city_mobility_mcp.cli:main"
+
+[tool.ruff.lint.per-file-ignores]
+# token_manager.py is vendored verbatim from referente's reference notebook —
+# keep it lint-exempt so upstream updates drop in without re-applying fixes.
+"src/snap4city_mobility_mcp/token_manager.py" = ["F541"]
 
 [build-system]
 requires = ["uv_build>=0.11.14,<0.12.0"]

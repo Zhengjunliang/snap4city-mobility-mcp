@@ -1789,6 +1789,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "langgraph" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -1796,6 +1797,7 @@ requires-dist = [
     { name = "fastmcp", specifier = "<3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langgraph", specifier = ">=1.2.1" },
+    { name = "requests", specifier = ">=2.31" },
 ]
 
 [[package]]

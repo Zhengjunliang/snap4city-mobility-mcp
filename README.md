@@ -2,13 +2,13 @@
 
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip question → Langgraph agent calls remote MCP server's tools (geocoding + routing) → returns multi-modal options to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed VPN-only; this project ships only the **client + Langgraph orchestrator + CLI glue**.
+User asks a trip question → Langgraph agent calls remote MCP server's tools (geocoding + routing) → returns multi-modal options to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + CLI glue**.
 
 ---
 
 ## Status
 
-**Phase 4 closed (2026-05-25) → Phase 5 §2 切远程 server 进行中**. 本地 stand-in MCP server 已退役, 改用 referente 内网 dashboard at `http://localhost:8000` (VPN+SSH tunnel 前提)。详见 [docs/next-phase.md](docs/next-phase.md)。
+**Phase 5 进行中 (2026-06-03)**. 远程 referente MCP server 已接通 (§2 完成); 运行环境 = **Snap4City JupyterHub** (浏览器登录, 内网直连 MCP, 不用 VPN/SSH tunnel); **Llama4 agentic LLM client** (`src/snap4city_mobility_mcp/llm.py`) 已加, endpoint `llama4-agentic-inference` 在 JupyterHub 实测通。详见 [docs/next-phase.md](docs/next-phase.md)。
 
 ---
 
@@ -107,24 +107,25 @@ The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` 
 
 ## 5. Run modes
 
-### 0. Prerequisite — VPN + SSH tunnel
+The project runs on the **Snap4City JupyterHub** (referente requires Python dev to run on the dedicated Jupyter; browser login, intranet-direct, no VPN/SSH tunnel). The orchestrator reaches the MCP dashboard at the intranet IP `192.168.1.117:8000` by default; override with the `S4C_DASHBOARD_URL` env var if needed.
 
-The remote Snap4City MCP server is reachable only through UNIFI's Ateneo VPN plus an SSH jumphost. Bring the tunnel up **before anything else**:
+The **Llama4 LLM** (`src/snap4city_mobility_mcp/llm.py`) is reachable **only from the JupyterHub**; provide the function-account creds there via `S4C_USERNAME` / `S4C_PASSWORD`. JupyterHub bootstrap (conda Python 3.11 env — the default kernel 3.9 is too old for fastmcp) is in `CLAUDE.md` §5.1 and `docs/lessons.md` L9.
 
-1. Connect FortiClient VPN to UNIFI Ateneo (see `Istruzioni_VPNAteneo_Win_V1.0_2020.pdf`).
-2. Open a **separate** PowerShell window and start the tunnel — leave it running for the whole session:
-   ```powershell
-   ssh -L 8000:192.168.1.117:8000 zheng@150.217.15.125
+### 0. Prerequisite — JupyterHub environment
+
+The remote Snap4City MCP server lives on the intranet and is reached directly from the JupyterHub (no VPN/SSH tunnel). Set up and sanity-check there:
+
+1. Log in: snap4city.org → *Strumenti di sviluppo* → *Jupyter Hub - Python* (function account; creds in private memory, not in the repo).
+2. Create a conda Python 3.11 env (kernel `s4c`) and `pip install -e .` (see `CLAUDE.md` §5.1 / `docs/lessons.md` L9). The default kernel 3.9 is too old for fastmcp.
+3. Sanity check the dashboard is reachable:
+   ```bash
+   curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
    ```
-3. Sanity check the dashboard is reachable from your local machine:
-   ```powershell
-   Invoke-RestMethod http://localhost:8000/apps.json | ConvertTo-Json -Depth 8
-   ```
-   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`. If this fails, fix tunnel / VPN before continuing.
+   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 
 ### Route orchestrator CLI
 
-`snap4city-mobility-cli` is the project's single user-facing entry point — it runs the full Langgraph **trip orchestrator** end-to-end on one command line. Internally it opens a FastMCP `Client` over HTTP Streamable transport to the dashboard at `http://localhost:8000` (tunnel above), then chains a `locations`-style geocode tool → a `shortestpath`-style routing tool exposed by the remote `snap4agentic_advisor_native` server. No Inspector, no manual JSON-RPC — just `origin`, `destination`, `route_type` in / JSON route out.
+`snap4city-mobility-cli` is the project's single user-facing entry point — it runs the full Langgraph **trip orchestrator** end-to-end on one command line. Internally it opens a FastMCP `Client` over HTTP Streamable transport to the dashboard at `192.168.1.117:8000` (intranet, from the JupyterHub), then chains a `locations`-style geocode tool → a `shortestpath`-style routing tool exposed by the remote `snap4agentic_advisor_native` server. No Inspector, no manual JSON-RPC — just `origin`, `destination`, `route_type` in / JSON route out.
 
 ```powershell
 # Happy path (foot, ~0.7 km in central Florence)
@@ -160,7 +161,7 @@ Output shape (error short-circuit, any node fails):
 { "ok": false, "error": "geocode failed: HTTP 500 ..." }
 ```
 
-> **Purpose**: this CLI is for local development / debugging / demo. The referente team integrating Langgraph consumes the remote MCP server directly over HTTP Streamable transport. Conceptually, the CLI bundles a tunnel-aware FastMCP `Client` + the two-tool chain (geocode → routing) into one binary so you can sanity-check the whole stack without a UI.
+> **Purpose**: this CLI is for local development / debugging / demo. The referente team integrating Langgraph consumes the remote MCP server directly over HTTP Streamable transport. Conceptually, the CLI bundles a FastMCP `Client` + the two-tool chain (geocode → routing) into one binary so you can sanity-check the whole stack without a UI.
 
 > **Fallback**: if `snap4city-mobility-cli` is not registered yet (e.g. `[project.scripts]` was just edited and `uv pip install -e .` has not been re-run), use the module form instead — it bypasses the `.exe` stub launcher but still relies on the same editable install from `uv sync`:
 > ```powershell
@@ -184,7 +185,9 @@ snap4city-mobility-mcp/
 └── src/
     └── snap4city_mobility_mcp/    # client-only package — MCP server itself is referente-managed (remote)
         ├── __init__.py            # package version only
-        ├── orchestrator.py        # Langgraph 4-node StateGraph: resolve_origin → resolve_destination → compute_route → format_output
+        ├── orchestrator.py        # Langgraph 4-node StateGraph: resolve_origin → resolve_destination → compute_route → format_output (endpoint via S4C_DASHBOARD_URL)
+        ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
+        ├── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
         └── cli.py                 # console-script entry for snap4city-mobility-cli (thin wrapper around orchestrator)
 ```
 
@@ -192,9 +195,9 @@ snap4city-mobility-mcp/
 
 ## 7. Tools consumed (remote)
 
-This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://localhost:8000/apps.json` → `Client(config)`). FastMCP merges multi-server tool names with the server id as a prefix, so the names seen by the orchestrator look like `snap4agentic_advisor_native_<toolname>`.
+This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). FastMCP merges multi-server tool names with the server id as a prefix, so the names seen by the orchestrator look like `snap4agentic_advisor_native_<toolname>`.
 
-Live registry (run after VPN + SSH tunnel are up):
+Live registry (run from the JupyterHub):
 
 ```powershell
 uv run python -c "
@@ -202,7 +205,7 @@ import asyncio, json, httpx
 from fastmcp import Client
 async def main():
     async with httpx.AsyncClient() as h:
-        cfg = (await h.get('http://localhost:8000/apps.json', timeout=10)).json()
+        cfg = (await h.get('http://192.168.1.117:8000/apps.json', timeout=10)).json()
     async with Client(cfg) as c:
         for t in await c.list_tools():
             print(t.name, '—', (t.description or '').strip().splitlines()[0][:120])
@@ -217,9 +220,9 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 ## 8. Verification checklist
 
 - [ ] `uv sync` completes without error
-- [ ] VPN + SSH tunnel up; dashboard reachable:
-  ```powershell
-  Invoke-RestMethod http://localhost:8000/apps.json | ConvertTo-Json -Depth 8
+- [ ] On the JupyterHub, dashboard reachable:
+  ```bash
+  curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
   ```
   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 - [ ] End-to-end orchestrator check via CLI (Langgraph chain hits the remote MCP server over HTTP):
@@ -236,10 +239,9 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 |---|---|
 | `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
 | `'snap4city-mobility-cli' is not recognized` after editing `pyproject.toml [project.scripts]` | The launcher binary in `.venv\Scripts\` was not regenerated. Run `uv pip install -e .` once to re-create it (or just `uv run snap4city-mobility-cli ...` — `uv run` auto-syncs and rebuilds the editable wheel on first call after a `pyproject.toml` change). Pure source-code edits don't need a re-install; only `[project.scripts]` additions/changes do. |
-| `apps.json` 404 / connection refused / timeout from `http://localhost:8000` | VPN 没连或 SSH tunnel 挂了。先确认 FortiClient 在线, 再确认那条 `ssh -L 8000:192.168.1.117:8000 zheng@150.217.15.125` 窗口没断 (会话超时 / 网络抖动都会让它沉默死亡)。 |
+| `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | 不在 JupyterHub 内网跑 (内网 IP 只能从 JupyterHub 直连), 或 dashboard 那头挂了。确认在 JupyterHub terminal/notebook 里跑, 且 `S4C_DASHBOARD_URL` 没被设成别的地址。 |
 | `routing failed: empty body (L3 stale didn't clear after retry)` 在 `car` 路径 (尤其中心步行街 Duomo→Santa Croce) | **referente 的 routing wrapper 已知 bug** (lesson L8): km4city 内部对 ZTL 区 car 返 `-2` 没被 wrapper 透传, 反吃成空 body。重试也不愈 (区别 transient L3)。换 `foot_shortest` / `foot_quiet` 走人行可绕过, 或等 referente 修。 |
 | `routing failed: successful (code=0)` | 历史 bug (Phase 5 §2 R4 retest 时踩过), 现已修复; 见 lesson L7。如果仍出现说明代码回退了。 |
-| Port 8000 already in use 起 SSH tunnel 报错 | 本机已经有别的进程占了 8000。`netstat -ano \| findstr 8000` 找 PID, `taskkill /PID <pid> /F` 释放; 或换 tunnel 本地端口 (`-L 8765:192.168.1.117:8000`), 然后 orchestrator 的 `MCP_URL` 也要改成 `http://localhost:8765/...`。 |
 | VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
 
 ---
