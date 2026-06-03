@@ -1,6 +1,6 @@
 # Snap4City Smart City API — Field-by-field Observations
 
-**Backend reference** — field-by-field notes from live-probing the public km4city endpoints during Phase 4. The local stand-in `server.py` that originally consumed these was retired in Phase 5 §2 (切远程 server); referente's remote MCP server is presumed to wrap the same km4city backend, so §1 / §2 stay useful as a baseline. The **actual remote tool signatures** (names with server-prefix, inputSchemas as exposed by the dashboard) live in §3 — populated from the R0 probe output.
+**Backend reference** — field-by-field notes from live-probing the public km4city endpoints. referente's remote MCP server wraps the same km4city backend, so §1 / §2 stay useful as a baseline. The **actual remote tool signatures** (bare names — a single-server config adds no prefix, see lessons L6 — with inputSchemas as exposed by the dashboard) live in §3.
 
 Spec source: `ascapi-openapiv3.json` (OAS3, mirrored at https://www.km4city.org/swagger/external/ascapi-openapiv3.json).
 Backend base URL: `https://www.snap4city.org/superservicemap/api/v1/` (what the remote tools call internally; we don't touch it directly).
@@ -188,38 +188,22 @@ ok=true, pathsearch_time=57.03ms, route_count=0
 3. The `wkt` LINESTRING is directly map-renderable — pass to dashboard widget as-is.
 4. The `arc[i].desc` chain ("Via Ricasoli" → "nd" → ...) gives turn-by-turn text; `"nd"` (no data) entries are common and should be filtered or labeled "(unnamed street)".
 
-### Open questions (for future stages)
-
-- Does `public_transport` `route_type` return GTFS-like leg info (line/route URIs that link to `tpl_*` tools)?
-- What does `routes[0].time` measure exactly (seconds total? matches arc sum?) — needs probe.
-- Is `eta` always wallclock-only (HH:MM:SS) or sometimes ISO datetime? Probe with `startDatetime` set explicitly.
-
----
-
 ## §3. Referente remote MCP server — tool signatures (R0 probe 2026-05-28)
 
-Source: `http://localhost:8000/apps.json` → `Client(cfg)` → `list_tools()` after rewriting `192.168.1.117` → `localhost`. Server scope: `snap4agentic_advisor_native` only (legacy will be removed per dashboard warning; experimental is geometry helpers). Full raw schemas live in [probe-native-tools.json](../probe-native-tools.json) (24 tools, ~1350 lines, gitignore-worthy but kept for now).
+Source: `GET http://192.168.1.117:8000/apps.json` → `Client(cfg)` → `list_tools()`; [mcp_tools._build_config](../src/snap4city_mobility_mcp/mcp_tools.py) narrows to the `native` server and rewrites the intranet IP to `DASHBOARD_URL`. Server scope: `snap4agentic_advisor_native` only (experimental = geometry helpers). Full raw schemas: [probe-native-tools.json](../probe-native-tools.json) (24 tools).
 
 ### Tool name policy
 
 Names appear **without server prefix** when `Client(cfg)` is built with a **single-server config** (as we do). FastMCP only prefixes when merging multiple servers to disambiguate. So `address_search_location` not `snap4agentic_advisor_native_address_search_location` — call them as listed below. If we ever mount native + experimental together, the prefix would kick in and these calls would break — flag this in [[project-referente-endpoint]] memory.
 
-### Tools used by `run_trip()` orchestrator
+### Tools the advisor drives
 
 | Tool | Required input | Notable optional input | Purpose |
 |---|---|---|---|
 | `address_search_location` | `search` (str) | `maxresults` (int, default 100), `logic` ("or"/"and"), `excludePOI` (bool, default true), `lang`, `authentication` | Fuzzy address / POI → GeoJSON FeatureCollection. **Backend = km4city `/location/`, see §1.** |
 | `routing` | `startlatitude` + `startlongitude` + `endlatitude` + `endlongitude` (all float, ranges enforced) | `routetype` (default `car`, enum `car`/`public_transport`/`foot_quiet`/`foot_shortest` — **no bicycle**), `startdatetime` (free-form, accepts `DD/MM/YYYY, HH:MM` or ISO) | Best route between two GPS points. **Backend = km4city `/shortestpath`, see §2.** Output shape needs live invocation (description says "path, duration, and instructions" — TBD whether it's the raw km4city `journey` envelope or a flattened referente-side reshape). |
 
-**Signature deltas vs the retired local stand-in** (see git history for `server.py` if needed):
-- `locations` → `address_search_location` (renamed)
-- `max_results` → `maxresults` (no underscore)
-- `shortestpath` → `routing` (renamed)
-- `source: "lat;lng"` string → `startlatitude` + `startlongitude` as **separate floats**
-- `destination` → `endlatitude` + `endlongitude` (same)
-- `route_type` → `routetype` (no underscore)
-- `start_datetime` → `startdatetime` (no underscore)
-- Auth is still optional `authentication` (Bearer) on both — probe didn't surface a token requirement, public km4city backend stays public-side.
+Auth: both accept an optional `authentication` (Bearer) param — the probe surfaced no token requirement, so the advisor omits it (public km4city backend).
 
 ### Other tools the native server exposes (not used by orchestrator yet)
 
@@ -251,7 +235,7 @@ message_version, response, journey
 - `journey.source_node` / `journey.destination_node`: `{lat, lon, node_id}` (OSM node id)
 - `journey.search_max_feet_km` / `journey.search_route_type` / `journey.start_datetime` (ISO with Z)
 
-So R4 verified our orchestrator's `_format_output` correctly surfaces `routes[0].distance / eta / wkt` into `summary` — these field names match the retired km4city stand-in baseline (L2).
+The advisor's `format_widget` surfaces `routes[0].{wkt, distance, eta, time, arc}` into the widget `data` (full WKT, not truncated) via [orchestrator._extract_data](../src/snap4city_mobility_mcp/orchestrator.py).
 
 ### Failure shapes observed in the wild
 
@@ -265,7 +249,5 @@ So R4 verified our orchestrator's `_format_output` correctly surfaces `routes[0]
 
 ### Open questions (carry forward)
 
-- ~~What does `routing` actually return on the wire?~~ → Resolved above
-- Does `address_search_location` envelope a `{features, type}` GeoJSON directly or wrap it? — R4 inferred yes (orchestrator's `_first_coord` works), but precise top-level shape not pinned. Run a single probe call when convenient.
-- Do TPL tools accept Florence `AtF` agency URI as-is? (Phase 5 §3 / §4)
-- Will referente fix the car-ZTL wrapper bug (L8)? — Watch for next dashboard / native version bump.
+- Do TPL tools accept the Florence `AtF` agency URI as-is?
+- Will referente fix the car-ZTL wrapper bug (L8)? — watch for the next native version bump.

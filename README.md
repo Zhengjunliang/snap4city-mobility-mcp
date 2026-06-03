@@ -2,7 +2,7 @@
 
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip question → Langgraph agent calls remote MCP server's tools (geocoding + routing) → returns multi-modal options to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + CLI glue**.
+User asks a trip or public-transport question → a Langgraph agentic graph drives the Snap4City **Llama4** LLM to call the remote MCP server's tools (geocoding, routing, public transport) → returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + CLI glue**.
 
 ---
 
@@ -77,7 +77,7 @@ uv sync
 ### Option A — Don't activate (recommended for newcomers to `uv`)
 
 ```powershell
-PS D:\...\snap4city-mobility-mcp> uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+PS D:\...\snap4city-mobility-mcp> uv run snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
 PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
 ```
 
@@ -88,13 +88,13 @@ Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
 ```powershell
 # PowerShell
 PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+(.venv) PS D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
 ```
 
 ```cmd
 :: Windows cmd.exe
 D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+(.venv) D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
 ```
 
 The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
@@ -123,51 +123,38 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
    ```
    Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 
-### Route orchestrator CLI
+### Mobility advisor CLI
 
-`snap4city-mobility-cli` is the project's single user-facing entry point — it runs the full Langgraph **trip orchestrator** end-to-end on one command line. Internally it opens a FastMCP `Client` over HTTP Streamable transport to the dashboard at `192.168.1.117:8000` (intranet, from the JupyterHub), then chains a `locations`-style geocode tool → a `shortestpath`-style routing tool exposed by the remote `snap4agentic_advisor_native` server. No Inspector, no manual JSON-RPC — just `origin`, `destination`, `route_type` in / JSON route out.
+`snap4city-mobility-cli` is the project's user-facing entry point — it runs the agentic advisor (a natural-language question in, widget JSON out). Internally a Langgraph graph `understand → agent ⇄ tools → format` lets Llama4 decide which of the remote `snap4agentic_advisor_native` tools to call (geocoding, routing, public-transport), executed deterministically over HTTP Streamable transport.
 
-```powershell
-# Happy path (foot, ~0.7 km in central Florence)
-uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+```bash
+# One-shot: pass the question as arguments
+snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
 
-# Error short-circuit (unresolvable origin → geocode failure)
-uv run snap4city-mobility-cli "asdfqwer乱码xyz" "Piazza Duomo Firenze" foot_shortest
-
-# Same point as origin and destination (no route possible)
-uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Duomo Firenze" foot_shortest
+# Interactive multi-turn REPL: no arguments, then type questions
+snap4city-mobility-cli
+> how do I get from Piazza Duomo to Santa Croce on foot?
+> 那坐公交呢?          # follow-up reuses the previous origin/destination
 ```
 
-`route_type` is one of `foot_shortest` (default), `foot_quiet`, `car`, `public_transport`. The 3rd positional argument is optional.
-
-Output shape (success):
+Output shape:
 
 ```json
 {
   "ok": true,
-  "summary": {
-    "origin": "...", "destination": "...", "route_type": "foot_shortest",
-    "origin_coord": "lat;lng", "destination_coord": "lat;lng",
-    "distance_km": 0.679, "eta": "HH:MM:SS",
-    "wkt_head": "LINESTRING(... first 80 chars ..."
+  "intent": "route",
+  "answer": "On foot it's about 0.68 km, ETA ~10 min ...",
+  "data": {
+    "wkt": "LINESTRING(11.255 43.773, ...)",   // FULL geometry — map widget draws this
+    "distance_km": 0.679, "eta": "HH:MM:SS", "duration": "00:10:00", "arcs": [ ... ]
   },
-  "raw_journey": { ... full /shortestpath payload ... }
+  "messages": [ ... updated conversation, pass back as history for multi-turn ... ]
 }
 ```
 
-Output shape (error short-circuit, any node fails):
+`data` is intent-specific: a route carries the full `wkt` LINESTRING + distance + ETA; transport queries (`tpl_lines` / `tpl_routes` / `tpl_stops` / `tpl_timeline`) carry the relevant list. `answer` is always the LLM's natural-language reply.
 
-```json
-{ "ok": false, "error": "geocode failed: HTTP 500 ..." }
-```
-
-> **Purpose**: this CLI is for local development / debugging / demo. The referente team integrating Langgraph consumes the remote MCP server directly over HTTP Streamable transport. Conceptually, the CLI bundles a FastMCP `Client` + the two-tool chain (geocode → routing) into one binary so you can sanity-check the whole stack without a UI.
-
-> **Fallback**: if `snap4city-mobility-cli` is not registered yet (e.g. `[project.scripts]` was just edited and `uv pip install -e .` has not been re-run), use the module form instead — it bypasses the `.exe` stub launcher but still relies on the same editable install from `uv sync`:
-> ```powershell
-> uv run python -m snap4city_mobility_mcp.cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
-> ```
-> In practice, `uv run snap4city-mobility-cli` will trigger an automatic `uv sync` + editable-wheel rebuild on first call after a `pyproject.toml` change, so the launcher usually appears without manual reinstall.
+> **Note**: after this CLI / `[project.scripts]` change, the first call should be `uv run snap4city-mobility-cli ...` (or `uv pip install -e .` once) so the launcher stub regenerates — see `docs/lessons.md` L4. The LLM only answers from the JupyterHub (`S4C_USERNAME` / `S4C_PASSWORD` set).
 
 ---
 
@@ -181,21 +168,24 @@ snap4city-mobility-mcp/
 ├── README.md                   # this file
 ├── docs/
 │   ├── next-phase.md           # running plan (phase tracking)
+│   ├── lessons.md              # architectural traps (km4city / runtime)
 │   └── snap4city-api-notes.md  # field-by-field observations of the real API
+├── tests/                      # local mock unit tests (no LLM / MCP needed)
 └── src/
     └── snap4city_mobility_mcp/    # client-only package — MCP server itself is referente-managed (remote)
         ├── __init__.py            # package version only
-        ├── orchestrator.py        # Langgraph 4-node StateGraph: resolve_origin → resolve_destination → compute_route → format_output (endpoint via S4C_DASHBOARD_URL)
+        ├── mcp_tools.py           # client MCP layer: Client config, fetch_tool_schemas (from server list_tools), routing_with_retry, exec_tool
+        ├── orchestrator.py        # agentic Langgraph graph: understand → agent ⇄ tools → format; run_advisor
         ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
         ├── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
-        └── cli.py                 # console-script entry for snap4city-mobility-cli (thin wrapper around orchestrator)
+        └── cli.py                 # console-script entry for snap4city-mobility-cli (multi-turn REPL + one-shot)
 ```
 
 ---
 
 ## 7. Tools consumed (remote)
 
-This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). FastMCP merges multi-server tool names with the server id as a prefix, so the names seen by the orchestrator look like `snap4agentic_advisor_native_<toolname>`.
+This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`routing`, not `snap4agentic_advisor_native_routing`) — see `docs/lessons.md` L6.
 
 Live registry (run from the JupyterHub):
 
@@ -213,23 +203,24 @@ asyncio.run(main())
 "
 ```
 
-Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The two-tool chain the orchestrator drives is **a geocode tool** (input free text, output lat/lng) → **a routing tool** (input two coordinates + mode, output WKT linestring + distance + ETA).
+Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor exposes **7 of these tools** to the LLM (`address_search_location`, `routing`, `tpl_agencies`, `tpl_lines`, `tpl_routes_by_line`, `tpl_stops_by_route`, `tpl_stop_timeline`); the model chains them (geocode → routing for a trip; `tpl_agencies → … → tpl_stop_timeline` for transport), and `mcp_tools.exec_tool` executes each call deterministically.
 
 ---
 
 ## 8. Verification checklist
 
 - [ ] `uv sync` completes without error
+- [ ] Local mock tests green (no LLM / MCP needed — runs anywhere): `uv run pytest -q`
 - [ ] On the JupyterHub, dashboard reachable:
   ```bash
   curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
   ```
   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
-- [ ] End-to-end orchestrator check via CLI (Langgraph chain hits the remote MCP server over HTTP):
-  ```powershell
-  uv run snap4city-mobility-cli "Piazza Duomo Firenze" "Piazza Santa Croce Firenze" foot_shortest
+- [ ] End-to-end advisor check via CLI (JupyterHub — drives the LLM + remote MCP server):
+  ```bash
+  snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
   ```
-  Expected: `ok=true`, `summary.distance_km ≈ 0.68`. If `ok=false` with `"no route found (empty routes list)"` on the very first call, wait ≥ 5 s and retry — known transient km4city behavior (`docs/lessons.md` L3).
+  Expected: `ok=true`, `intent="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `ok=true` but `data.route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
 
 ---
 

@@ -1,37 +1,46 @@
 """Console-script entry for snap4city-mobility-cli.
 
-Self-contained CLI wrapper that owns argparse + asyncio + json output. Logic
-delegates to orchestrator.run_trip(); orchestrator stays a pure library module
-(no argparse / __main__ block).
+Drives the agentic advisor. With a query on the command line it runs one shot;
+with no arguments it opens an interactive multi-turn REPL that carries the
+conversation forward (so follow-ups like "那坐公交呢?" resolve against history).
+Logic delegates to orchestrator.run_advisor(); orchestrator stays a pure library
+module (no argparse / __main__ block).
 """
-import argparse
 import asyncio
 import json
+import sys
 
-from snap4city_mobility_mcp.orchestrator import run_trip
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="snap4city-mobility-cli")
-    p.add_argument("origin")
-    p.add_argument("destination")
-    p.add_argument(
-        "route_type",
-        nargs="?",
-        default="foot_shortest",
-        choices=["public_transport", "foot_shortest", "foot_quiet", "car"],
-    )
-    return p.parse_args()
+from snap4city_mobility_mcp.orchestrator import run_advisor
 
 
-async def cli_main(origin: str, destination: str, route_type: str) -> None:
-    final = await run_trip(origin, destination, route_type)  # type: ignore[arg-type]
+def _show(final: dict) -> None:
     print(json.dumps(final, ensure_ascii=False, indent=2))
 
 
+async def _one_shot(query: str) -> None:
+    _show(await run_advisor(query))
+
+
+async def _repl() -> None:
+    history: list[dict] = []
+    print("Snap4City mobility advisor — ask a trip/transport question (empty line or Ctrl-D to quit).")
+    while True:
+        try:
+            line = input("> ").strip()
+        except EOFError:
+            break
+        if not line:
+            break
+        final = await run_advisor(line, history)
+        _show(final)
+        history = final.get("messages", history)  # carry updated multi-turn state
+
+
 def main() -> None:
-    args = parse_args()
-    asyncio.run(cli_main(args.origin, args.destination, args.route_type))
+    if len(sys.argv) > 1:  # one-shot: remaining args joined as a single NL query
+        asyncio.run(_one_shot(" ".join(sys.argv[1:])))
+    else:
+        asyncio.run(_repl())
 
 
 if __name__ == "__main__":
