@@ -23,6 +23,7 @@ TokenManager caches/refreshes the access token in token_stored.json.
 """
 import asyncio
 import os
+import time
 from typing import Any
 
 import httpx
@@ -35,10 +36,31 @@ LLAMA4_API_URL = os.environ.get(
 LLAMA4_ENDPOINT = os.environ.get("S4C_LLM_ENDPOINT", "llama4-agentic-inference")
 # Reference example showed tens of seconds round-trip; allow generous headroom.
 LLM_TIMEOUT_S = 120.0
+# The Snap4City gateway returns a transient error envelope (e.g. "The upstream
+# server is timing out") when the vLLM backend is slow to warm up or busy — a heavy
+# agent turn (long system prompt + 7 tool schemas, tool_choice=auto) is the usual
+# trigger. The backend is typically warm by the next attempt, so retry a few times.
+LLM_RETRIES = 2
+LLM_RETRY_BACKOFF_S = 4.0
+# Substrings (case-insensitive) that mark a gateway/backend error worth retrying.
+_TRANSIENT_HINTS = (
+    "timing out", "timeout", "timed out", "upstream", "temporarily unavailable",
+    "overloaded", "try again", "bad gateway", "503", "502", "504",
+)
 
 
 class Llama4Error(RuntimeError):
     """Inference API returned an error envelope (or non-JSON) instead of `choices`."""
+
+
+def _is_transient(message: str | None, status_code: int) -> bool:
+    """True when a gateway/backend failure is worth retrying (vs. a hard error)."""
+    if status_code in (429, 500, 502, 503, 504):
+        return True
+    if message:
+        low = message.lower()
+        return any(hint in low for hint in _TRANSIENT_HINTS)
+    return False
 
 
 def assistant_message(response: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +115,10 @@ class Llama4Client:
         list. `tool_choice` defaults to "none" so the response is always the
         OpenAI `choices` format; pass `tools` + `tool_choice="auto"` to let the
         model decide and emit tool calls.
+
+        Transient gateway/backend failures (upstream timeouts, 5xx, network
+        resets) are retried up to LLM_RETRIES times with linear backoff; hard
+        errors (bad credentials, inactive API rule) are raised immediately.
         """
         params: dict[str, Any] = {"messages": messages, "tool_choice": tool_choice}
         if tools is not None:
@@ -107,23 +133,45 @@ class Llama4Client:
             "Authorization": f"Bearer {token}",
         }
         body = {"access_token": token, "endpoint": LLAMA4_ENDPOINT, "params": params}
-        resp = httpx.post(
-            LLAMA4_API_URL, json=body, headers=headers, timeout=LLM_TIMEOUT_S
-        )
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise Llama4Error(
-                f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"
-            ) from e
-        if isinstance(data, dict) and "choices" in data:
-            return data
-        # Error envelopes: {"message": ...} / {"detail": ...}. (A deprecated endpoint
-        # or an inactive API rule shows up here as e.g. "Rule not found for this user/path".)
-        msg = (data.get("message") or data.get("detail")) if isinstance(data, dict) else None
-        raise Llama4Error(
-            msg or f"unexpected response (HTTP {resp.status_code}): {resp.text[:200]}"
-        )
+
+        last_exc: Llama4Error | None = None
+        for attempt in range(LLM_RETRIES + 1):
+            try:
+                resp = httpx.post(
+                    LLAMA4_API_URL, json=body, headers=headers, timeout=LLM_TIMEOUT_S
+                )
+            except httpx.HTTPError as e:
+                # Network-level failure (read timeout, connection reset) — transient.
+                last_exc = Llama4Error(f"inference request failed: {e}")
+                if attempt < LLM_RETRIES:
+                    time.sleep(LLM_RETRY_BACKOFF_S * (attempt + 1))
+                    continue
+                raise last_exc from e
+
+            try:
+                data = resp.json()
+            except ValueError as e:
+                raise Llama4Error(
+                    f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"
+                ) from e
+            if isinstance(data, dict) and "choices" in data:
+                return data
+            # Error envelopes: {"message": ...} / {"detail": ...}. (A deprecated endpoint
+            # or an inactive API rule shows up here as e.g. "Rule not found for this user/path".)
+            msg = (data.get("message") or data.get("detail")) if isinstance(data, dict) else None
+            err = Llama4Error(
+                msg or f"unexpected response (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
+            # Retry transient gateway/backend errors (upstream timeout warming up vLLM);
+            # raise hard errors (bad creds, inactive rule) on the first try.
+            if _is_transient(msg, resp.status_code) and attempt < LLM_RETRIES:
+                last_exc = err
+                time.sleep(LLM_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            raise err
+
+        # The loop always returns or raises above; this only satisfies type-checkers.
+        raise last_exc or Llama4Error("inference failed after retries")  # pragma: no cover
 
     async def achat(
         self,
