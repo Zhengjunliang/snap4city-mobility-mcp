@@ -16,13 +16,18 @@ Endpoint `llama4-agentic-inference` is OpenAI/MCP-compatible (vLLM):
 
 Request envelope: {access_token, endpoint, params:{messages, tools?, tool_choice, temperature?}}.
 
-Credentials come from the environment so nothing sensitive lands in git:
-    S4C_USERNAME, S4C_PASSWORD          (required)
-    S4C_LLM_API_URL, S4C_LLM_ENDPOINT   (optional overrides)
+Credentials are read from a user_credentials.json file (same {"username",
+"password"} shape as referente's example) — nothing sensitive lands in git (the
+file is .gitignored). Search order:
+    S4C_CREDENTIALS_FILE -> ./user_credentials.json -> ./llmagentic/user_credentials.json
+    -> <repo>/llmagentic/user_credentials.json
+Optional endpoint overrides: S4C_LLM_API_URL, S4C_LLM_ENDPOINT.
 TokenManager caches/refreshes the access token in token_stored.json.
 """
 import asyncio
+import json
 import os
+import pathlib
 import time
 from typing import Any
 
@@ -63,6 +68,42 @@ def _is_transient(message: str | None, status_code: int) -> bool:
     return False
 
 
+CREDENTIALS_FILENAME = "user_credentials.json"
+
+
+def _credentials_file() -> pathlib.Path | None:
+    """First existing user_credentials.json (see module docstring for search order)."""
+    candidates: list[pathlib.Path] = []
+    env_path = os.environ.get("S4C_CREDENTIALS_FILE")
+    if env_path:
+        candidates.append(pathlib.Path(env_path))
+    cwd = pathlib.Path.cwd()
+    candidates.append(cwd / CREDENTIALS_FILENAME)
+    candidates.append(cwd / "llmagentic" / CREDENTIALS_FILENAME)
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "llmagentic" / CREDENTIALS_FILENAME)
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def _load_credentials() -> tuple[str, str]:
+    """Read username/password from a user_credentials.json file (no env fallback)."""
+    path = _credentials_file()
+    if path is None:
+        raise Llama4Error(
+            "no user_credentials.json found — set S4C_CREDENTIALS_FILE to its path, "
+            "or place it in the working dir or llmagentic/"
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise Llama4Error(f"could not read credentials file {path}: {e}") from e
+    username = data.get("username") if isinstance(data, dict) else None
+    password = data.get("password") if isinstance(data, dict) else None
+    if not username or not password:
+        raise Llama4Error(f"{path} is missing 'username' or 'password'")
+    return username, password
+
+
 def assistant_message(response: dict[str, Any]) -> dict[str, Any]:
     """`choices[0].message` from an OpenAI response ({} if absent)."""
     choices = response.get("choices") or []
@@ -91,13 +132,8 @@ class Llama4Client:
     """
 
     def __init__(self, username: str | None = None, password: str | None = None) -> None:
-        username = username or os.environ.get("S4C_USERNAME")
-        password = password or os.environ.get("S4C_PASSWORD")
-        if not username or not password:
-            raise Llama4Error(
-                "missing credentials: set S4C_USERNAME and S4C_PASSWORD "
-                "(or pass username/password explicitly)"
-            )
+        if not (username and password):
+            username, password = _load_credentials()
         self._tm = TokenManager(username, password)
 
     def chat(

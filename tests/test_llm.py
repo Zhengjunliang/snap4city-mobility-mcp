@@ -67,6 +67,38 @@ def test_is_transient_message_hints():
     assert not _is_transient(None, 200)
 
 
+# --- credential loading (file only, no env) ----------------------------------
+
+def test_load_credentials_reads_file(monkeypatch, tmp_path):
+    f = tmp_path / "user_credentials.json"
+    f.write_text('{"username": "fileuser", "password": "filepass"}', encoding="utf-8")
+    monkeypatch.setenv("S4C_CREDENTIALS_FILE", str(f))
+    assert llm_mod._load_credentials() == ("fileuser", "filepass")
+
+
+def test_load_credentials_missing_raises(monkeypatch):
+    monkeypatch.setattr(llm_mod, "_credentials_file", lambda: None)
+    with pytest.raises(Llama4Error, match="no user_credentials.json"):
+        llm_mod._load_credentials()
+
+
+def test_load_credentials_incomplete_raises(monkeypatch, tmp_path):
+    f = tmp_path / "user_credentials.json"
+    f.write_text('{"username": "u"}', encoding="utf-8")  # password absent
+    monkeypatch.setenv("S4C_CREDENTIALS_FILE", str(f))
+    with pytest.raises(Llama4Error, match="missing 'username' or 'password'"):
+        llm_mod._load_credentials()
+
+
+def test_client_explicit_creds_skip_file(monkeypatch):
+    """Explicit username/password bypass the credentials file entirely."""
+    def _boom():
+        raise AssertionError("file should not be read when creds are explicit")
+
+    monkeypatch.setattr(llm_mod, "_load_credentials", _boom)
+    Llama4Client(username="u", password="p")  # must not raise
+
+
 # --- chat() retry behavior ---------------------------------------------------
 
 def test_chat_retries_then_succeeds(client, monkeypatch):
