@@ -27,6 +27,7 @@ from snap4city_mobility_mcp.llm import (
     Llama4Client,
     Llama4Error,
     assistant_message,
+    recover_pythonic_tool_calls,
     tool_calls,
 )
 from snap4city_mobility_mcp.mcp_tools import _build_config, exec_tool, fetch_tool_schemas
@@ -159,7 +160,11 @@ async def agent(
     messages = state["messages"]
     choice = "none" if steps >= MAX_STEPS else "auto"
     resp = await llm.achat(messages=messages, tools=tool_schemas, tool_choice=choice, temperature=0)
-    return {"messages": [*messages, assistant_message(resp)], "steps": steps + 1}
+    msg = assistant_message(resp)
+    if choice == "auto":
+        # Recover Llama4 pythonic tool calls the gateway left as plain text.
+        msg = recover_pythonic_tool_calls(msg)
+    return {"messages": [*messages, msg], "steps": steps + 1}
 
 
 async def tools(state: AdvisorState, *, client: Client) -> dict[str, Any]:

@@ -19,11 +19,11 @@ Request envelope: {access_token, endpoint, params:{messages, tools?, tool_choice
 Credentials are read from a user_credentials.json file (same {"username",
 "password"} shape as referente's example) — nothing sensitive lands in git (the
 file is .gitignored). Search order:
-    S4C_CREDENTIALS_FILE -> ./user_credentials.json -> ./llmagentic/user_credentials.json
-    -> <repo>/llmagentic/user_credentials.json
+    S4C_CREDENTIALS_FILE -> ./user_credentials.json -> <repo>/user_credentials.json
 Optional endpoint overrides: S4C_LLM_API_URL, S4C_LLM_ENDPOINT.
 TokenManager caches/refreshes the access token in token_stored.json.
 """
+import ast
 import asyncio
 import json
 import os
@@ -79,9 +79,8 @@ def _credentials_file() -> pathlib.Path | None:
         candidates.append(pathlib.Path(env_path))
     cwd = pathlib.Path.cwd()
     candidates.append(cwd / CREDENTIALS_FILENAME)
-    candidates.append(cwd / "llmagentic" / CREDENTIALS_FILENAME)
     repo_root = pathlib.Path(__file__).resolve().parents[2]
-    candidates.append(repo_root / "llmagentic" / CREDENTIALS_FILENAME)
+    candidates.append(repo_root / CREDENTIALS_FILENAME)
     return next((p for p in candidates if p.is_file()), None)
 
 
@@ -121,6 +120,78 @@ def answer_text(response: dict[str, Any]) -> str | None:
 def tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
     """Pending `tool_calls` from the response ([] if none / final answer)."""
     return assistant_message(response).get("tool_calls") or []
+
+
+# Llama4 sometimes emits tool calls as pythonic text — '[fn(a=1, b="x")]' — in the
+# assistant `content` instead of structured `tool_calls` (the gateway's parser
+# misses some auto-tool-choice turns). Recover them client-side so the agent loop
+# still runs. JSON-style barewords (true/false/null) are accepted alongside Python.
+_BAREWORDS = {
+    "true": True, "True": True, "false": False, "False": False,
+    "null": None, "none": None, "None": None, "NULL": None,
+}
+_NO_VALUE = object()
+
+
+def _literal(node: ast.AST) -> Any:
+    """Evaluate a keyword-argument value node; _NO_VALUE if it isn't a literal."""
+    if isinstance(node, ast.Name) and node.id in _BAREWORDS:
+        return _BAREWORDS[node.id]
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, SyntaxError, TypeError):
+        return _NO_VALUE
+
+
+def _parse_pythonic_calls(content: str) -> list[dict[str, Any]]:
+    """Parse '[fn(kw=val, ...), ...]' (or a single 'fn(...)') into OpenAI tool_calls."""
+    text = content.strip()
+    if "<|python_start|>" in text:
+        text = text.split("<|python_start|>", 1)[1].split("<|python_end|>", 1)[0].strip()
+    if not text.startswith("["):
+        if "(" not in text or not text.endswith(")"):
+            return []
+        text = f"[{text}]"
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return []
+    body = tree.body
+    nodes = body.elts if isinstance(body, ast.List) else [body]
+    calls: list[dict[str, Any]] = []
+    for i, node in enumerate(nodes):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            return []  # not a clean tool-call list — leave as plain text
+        args: dict[str, Any] = {}
+        for kw in node.keywords:
+            if kw.arg is None:  # **kwargs splat — not a tool call we can use
+                return []
+            val = _literal(kw.value)
+            if val is _NO_VALUE:
+                return []
+            args[kw.arg] = val
+        calls.append({
+            "id": f"call_{i}",
+            "type": "function",
+            "function": {"name": node.func.id, "arguments": json.dumps(args, ensure_ascii=False)},
+        })
+    return calls
+
+
+def recover_pythonic_tool_calls(message: dict[str, Any]) -> dict[str, Any]:
+    """Fill `tool_calls` from pythonic text in `content` when the gateway left it
+    unparsed. No-op if tool_calls already present or content isn't a call list.
+    Mutates and returns the same message."""
+    if message.get("tool_calls"):
+        return message
+    content = message.get("content")
+    if not isinstance(content, str):
+        return message
+    parsed = _parse_pythonic_calls(content)
+    if parsed:
+        message["tool_calls"] = parsed
+        message["content"] = None  # it was a tool-call turn, not a text answer
+    return message
 
 
 class Llama4Client:

@@ -1,9 +1,16 @@
 """Unit tests for the Llama4 client's transient-error retry handling (no network)."""
+import json
+
 import httpx
 import pytest
 
 from snap4city_mobility_mcp import llm as llm_mod
-from snap4city_mobility_mcp.llm import Llama4Client, Llama4Error, _is_transient
+from snap4city_mobility_mcp.llm import (
+    Llama4Client,
+    Llama4Error,
+    _is_transient,
+    recover_pythonic_tool_calls,
+)
 
 
 class _Resp:
@@ -141,3 +148,53 @@ def test_chat_retries_network_error(client, monkeypatch):
     out = client.chat([{"role": "user", "content": "x"}])
     assert out == ok
     assert len(calls) == 2
+
+
+# --- pythonic tool-call recovery (gateway left Llama4 calls as text) ----------
+
+def test_parse_pythonic_two_calls():
+    content = (
+        '[address_search_location(search="Duomo", excludePOI=false, lang="en"), '
+        'address_search_location(search="Santa Croce", lang="en")]'
+    )
+    calls = llm_mod._parse_pythonic_calls(content)
+    assert len(calls) == 2
+    fn0 = calls[0]["function"]
+    assert fn0["name"] == "address_search_location"
+    assert json.loads(fn0["arguments"]) == {"search": "Duomo", "excludePOI": False, "lang": "en"}
+
+
+def test_parse_pythonic_single_call_and_numbers():
+    calls = llm_mod._parse_pythonic_calls('routing(startlatitude=43.77, routetype="car")')
+    assert len(calls) == 1
+    assert json.loads(calls[0]["function"]["arguments"]) == {"startlatitude": 43.77, "routetype": "car"}
+
+
+def test_parse_pythonic_python_tags_stripped():
+    calls = llm_mod._parse_pythonic_calls("<|python_start|>[tpl_agencies()]<|python_end|>")
+    assert [c["function"]["name"] for c in calls] == ["tpl_agencies"]
+
+
+def test_parse_pythonic_plain_text_ignored():
+    assert llm_mod._parse_pythonic_calls("On foot it's about 0.68 km.") == []
+    assert llm_mod._parse_pythonic_calls("[1, 2, 3]") == []
+    assert llm_mod._parse_pythonic_calls("") == []
+
+
+def test_recover_noop_when_tool_calls_present():
+    msg = {"role": "assistant", "content": None, "tool_calls": [{"id": "x"}]}
+    assert recover_pythonic_tool_calls(msg)["tool_calls"] == [{"id": "x"}]
+
+
+def test_recover_populates_and_clears_content():
+    msg = {"role": "assistant", "content": "[tpl_agencies()]", "tool_calls": []}
+    out = recover_pythonic_tool_calls(msg)
+    assert out["content"] is None
+    assert out["tool_calls"][0]["function"]["name"] == "tpl_agencies"
+
+
+def test_recover_leaves_real_text_answer():
+    msg = {"role": "assistant", "content": "It's 0.68 km on foot.", "tool_calls": []}
+    out = recover_pythonic_tool_calls(msg)
+    assert out["content"] == "It's 0.68 km on foot."
+    assert not out["tool_calls"]

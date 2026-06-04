@@ -1,9 +1,0 @@
-[
-  {
-    "role": "user",
-    "content": [
-      { "type": "image_url", "image_url": { "url": "https://i.sstatic.net/QeTus.png" } },
-      { "type": "text",  "text": "What error do you see in the log? How can we fix it?" }
-    ]
-  }
-]

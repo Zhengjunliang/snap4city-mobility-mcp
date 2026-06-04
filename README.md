@@ -109,7 +109,7 @@ The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` 
 
 The project runs on the **Snap4City JupyterHub** (referente requires Python dev to run on the dedicated Jupyter; browser login, intranet-direct, no VPN/SSH tunnel). The orchestrator reaches the MCP dashboard at the intranet IP `192.168.1.117:8000` by default; override with the `S4C_DASHBOARD_URL` env var if needed.
 
-The **Llama4 LLM** (`src/snap4city_mobility_mcp/llm.py`) is reachable **only from the JupyterHub**; provide the function-account creds there via a `user_credentials.json` file (`{"username": "...", "password": "..."}` — same shape as `llmagentic/`; it is `.gitignore`d, so upload it manually). The client searches `S4C_CREDENTIALS_FILE` → working dir → `llmagentic/`. JupyterHub bootstrap (conda Python 3.11 env — the default kernel 3.9 is too old for fastmcp) is in `CLAUDE.md` §5.1 and `docs/lessons.md` L9.
+The **Llama4 LLM** (`src/snap4city_mobility_mcp/llm.py`) is reachable **only from the JupyterHub**; provide the function-account creds there via a `user_credentials.json` file (`{"username": "...", "password": "..."}`; it is `.gitignore`d, so upload it manually to the repo root). The client searches `S4C_CREDENTIALS_FILE` → working dir → repo root. JupyterHub bootstrap (conda Python 3.11 env — the default kernel 3.9 is too old for fastmcp) is in `CLAUDE.md` §5.1 and `docs/lessons.md` L9.
 
 ### 0. Prerequisite — JupyterHub environment
 

@@ -6,6 +6,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _extract_data,
     _last_assistant_text,
     _route_after_agent,
+    agent,
     format_widget,
     understand,
 )
@@ -181,3 +182,19 @@ def test_graph_compiles(make_client, make_llm):
     """StateGraph.compile() validates node/edge wiring — catches typos statically."""
     graph = _build_graph(make_client([]), make_llm([]), [])
     assert graph is not None
+
+
+# --- agent node: pythonic tool-call recovery ---------------------------------
+
+async def test_agent_recovers_pythonic_tool_calls(make_llm):
+    """When the gateway leaves Llama4 calls as text, the agent node recovers them."""
+    resp = {"choices": [{"message": {
+        "role": "assistant", "content": "[tpl_agencies()]", "tool_calls": []
+    }}]}
+    out = await agent(
+        {"messages": [{"role": "system", "content": "S"}], "steps": 0},
+        llm=make_llm([resp]), tool_schemas=[],
+    )
+    last = out["messages"][-1]
+    assert last["content"] is None
+    assert last["tool_calls"][0]["function"]["name"] == "tpl_agencies"
