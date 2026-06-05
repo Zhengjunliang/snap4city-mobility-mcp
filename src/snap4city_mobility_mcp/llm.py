@@ -143,6 +143,34 @@ def _literal(node: ast.AST) -> Any:
         return _NO_VALUE
 
 
+def _leading_bracket_group(text: str) -> str | None:
+    """The leading balanced '[...]' substring (brackets inside string literals
+    ignored), or None if it never closes. Llama4 sometimes glues chat-template
+    text after the call list — '[routing(...)]assistant\\n\\n<answer>' — so we keep
+    only the bracketed part and discard the trailing junk."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for i, ch in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[: i + 1]
+    return None
+
+
 def _parse_pythonic_calls(content: str) -> list[dict[str, Any]]:
     """Parse pythonic tool calls into OpenAI tool_calls. Accepts the list form
     '[fn(kw=val, ...), ...]', a single 'fn(...)', and several bare calls separated
@@ -151,9 +179,14 @@ def _parse_pythonic_calls(content: str) -> list[dict[str, Any]]:
     if "<|python_start|>" in text:
         text = text.split("<|python_start|>", 1)[1].split("<|python_end|>", 1)[0].strip()
     if text.startswith("["):
-        # List form: a single eval expression whose body is the call list.
+        # List form. Llama4 may append chat-template junk after the closing ']'
+        # ('[routing(...)]assistant\n\n<hallucinated answer>') — parse only the
+        # leading balanced group so the real tool call is still recovered.
+        bracketed = _leading_bracket_group(text)
+        if bracketed is None:
+            return []
         try:
-            body = ast.parse(text, mode="eval").body
+            body = ast.parse(bracketed, mode="eval").body
         except SyntaxError:
             return []
         nodes = body.elts if isinstance(body, ast.List) else [body]

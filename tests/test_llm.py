@@ -178,6 +178,19 @@ def test_parse_pythonic_semicolon_separated_calls():
     assert json.loads(calls[1]["function"]["arguments"]) == {"search": "Santa Croce, Firenze"}
 
 
+def test_parse_pythonic_strips_trailing_chat_template():
+    """Llama4 glues '[fn(...)]assistant\\n\\n<text>'; recover only the tool call."""
+    content = (
+        '[routing(startlatitude=43.773563, startlongitude=11.242085, '
+        'endlatitude=43.77307, endlongitude=11.257792, routetype="foot_shortest")]'
+        "assistant\n\nThe distance is approximately 1.2 km."
+    )
+    calls = llm_mod._parse_pythonic_calls(content)
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "routing"
+    assert json.loads(calls[0]["function"]["arguments"])["routetype"] == "foot_shortest"
+
+
 def test_parse_pythonic_single_call_and_numbers():
     calls = llm_mod._parse_pythonic_calls('routing(startlatitude=43.77, routetype="car")')
     assert len(calls) == 1
