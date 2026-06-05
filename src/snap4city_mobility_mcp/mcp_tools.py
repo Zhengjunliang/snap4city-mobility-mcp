@@ -198,9 +198,9 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
 
     km4city's geocoder is no longer region-locked (it now also indexes Valencia /
     southern France), so a fuzzy Florence query can rank Spanish streets first. Drop
-    out-of-region features — score order is preserved, so the agent still reads the
+    out-of-region features — score order is preserved, so `execute` still reads the
     best in-region hit from the first feature. An empty in-region set becomes an
-    actionable `{"error": ...}` the agent can recover from (rule 4 in AGENT_SYSTEM).
+    actionable `{"error": ...}` (the respond node then explains it to the user).
     Non-FeatureCollection payloads (e.g. a backend error) pass straight through.
     """
     if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":

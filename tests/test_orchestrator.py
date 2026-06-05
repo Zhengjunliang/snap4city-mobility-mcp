@@ -1,17 +1,16 @@
-"""Unit tests for the agentic graph nodes (orchestrator.py)."""
+"""Unit tests for the deterministic graph nodes (orchestrator.py)."""
 import json
 
+from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
-    AGENT_SYSTEM,
+    _build_graph,
     _extract_data,
-    _last_assistant_text,
-    _route_after_agent,
-    agent,
-    format_widget,
+    _first_coord,
+    _template_answer,
+    execute,
+    respond,
     understand,
 )
-from snap4city_mobility_mcp.orchestrator import _build_graph
-from snap4city_mobility_mcp.orchestrator import tools as tools_node
 
 
 def _slots_response(arguments: str) -> dict:
@@ -35,6 +34,34 @@ def _slots_response(arguments: str) -> dict:
     }
 
 
+def _text_response(text: str) -> dict:
+    """A canned OpenAI response whose assistant turn is a plain text answer."""
+    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+def _feature_collection(lng: float, lat: float) -> dict:
+    """Minimal GeoJSON FeatureCollection (server `address_search_location` shape)."""
+    return {
+        "type": "FeatureCollection",
+        "features": [{"geometry": {"coordinates": [lng, lat]}, "properties": {"city": "FIRENZE"}}],
+    }
+
+
+def _journey(distance=1.83, routes=None) -> dict:
+    """Server `routing` payload shape (journey + km4city success envelope)."""
+    if routes is None:
+        routes = [{"wkt": "LINESTRING(1 2,3 4)", "distance": distance, "eta": "15:59:09", "time": "00:23:18"}]
+    return {"journey": {"routes": routes, "source_node": "s", "destination_node": "d"},
+            "response": {"error_code": "0"}}
+
+
+class _RaisingLLM:
+    """LLM double whose achat always raises — exercises respond's template fallback."""
+
+    async def achat(self, *args, **kwargs):
+        raise Llama4Error("boom")
+
+
 # --- understand --------------------------------------------------------------
 
 async def test_understand_parses_slots(make_llm):
@@ -46,8 +73,7 @@ async def test_understand_parses_slots(make_llm):
     )
     assert out["intent"] == "route"
     assert out["slots"]["origin_text"] == "Duomo"
-    assert out["messages"][0]["role"] == "system"
-    assert out["messages"][0]["content"] == AGENT_SYSTEM
+    assert out["slots"]["mode"] == "foot_shortest"
 
 
 async def test_understand_invalid_args_falls_back(make_llm):
@@ -56,46 +82,135 @@ async def test_understand_invalid_args_falls_back(make_llm):
     assert out["intent"] == "other"
 
 
-async def test_understand_keeps_existing_system(make_llm):
-    llm = make_llm([_slots_response('{"intent":"other"}')])
-    msgs = [{"role": "system", "content": "PRE"}, {"role": "user", "content": "hi"}]
-    out = await understand({"messages": msgs}, llm=llm)
-    assert out["messages"][0]["content"] == "PRE"  # not double-prepended
+# --- _first_coord ------------------------------------------------------------
+
+def test_first_coord_reads_lng_lat():
+    assert _first_coord(_feature_collection(11.25, 43.77)) == [11.25, 43.77]
 
 
-# --- tools node --------------------------------------------------------------
-
-async def test_tools_node_executes_and_appends(make_client, make_result):
-    assistant = {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {"id": "a", "type": "function", "function": {"name": "tpl_agencies", "arguments": "{}"}}
-        ],
-    }
-    client = make_client([make_result(structured={"agencies": []})])
-    out = await tools_node({"messages": [assistant], "tool_results": []}, client=client)
-    last = out["messages"][-1]
-    assert last["role"] == "tool"
-    assert last["tool_call_id"] == "a"
-    assert json.loads(last["content"]) == {"agencies": []}
-    assert out["tool_results"][0]["name"] == "tpl_agencies"
+def test_first_coord_none_on_error_or_empty():
+    assert _first_coord({"error": "no Tuscany-area match"}) is None
+    assert _first_coord({"type": "FeatureCollection", "features": []}) is None
+    assert _first_coord(None) is None
 
 
-async def test_tools_node_malformed_arguments(make_client):
-    assistant = {
-        "role": "assistant",
-        "tool_calls": [
-            {"id": "b", "type": "function", "function": {"name": "tpl_agencies", "arguments": "{bad"}}
-        ],
-    }
+# --- execute -----------------------------------------------------------------
+
+async def test_execute_route_success(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey()),                          # routing
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots}, client=client)
+    assert out["unsupported"] is False
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "address_search_location", "routing"]
+    # routing got [lng,lat] mapped to the right lat/lng fields
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["startlatitude"] == 43.77 and route_args["startlongitude"] == 11.24
+    assert route_args["routetype"] == "foot_shortest"
+
+
+async def test_execute_unsupported_intent(make_client):
     client = make_client([])  # must never reach the client
-    out = await tools_node({"messages": [assistant], "tool_results": []}, client=client)
-    assert "error" in json.loads(out["messages"][-1]["content"])
+    out = await execute({"slots": {"intent": "tpl_lines"}}, client=client)
+    assert out["unsupported"] is True
+    assert out["tool_results"] == []
     assert client.calls == []
 
 
-# --- _extract_data / format_widget -------------------------------------------
+async def test_execute_missing_place_is_unsupported(make_client):
+    client = make_client([])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert out["unsupported"] is True
+    assert client.calls == []
+
+
+async def test_execute_geocode_error_skips_routing(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(-0.37, 39.47)),  # Valencia → filtered out
+        make_result(structured=_feature_collection(11.26, 43.76)),
+    ])
+    slots = {"intent": "route", "origin_text": "x", "destination_text": "y", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert out["unsupported"] is False
+    assert [e["name"] for e in out["tool_results"]] == ["address_search_location", "address_search_location"]
+    assert "routing" not in [e["name"] for e in out["tool_results"]]  # never routed
+
+
+async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[])),                 # foot_quiet → empty routes error
+        make_result(structured=_journey()),                          # foot_shortest → success
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_quiet"}
+    out = await execute({"slots": slots}, client=client)
+    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
+    assert len(routings) == 2
+    assert json.loads(routings[0]["args"])["routetype"] == "foot_quiet"
+    assert json.loads(routings[1]["args"])["routetype"] == "foot_shortest"
+    # last routing succeeded → widget data has the journey
+    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
+
+
+# --- respond -----------------------------------------------------------------
+
+async def test_respond_uses_llm_answer(make_llm):
+    llm = make_llm([_text_response("The walking distance is about 1.83 km, ETA 15:59:09.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "from Duomo to Santa Croce on foot"}],
+        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
+        "unsupported": False,
+    }
+    out = await respond(state, llm=llm)
+    final = out["final"]
+    assert final["ok"] is True
+    assert "1.83 km" in final["answer"]
+    assert final["data"]["distance_km"] == 1.83
+    assert final["messages"][-1] == {"role": "assistant", "content": final["answer"]}
+
+
+async def test_respond_falls_back_to_template_on_llm_error():
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "q"}],
+        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
+        "unsupported": False,
+    }
+    out = await respond(state, llm=_RaisingLLM())
+    assert out["final"]["answer"].startswith("📍")
+    assert "1.83 km" in out["final"]["answer"]
+
+
+async def test_respond_unsupported_template_on_llm_error():
+    state = {"intent": "other", "messages": [{"role": "user", "content": "hi"}],
+             "tool_results": [], "unsupported": True}
+    out = await respond(state, llm=_RaisingLLM())
+    assert "point-to-point" in out["final"]["answer"]
+
+
+# --- _template_answer --------------------------------------------------------
+
+def test_template_answer_route():
+    data = {"distance_km": 1.83, "duration": "00:23:18", "eta": "15:59:09"}
+    assert _template_answer("route", data, unsupported=False) == "📍 1.83 km · ~00:23:18 · arrivo 15:59:09"
+
+
+def test_template_answer_route_error():
+    assert _template_answer("route", {"route_error": "no route"}, unsupported=False) == "⚠ no route"
+
+
+def test_template_answer_unsupported():
+    assert "point-to-point" in _template_answer("other", {}, unsupported=True)
+
+
+# --- _extract_data -----------------------------------------------------------
 
 def test_extract_data_route_full_wkt():
     results = [
@@ -115,86 +230,21 @@ def test_extract_data_route_error():
     assert _extract_data(results) == {"route_error": "no route found (empty routes list)"}
 
 
-def test_extract_data_tpl_lines():
-    assert _extract_data([{"name": "tpl_lines", "result": [{"uri": "L1"}]}]) == {"lines": [{"uri": "L1"}]}
-
-
-def test_extract_data_last_success_wins():
-    results = [
-        {"name": "tpl_agencies", "result": [{"uri": "a"}]},
-        {"name": "tpl_lines", "result": [{"uri": "L"}]},
-    ]
-    assert _extract_data(results) == {"lines": [{"uri": "L"}]}
+def test_extract_data_preserves_full_wkt():
+    long_wkt = "LINESTRING(" + "9 4," * 50 + "1 1)"
+    results = [{"name": "routing", "result": {"journey": {"routes": [{"wkt": long_wkt, "distance": 1.0}]}}}]
+    data = _extract_data(results)
+    assert data["wkt"] == long_wkt  # not truncated
+    assert len(data["wkt"]) > 80
 
 
 def test_extract_data_none():
     assert _extract_data([]) == {}
 
 
-def test_format_widget_preserves_full_wkt():
-    long_wkt = "LINESTRING(" + "9 4," * 50 + "1 1)"
-    state = {
-        "intent": "route",
-        "tool_results": [{"name": "routing", "result": {"journey": {"routes": [
-            {"wkt": long_wkt, "distance": 1.0}
-        ]}}}],
-        "messages": [{"role": "assistant", "content": "Done, 1.0 km."}],
-    }
-    final = format_widget(state)["final"]
-    assert final["ok"] is True
-    assert final["answer"] == "Done, 1.0 km."
-    assert final["data"]["wkt"] == long_wkt  # not truncated to 80 chars
-    assert len(final["data"]["wkt"]) > 80
-
-
-# --- _route_after_agent ------------------------------------------------------
-
-def test_route_after_agent_continues_to_tools():
-    state = {"messages": [{"role": "assistant", "tool_calls": [{"id": "x"}]}], "steps": 1}
-    assert _route_after_agent(state) == "tools"
-
-
-def test_route_after_agent_formats_on_final_answer():
-    state = {"messages": [{"role": "assistant", "content": "here you go"}], "steps": 1}
-    assert _route_after_agent(state) == "format"
-
-
-def test_route_after_agent_ceiling_overrides():
-    state = {"messages": [{"role": "assistant", "tool_calls": [{"id": "x"}]}], "steps": 99}
-    assert _route_after_agent(state) == "format"
-
-
-# --- _last_assistant_text ----------------------------------------------------
-
-def test_last_assistant_text_skips_blank_and_nonassistant():
-    msgs = [
-        {"role": "assistant", "content": "first"},
-        {"role": "tool", "content": "x"},
-        {"role": "assistant", "content": "   "},
-        {"role": "user", "content": "q"},
-    ]
-    assert _last_assistant_text(msgs) == "first"
-
-
 # --- graph wiring ------------------------------------------------------------
 
 def test_graph_compiles(make_client, make_llm):
     """StateGraph.compile() validates node/edge wiring — catches typos statically."""
-    graph = _build_graph(make_client([]), make_llm([]), [])
+    graph = _build_graph(make_client([]), make_llm([]))
     assert graph is not None
-
-
-# --- agent node: pythonic tool-call recovery ---------------------------------
-
-async def test_agent_recovers_pythonic_tool_calls(make_llm):
-    """When the gateway leaves Llama4 calls as text, the agent node recovers them."""
-    resp = {"choices": [{"message": {
-        "role": "assistant", "content": "[tpl_agencies()]", "tool_calls": []
-    }}]}
-    out = await agent(
-        {"messages": [{"role": "system", "content": "S"}], "steps": 0},
-        llm=make_llm([resp]), tool_schemas=[],
-    )
-    last = out["messages"][-1]
-    assert last["content"] is None
-    assert last["tool_calls"][0]["function"]["name"] == "tpl_agencies"

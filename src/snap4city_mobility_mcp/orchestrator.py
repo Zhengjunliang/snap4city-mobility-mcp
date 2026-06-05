@@ -1,17 +1,27 @@
-"""Langgraph agentic mobility advisor — orchestration layer.
+"""Langgraph mobility advisor — deterministic orchestration layer.
 
-A natural-language query drives a single agentic graph:
+A natural-language query drives a single linear graph:
 
-  understand → agent ⇄ tools → format → END
+  understand → execute → respond → END
 
-- `understand` (LLM, forced tool call): extracts {origin_text, destination_text,
-  mode, intent} from the latest user turn (place TEXT only — coordinates come from
-  a tool). Resolves follow-ups ("那坐公交呢?") against the conversation.
-- `agent` (LLM, tool_choice=auto): decides which MCP tool to call next, or writes
-  the final answer. `tools` executes each call deterministically and feeds the
-  result back; the pair loops until the model stops calling tools (or MAX_STEPS).
-- `format` assembles widget JSON for the Snap4City dashboard, including the FULL
-  route WKT for the map widget and the updated `messages` for multi-turn.
+- `understand` (LLM, forced tool call): extracts {intent, origin_text,
+  destination_text, mode} from the latest user turn (place TEXT only — coordinates
+  come from a tool). Resolves follow-ups ("那坐公交呢?") against the conversation.
+  A forced `tool_choice` guarantees structured output, so this stage is reliable.
+- `execute` (pure Python, NO LLM): for a `route` intent it deterministically runs
+  the fixed tool flow — geocode origin, geocode destination, then `routing` with
+  the requested mode — instead of letting the model free-call tools. Other intents
+  (tpl_* discovery) are not handled deterministically yet and fall through to a
+  friendly "unsupported" reply.
+- `respond` (LLM, tool_choice="none" — NO tools): phrases a concise, multilingual
+  answer from the structured results, then assembles the widget JSON (incl. the
+  FULL route WKT and the updated `messages` for multi-turn).
+
+Why deterministic: Llama4 with `tool_choice="auto"` is unreliable — when it wants
+to narrate ("retrying with a different profile…") it emits tool calls as pythonic
+TEXT instead of structured `tool_calls`, which leak into the final answer (see
+lesson L13). Letting the model pick *slots* (forced) and *prose* (none), while
+Python drives the tools, removes that failure mode entirely.
 
 Deterministic MCP execution + km4city quirk handling live in mcp_tools.py; the
 Llama4 client in llm.py. Runs end-to-end only on the Snap4City JupyterHub.
@@ -27,7 +37,6 @@ from snap4city_mobility_mcp.llm import (
     Llama4Client,
     Llama4Error,
     assistant_message,
-    recover_pythonic_tool_calls,
     tool_calls,
 )
 from snap4city_mobility_mcp.mcp_tools import (
@@ -36,10 +45,6 @@ from snap4city_mobility_mcp.mcp_tools import (
     fetch_tool_schemas,
     slim_result_for_llm,
 )
-
-# Loop ceiling: longest legit chain is TPL discovery (agencies→lines→routes→stops→
-# timeline = 5) or a route (2× geocode + routing = 3, +retry/reverse). 8 = headroom.
-MAX_STEPS = 8
 
 UNDERSTAND_SYSTEM = """\
 You are the intent-extraction stage of a Florence (Tuscany, Italy) public-mobility \
@@ -59,32 +64,19 @@ public_transport.
 "timetable at a stop" → "tpl_timeline"; anything else → "other".
 - The service area is Tuscany only; do not invent places outside it."""
 
-AGENT_SYSTEM = """\
-You are a Florence (Tuscany, Italy) public-mobility advisor. You answer trip and \
-public-transport questions by CALLING TOOLS, then summarizing the results for the \
-user in their language.
-Hard rules:
-1. NEVER invent coordinates, addresses, service URIs, line names, or route IDs. \
-Every coordinate comes from `address_search_location`. Every transport URI comes \
-from a tpl_* tool.
-2. To route between two places: call `address_search_location` for the origin, then \
-for the destination, read lat/lng from each result's first feature (GeoJSON order \
-is [longitude, latitude]), then call `routing` with those four numbers and the \
-requested routetype. Do not call `routing` until you have both coordinate pairs \
-from tool results.
-3. Transport-discovery chain — always follow URIs returned by the previous tool, \
-never guess them: `tpl_agencies` → pick an agency URI → `tpl_lines(agency)` → pick \
-a line URI → `tpl_routes_by_line(line)` → pick a route URI → \
-`tpl_stops_by_route(route)` → pick a stop URI → `tpl_stop_timeline(stop)`.
-4. If a tool returns an error or an empty result, do not retry it blindly. Adjust \
-the arguments (e.g. a more specific Tuscany address) or tell the user plainly what \
-failed (e.g. "no car route — Piazza del Duomo is a pedestrian zone; try a walking \
-route or public transport").
-5. Travel modes: car, public_transport, foot_quiet, foot_shortest. There is NO \
-bicycle mode.
-6. When you have enough information, STOP calling tools and write a concise final \
-answer. Give distance (km) and ETA for routes; list line / route / stop names for \
-transport queries."""
+RESPOND_SYSTEM = """\
+You are a Florence (Tuscany, Italy) public-mobility advisor. Write a concise final \
+answer for the user, in the user's own language, based ONLY on the RESULTS given to \
+you. Do not call any tools. Do not invent coordinates, distances, line names, or \
+route IDs.
+- For a route: state the distance in km and the ETA (and walking/driving time if \
+present). You may mention a few main streets if listed.
+- If RESULTS holds an error, explain it plainly and suggest an alternative (e.g. \
+"no car route — Piazza del Duomo is a pedestrian zone; try a walking route or \
+public transport").
+- If the request is unsupported, say you currently answer point-to-point trip \
+questions (foot, car, or public transport), e.g. "from Piazza Duomo to Santa Croce \
+on foot", and invite the user to rephrase."""
 
 # Synthetic function (not an MCP tool) — forces structured output from `understand`.
 _EXTRACT_SLOTS_SCHEMA = {
@@ -121,18 +113,22 @@ _EXTRACT_SLOTS_SCHEMA = {
 
 
 class AdvisorState(TypedDict, total=False):
-    messages: list[dict[str, Any]]  # full OpenAI chat history (system+user+assistant+tool)
+    messages: list[dict[str, Any]]  # chat history (system + user + assistant) for multi-turn
     intent: str  # from understand: route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
     slots: dict[str, Any]  # understand output: {intent, origin_text, destination_text, mode}
     tool_results: list[dict[str, Any]]  # structured audit: [{name, args, result}] per call
-    steps: int  # agent⇄tools loop counter (MAX_STEPS guard)
-    final: dict[str, Any]  # widget JSON assembled by format node
+    unsupported: bool  # True when execute could not run a deterministic flow (tpl_* / missing places)
+    final: dict[str, Any]  # widget JSON assembled by respond node
 
 
 async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
-    """LLM extracts slots from the latest user turn via a forced tool call."""
+    """LLM extracts slots from the latest user turn via a forced tool call.
+
+    A forced `tool_choice` makes the gateway return structured `tool_calls`, so this
+    stage never falls back to the pythonic-text shape that plagues free tool use.
+    """
     history = state["messages"]
-    convo = [m for m in history if m.get("role") in ("user", "assistant", "tool")]
+    convo = [m for m in history if m.get("role") in ("user", "assistant")]
     slots: dict[str, Any] = {"intent": "other"}
     try:
         resp = await llm.achat(
@@ -148,65 +144,85 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
             if isinstance(parsed, dict) and parsed.get("intent"):
                 slots = parsed
     except (json.JSONDecodeError, Llama4Error):
-        pass  # fall back to {"intent": "other"} — the agent figures it out from history
-
-    # Ensure a single static agent system message at the front of the conversation.
-    messages = list(history)
-    if not (messages and messages[0].get("role") == "system"):
-        messages = [{"role": "system", "content": AGENT_SYSTEM}, *messages]
-    return {"messages": messages, "slots": slots, "intent": slots.get("intent", "other"), "steps": 0}
+        pass  # fall back to {"intent": "other"} — execute treats it as unsupported
+    return {"slots": slots, "intent": slots.get("intent", "other")}
 
 
-async def agent(
-    state: AdvisorState, *, llm: Llama4Client, tool_schemas: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """LLM picks the next tool call, or writes the final answer at the step ceiling."""
-    steps = state.get("steps", 0)
-    messages = state["messages"]
-    choice = "none" if steps >= MAX_STEPS else "auto"
-    resp = await llm.achat(messages=messages, tools=tool_schemas, tool_choice=choice, temperature=0)
-    msg = assistant_message(resp)
-    if choice == "auto":
-        # Recover Llama4 pythonic tool calls the gateway left as plain text.
-        msg = recover_pythonic_tool_calls(msg)
-    return {"messages": [*messages, msg], "steps": steps + 1}
+def _first_coord(geocode: Any) -> list[float] | None:
+    """First feature's `[lng, lat]` from an `address_search_location` result, or None.
 
-
-async def tools(state: AdvisorState, *, client: Client) -> dict[str, Any]:
-    """Execute every tool_call on the last assistant message; feed results back."""
-    messages = list(state["messages"])
-    results = list(state.get("tool_results", []))
-    last = messages[-1] if messages else {}
-    for tc in last.get("tool_calls") or []:
-        fn = tc.get("function") or {}
-        name = fn.get("name")
-        raw = fn.get("arguments")
-        try:
-            args = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            if not isinstance(args, dict):
-                args = {}
-        except json.JSONDecodeError as e:
-            result: Any = {"error": f"invalid tool arguments JSON: {e}"}
-        else:
-            result = await exec_tool(client, name, args)
-        # Feed the model a SLIM view (small context = fewer 500s / less hallucination);
-        # keep the FULL result in the audit so `_extract_data` still builds the widget.
-        slim = slim_result_for_llm(name, result)
-        messages.append(
-            {"role": "tool", "tool_call_id": tc.get("id"), "content": json.dumps(slim, ensure_ascii=False)}
-        )
-        results.append({"name": name, "args": raw, "result": result})
-    return {"messages": messages, "tool_results": results}
-
-
-def _last_assistant_text(messages: list[dict[str, Any]]) -> str | None:
-    """Most recent assistant message with non-empty string content."""
-    for m in reversed(messages):
-        if m.get("role") == "assistant":
-            content = m.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
+    `exec_tool` already pins the result to Tuscany and returns `{"error": ...}` when
+    nothing matches, so a non-FeatureCollection / empty payload yields None here.
+    """
+    if not isinstance(geocode, dict) or "error" in geocode:
+        return None
+    features = geocode.get("features")
+    if not (isinstance(features, list) and features):
+        return None
+    coords = (features[0].get("geometry") or {}).get("coordinates")
+    if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        lng, lat = coords[0], coords[1]
+        if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
+            return [float(lng), float(lat)]
     return None
+
+
+# Walking modes share a deterministic fallback: a foot_quiet route that comes back
+# empty (km4city L3 cold-start stale) is retried as foot_shortest — the same recovery
+# the model used to attempt by hand, now driven by Python so it always runs.
+_FOOT_FALLBACK = {"foot_quiet": "foot_shortest"}
+
+
+async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
+    """Deterministically run the tool flow for the extracted intent (NO LLM).
+
+    Only `route` is handled today: geocode both endpoints, then `routing` with the
+    requested mode (+ a foot_quiet→foot_shortest retry). Every call is recorded in
+    `tool_results` so `_extract_data` can build the widget. Anything else (tpl_*,
+    missing places) sets `unsupported` for the respond node.
+    """
+    slots = state.get("slots") or {}
+    results: list[dict[str, Any]] = []
+
+    if slots.get("intent") != "route":
+        return {"tool_results": results, "unsupported": True}
+
+    origin_text = (slots.get("origin_text") or "").strip()
+    dest_text = (slots.get("destination_text") or "").strip()
+    if not (origin_text and dest_text):
+        return {"tool_results": results, "unsupported": True}
+
+    async def _geocode(search: str) -> list[float] | None:
+        args = {"search": search}
+        result = await exec_tool(client, "address_search_location", args)
+        results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
+        return _first_coord(result)
+
+    origin = await _geocode(origin_text)
+    dest = await _geocode(dest_text)
+    if origin is None or dest is None:
+        return {"tool_results": results, "unsupported": False}  # geocode error → respond explains
+
+    mode = slots.get("mode") or "foot_shortest"
+
+    async def _route(routetype: str) -> dict[str, Any]:
+        # GeoJSON coordinate order is [longitude, latitude].
+        args = {
+            "startlatitude": origin[1],
+            "startlongitude": origin[0],
+            "endlatitude": dest[1],
+            "endlongitude": dest[0],
+            "routetype": routetype,
+        }
+        result = await exec_tool(client, "routing", args)
+        results.append({"name": "routing", "args": json.dumps(args), "result": result})
+        return result
+
+    routed = await _route(mode)
+    if isinstance(routed, dict) and "error" in routed and mode in _FOOT_FALLBACK:
+        await _route(_FOOT_FALLBACK[mode])  # deterministic walking-profile fallback
+
+    return {"tool_results": results, "unsupported": False}
 
 
 def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -237,57 +253,100 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         if is_err:
             continue
-        if name == "tpl_stop_timeline":
-            return {"timeline": result}
-        if name == "tpl_stops_by_route":
-            return {"stops": result}
-        if name == "tpl_routes_by_line":
-            return {"routes": result}
-        if name == "tpl_lines":
-            return {"lines": result}
-        if name == "tpl_agencies":
-            return {"agencies": result}
     return {"route_error": route_error} if route_error else {}
 
 
-def format_widget(state: AdvisorState) -> dict[str, Any]:
-    """Assemble the dashboard widget JSON from the final answer + tool results."""
-    messages = state.get("messages", [])
+def _template_answer(intent: str, data: dict[str, Any], *, unsupported: bool) -> str:
+    """Deterministic fallback answer when the respond LLM is unavailable."""
+    if unsupported:
+        return (
+            "I currently answer point-to-point trip questions (foot, car, or public "
+            "transport), e.g. 'from Piazza Duomo to Santa Croce on foot'."
+        )
+    if data.get("distance_km") is not None:
+        bits = [f"{data['distance_km']} km"]
+        if data.get("duration"):
+            bits.append(f"~{data['duration']}")
+        if data.get("eta"):
+            bits.append(f"arrivo {data['eta']}")
+        return "📍 " + " · ".join(bits)
+    if data.get("route_error"):
+        return f"⚠ {data['route_error']}"
+    return "Sorry, I couldn't find a route for that request."
+
+
+def _results_view(results: list[dict[str, Any]], *, unsupported: bool) -> dict[str, Any]:
+    """Compact, LLM-facing summary of what execute produced (slim — no huge WKT)."""
+    if unsupported:
+        return {"status": "unsupported", "supported": "point-to-point trips (foot, car, public transport)"}
+    view = [
+        {"name": e.get("name"), "result": slim_result_for_llm(e.get("name"), e.get("result"))}
+        for e in results
+    ]
+    return {"status": "ok", "results": view}
+
+
+async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
+    """LLM phrases a multilingual answer from the structured results (NO tools),
+    then assembles the widget JSON. Falls back to a template if the LLM errors."""
+    messages = list(state.get("messages") or [])
+    intent = state.get("intent", "other")
+    results = state.get("tool_results") or []
+    unsupported = bool(state.get("unsupported"))
+    data = _extract_data(results)
+
+    user_query = next(
+        (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    view = _results_view(results, unsupported=unsupported)
+    answer: str | None = None
+    try:
+        resp = await llm.achat(
+            messages=[
+                {"role": "system", "content": RESPOND_SYSTEM},
+                {
+                    "role": "user",
+                    "content": f"User asked: {user_query}\n\nRESULTS:\n"
+                    + json.dumps(view, ensure_ascii=False),
+                },
+            ],
+            tool_choice="none",
+            temperature=0,
+        )
+        content = assistant_message(resp).get("content")
+        if isinstance(content, str) and content.strip():
+            answer = content.strip()
+    except Llama4Error:
+        pass  # fall back to the deterministic template below
+    if answer is None:
+        answer = _template_answer(intent, data, unsupported=unsupported)
+
+    messages.append({"role": "assistant", "content": answer})
     return {
         "final": {
             "ok": True,
-            "intent": state.get("intent", "other"),
-            "answer": _last_assistant_text(messages),
-            "data": _extract_data(state.get("tool_results", [])),
+            "intent": intent,
+            "answer": answer,
+            "data": data,
             "messages": messages,  # updated history for multi-turn
         }
     }
 
 
-def _route_after_agent(state: AdvisorState) -> str:
-    """Continue to tools while the model keeps calling them and the ceiling holds."""
-    if state.get("steps", 0) > MAX_STEPS:
-        return "format"
-    last = state["messages"][-1] if state.get("messages") else {}
-    return "tools" if last.get("tool_calls") else "format"
-
-
-def _build_graph(client: Client, llm: Llama4Client, tool_schemas: list[dict[str, Any]]):
+def _build_graph(client: Client, llm: Llama4Client):
     g = StateGraph(AdvisorState)
     g.add_node("understand", partial(understand, llm=llm))
-    g.add_node("agent", partial(agent, llm=llm, tool_schemas=tool_schemas))
-    g.add_node("tools", partial(tools, client=client))
-    g.add_node("format", format_widget)
+    g.add_node("execute", partial(execute, client=client))
+    g.add_node("respond", partial(respond, llm=llm))
     g.set_entry_point("understand")
-    g.add_edge("understand", "agent")
-    g.add_conditional_edges("agent", _route_after_agent, {"tools": "tools", "format": "format"})
-    g.add_edge("tools", "agent")
-    g.add_edge("format", END)
+    g.add_edge("understand", "execute")
+    g.add_edge("execute", "respond")
+    g.add_edge("respond", END)
     return g.compile()
 
 
 async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Multi-turn agentic advisor. Returns widget JSON including updated `messages`.
+    """Multi-turn mobility advisor. Returns widget JSON including updated `messages`.
 
     Pass the previous turn's `final["messages"]` back as `history` to continue the
     conversation (the CLI REPL and the dashboard both carry state this way).
@@ -297,9 +356,7 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     messages = list(history or [])
     messages.append({"role": "user", "content": query})
     async with Client(cfg) as client:
-        tool_schemas = await fetch_tool_schemas(client)  # schemas come from the server
-        graph = _build_graph(client, llm, tool_schemas)
-        out: AdvisorState = await graph.ainvoke(
-            {"messages": messages, "tool_results": [], "steps": 0}
-        )
+        await fetch_tool_schemas(client)  # validate connectivity / tool availability
+        graph = _build_graph(client, llm)
+        out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
     return out.get("final", {"ok": False, "error": "no final state produced", "messages": messages})
