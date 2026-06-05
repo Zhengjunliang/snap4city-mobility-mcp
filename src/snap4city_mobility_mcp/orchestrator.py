@@ -30,7 +30,12 @@ from snap4city_mobility_mcp.llm import (
     recover_pythonic_tool_calls,
     tool_calls,
 )
-from snap4city_mobility_mcp.mcp_tools import _build_config, exec_tool, fetch_tool_schemas
+from snap4city_mobility_mcp.mcp_tools import (
+    _build_config,
+    exec_tool,
+    fetch_tool_schemas,
+    slim_result_for_llm,
+)
 
 # Loop ceiling: longest legit chain is TPL discovery (agencies→lines→routes→stops→
 # timeline = 5) or a route (2× geocode + routing = 3, +retry/reverse). 8 = headroom.
@@ -184,8 +189,11 @@ async def tools(state: AdvisorState, *, client: Client) -> dict[str, Any]:
             result: Any = {"error": f"invalid tool arguments JSON: {e}"}
         else:
             result = await exec_tool(client, name, args)
+        # Feed the model a SLIM view (small context = fewer 500s / less hallucination);
+        # keep the FULL result in the audit so `_extract_data` still builds the widget.
+        slim = slim_result_for_llm(name, result)
         messages.append(
-            {"role": "tool", "tool_call_id": tc.get("id"), "content": json.dumps(result, ensure_ascii=False)}
+            {"role": "tool", "tool_call_id": tc.get("id"), "content": json.dumps(slim, ensure_ascii=False)}
         )
         results.append({"name": name, "args": raw, "result": result})
     return {"messages": messages, "tool_results": results}

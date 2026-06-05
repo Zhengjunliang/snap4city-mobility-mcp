@@ -7,11 +7,13 @@ import pytest
 from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.mcp_tools import (
     EXPOSED_TOOLS,
+    GEOCODE_LLM_KEEP,
     TOOL_NAMES,
     _unwrap,
     exec_tool,
     fetch_tool_schemas,
     routing_with_retry,
+    slim_result_for_llm,
 )
 
 
@@ -87,6 +89,43 @@ async def test_exec_tool_routing_goes_through_retry(make_client, make_result):
     assert name == "routing"
     assert "authentication" not in sent  # stripped
     assert sent["routetype"] == "car"
+
+
+# --- slim_result_for_llm (shrink the model's context; audit keeps full payload) ---
+
+def test_slim_geocode_caps_and_keeps_only_needed_fields():
+    fc = {"type": "FeatureCollection", "count": 100, "features": [
+        {"geometry": {"coordinates": [11.25 + i / 1000, 43.77]},
+         "properties": {"address": f"Via {i}", "city": "Firenze", "score": "9", "serviceUri": "http://x"}}
+        for i in range(20)
+    ]}
+    slim = slim_result_for_llm("address_search_location", fc)
+    assert slim["count"] == 100
+    assert len(slim["features"]) == GEOCODE_LLM_KEEP  # capped
+    assert slim["features"][0] == {"address": "Via 0", "city": "Firenze", "coordinates": [11.25, 43.77]}
+    assert "serviceUri" not in slim["features"][0] and "score" not in slim["features"][0]
+
+
+def test_slim_routing_drops_wkt_and_lists_streets():
+    full = {"journey": {
+        "routes": [{
+            "wkt": "LINESTRING(11.25 43.77, 11.26 43.78, ...)",  # huge — must be dropped
+            "distance": 0.83, "eta": "10:11:00", "time": "00:11:00",
+            "arc": [{"desc": "Via Ricasoli"}, {"desc": "nd"}, {"desc": "Via Ricasoli"},
+                    {"desc": "Borgo degli Albizi"}],
+        }],
+        "source_node": {"lat": 43.77, "lon": 11.25}, "destination_node": {"lat": 43.773, "lon": 11.258},
+    }}
+    slim = slim_result_for_llm("routing", full)
+    j = slim["journey"]
+    assert "wkt" not in json.dumps(slim)  # WKT fully gone from the model's view
+    assert j["distance_km"] == 0.83 and j["eta"] == "10:11:00"
+    assert j["streets"] == ["Via Ricasoli", "Borgo degli Albizi"]  # deduped, "nd" dropped
+
+
+def test_slim_passthrough_errors_and_unknown():
+    assert slim_result_for_llm("routing", {"error": "boom"}) == {"error": "boom"}
+    assert slim_result_for_llm("tpl_agencies", {"agencies": [1, 2]}) == {"agencies": [1, 2]}
 
 
 def _feature(lng, lat, addr="x"):

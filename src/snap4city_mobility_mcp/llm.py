@@ -48,9 +48,14 @@ LLM_TIMEOUT_S = 120.0
 LLM_RETRIES = 2
 LLM_RETRY_BACKOFF_S = 4.0
 # Substrings (case-insensitive) that mark a gateway/backend error worth retrying.
+# The gateway can answer HTTP 200 while wrapping an upstream failure in the body, e.g.
+# "Failed to make POST request to .../llama4-agentic-inference. Error: 500 Server Error:
+# Internal Server Error" — the vLLM backend choked (often a too-large request). Treat
+# those as transient: a slimmer / retried turn usually clears it.
 _TRANSIENT_HINTS = (
     "timing out", "timeout", "timed out", "upstream", "temporarily unavailable",
     "overloaded", "try again", "bad gateway", "503", "502", "504",
+    "internal server error", "server error", "failed to make post request",
 )
 
 
@@ -109,12 +114,6 @@ def assistant_message(response: dict[str, Any]) -> dict[str, Any]:
     if not choices:
         return {}
     return choices[0].get("message", {}) or {}
-
-
-def answer_text(response: dict[str, Any]) -> str | None:
-    """Assistant text (`choices[0].message.content`), or None when tool-calling."""
-    content = assistant_message(response).get("content")
-    return content if isinstance(content, str) else None
 
 
 def tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -262,7 +261,7 @@ class Llama4Client:
     ) -> dict[str, Any]:
         """OpenAI `messages` (+ optional tools) -> full OpenAI response.
 
-        Inspect the result with `answer_text()` / `tool_calls()`. Multimodal
+        Inspect the result with `assistant_message()` / `tool_calls()`. Multimodal
         content (image_url parts) is supported inside each message's `content`
         list. `tool_choice` defaults to "none" so the response is always the
         OpenAI `choices` format; pass `tools` + `tool_choice="auto"` to let the

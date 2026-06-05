@@ -214,6 +214,52 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
     return {**payload, "features": kept, "count": len(kept)}
 
 
+# Llama4 has a modest context window and degrades (hallucinates, or its backend
+# 500s) when fed large tool payloads. `slim_result_for_llm` returns a compact view
+# for the agent's MESSAGE history — top-K geocode hits with only the fields the model
+# needs, routing without the huge WKT / per-arc objects. The orchestrator keeps the
+# FULL result in its audit (`tool_results`), so the dashboard widget still gets
+# complete data (incl. WKT). See lesson L12.
+GEOCODE_LLM_KEEP = 5
+
+
+def slim_result_for_llm(name: str, result: Any) -> Any:
+    """Compact a tool result for the LLM context. Full fidelity stays in the audit;
+    this only shrinks what the model re-reads each turn. Errors / unknown shapes
+    (TPL lists, etc.) pass through unchanged."""
+    if not isinstance(result, dict) or "error" in result:
+        return result
+    if name == "address_search_location" and isinstance(result.get("features"), list):
+        feats = [
+            {
+                "address": (f.get("properties") or {}).get("address"),
+                "city": (f.get("properties") or {}).get("city"),
+                "coordinates": (f.get("geometry") or {}).get("coordinates"),  # [lng, lat]
+            }
+            for f in result["features"][:GEOCODE_LLM_KEEP]
+        ]
+        return {"count": result.get("count"), "features": feats}
+    if name == "routing" and isinstance(result.get("journey"), dict):
+        journey = result["journey"]
+        first = (journey.get("routes") or [{}])[0]
+        streets: list[str] = []
+        for arc in first.get("arc") or []:
+            desc = arc.get("desc")
+            if desc and desc != "nd" and desc not in streets:  # drop unnamed + dupes
+                streets.append(desc)
+        return {
+            "journey": {
+                "distance_km": first.get("distance"),
+                "eta": first.get("eta"),
+                "time": first.get("time"),
+                "streets": streets,
+                "source_node": journey.get("source_node"),
+                "destination_node": journey.get("destination_node"),
+            }
+        }
+    return result
+
+
 async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
     """Execute one tool call by forwarding it to the remote server. NEVER raises —
     returns the payload or {"error": ...}.

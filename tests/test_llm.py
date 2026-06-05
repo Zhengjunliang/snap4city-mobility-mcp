@@ -74,6 +74,13 @@ def test_is_transient_message_hints():
     assert not _is_transient(None, 200)
 
 
+def test_is_transient_gateway_wrapped_500():
+    """Gateway answers HTTP 200 but the body wraps an upstream vLLM 500 — retry it."""
+    msg = ("Failed to make POST request to http://192.168.1.13:8080/serve/"
+           "llama4-agentic-inference. Error: 500 Server Error: Internal Server Error")
+    assert _is_transient(msg, 200)
+
+
 # --- credential loading (file only, no env) ----------------------------------
 
 def test_load_credentials_reads_file(monkeypatch, tmp_path):
