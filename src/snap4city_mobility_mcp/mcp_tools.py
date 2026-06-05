@@ -31,6 +31,14 @@ from fastmcp import Client
 ROUTING_STALE_RETRIES = 1
 ROUTING_STALE_RETRY_DELAY_S = 6.0
 
+# km4city's geocoder is NOT region-locked anymore — its index now also covers
+# Valencia (ES) and southern France, so a fuzzy `address_search_location` match for
+# a Florence place can rank Spanish streets first (e.g. "Piazza del Duomo, Firenze"
+# → 100 Valencia/France hits, zero Tuscan). We pin results to a Tuscany bbox
+# client-side and force excludePOI=false so squares/landmarks are findable. See L11.
+# Bounds are generous (whole region, not just Florence) since the advisor serves Tuscany.
+TUSCANY_BBOX = {"min_lng": 9.6, "max_lng": 12.5, "min_lat": 42.2, "max_lat": 44.5}
+
 # Runtime = JupyterHub: the intranet dashboard IP is directly reachable, so it's the
 # default. Override via S4C_DASHBOARD_URL if the dashboard is exposed elsewhere.
 DASHBOARD_URL = os.environ.get("S4C_DASHBOARD_URL", "http://192.168.1.117:8000")
@@ -172,6 +180,40 @@ async def routing_with_retry(client: Client, args: dict[str, Any]) -> dict[str, 
     return {"journey": journey}
 
 
+def _in_tuscany(coords: Any) -> bool:
+    """True when a GeoJSON `[lng, lat]` pair falls inside the Tuscany bbox."""
+    if not (isinstance(coords, (list, tuple)) and len(coords) >= 2):
+        return False
+    lng, lat = coords[0], coords[1]
+    if not (isinstance(lng, (int, float)) and isinstance(lat, (int, float))):
+        return False
+    return (
+        TUSCANY_BBOX["min_lng"] <= lng <= TUSCANY_BBOX["max_lng"]
+        and TUSCANY_BBOX["min_lat"] <= lat <= TUSCANY_BBOX["max_lat"]
+    )
+
+
+def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
+    """Keep only Tuscany-area features from an `address_search_location` result.
+
+    km4city's geocoder is no longer region-locked (it now also indexes Valencia /
+    southern France), so a fuzzy Florence query can rank Spanish streets first. Drop
+    out-of-region features — score order is preserved, so the agent still reads the
+    best in-region hit from the first feature. An empty in-region set becomes an
+    actionable `{"error": ...}` the agent can recover from (rule 4 in AGENT_SYSTEM).
+    Non-FeatureCollection payloads (e.g. a backend error) pass straight through.
+    """
+    if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
+        return payload
+    features = payload.get("features")
+    if not isinstance(features, list):
+        return payload
+    kept = [f for f in features if _in_tuscany((f.get("geometry") or {}).get("coordinates"))]
+    if not kept:
+        return {"error": f"no Tuscany-area match for {search!r} — try a more specific address"}
+    return {**payload, "features": kept, "count": len(kept)}
+
+
 async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
     """Execute one tool call by forwarding it to the remote server. NEVER raises —
     returns the payload or {"error": ...}.
@@ -197,6 +239,13 @@ async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
             if clean.get("startdatetime"):
                 route_args["startdatetime"] = clean["startdatetime"]
             return await routing_with_retry(client, route_args)
+
+        if name == "address_search_location":
+            # Force excludePOI=false so squares/landmarks are findable (not only
+            # street numbers), then pin the fuzzy multi-region hits to Tuscany.
+            clean["excludePOI"] = False
+            payload = _unwrap(await client.call_tool(name, clean))
+            return _filter_geocode_to_tuscany(payload, str(clean.get("search", "")))
 
         return _unwrap(await client.call_tool(name, clean))
     except Exception as e:

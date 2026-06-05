@@ -89,6 +89,33 @@ async def test_exec_tool_routing_goes_through_retry(make_client, make_result):
     assert sent["routetype"] == "car"
 
 
+def _feature(lng, lat, addr="x"):
+    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
+            "properties": {"address": addr}}
+
+
+async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
+    """Out-of-region (Valencia/France) hits are dropped; Tuscan ones kept, score order."""
+    fc = {"type": "FeatureCollection", "count": 3, "features": [
+        _feature(-0.3068184, 39.59272, "Valencia"),   # Spain — drop
+        _feature(11.2560, 43.7714, "Firenze Duomo"),  # Tuscany — keep
+        _feature(4.531295, 44.212044, "France"),      # France — drop
+    ]}
+    client = make_client([make_result(structured=fc)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
+    assert out["count"] == 1
+    assert out["features"][0]["properties"]["address"] == "Firenze Duomo"
+    _, sent = client.calls[0]
+    assert sent["excludePOI"] is False  # forced so landmarks are findable
+
+
+async def test_exec_tool_geocode_no_tuscan_match_errors(make_client, make_result):
+    fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
+    client = make_client([make_result(structured=fc)])
+    out = await exec_tool(client, "address_search_location", {"search": "nowhere"})
+    assert "error" in out and "no Tuscany-area match" in out["error"]
+
+
 async def test_exec_tool_passthrough_strips_auth(make_client, make_result):
     client = make_client([make_result(structured={"agencies": [{"uri": "u"}]})])
     out = await exec_tool(client, "tpl_agencies", {"authentication": "secret"})

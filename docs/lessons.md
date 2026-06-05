@@ -20,4 +20,6 @@ L8 referente 的**车在中心步行街** (Florence ZTL Duomo→Santa Croce car)
 
 L9 JupyterHub 默认 kernel = Python 3.9, 太老装不了 fastmcp (要 ≥3.10), `pip install fastmcp` 报误导性的 "no matching distribution"。建 conda 3.11 env + ipykernel (`s4c`)。git 可用, uv 通常没装 (用 pip/conda)。
 
+L11 km4city geocoder **不再 region-locked** (索引现含 Valencia/ES + 法国南部), `address_search_location("...Firenze")` 可返 100 条全西班牙/法国命中、零托斯卡纳。叠加 `excludePOI` 默认 `true` 把"Piazza del Duomo"(广场=POI)滤掉 → 只剩模糊街道匹配落到西班牙。schema 无地理约束参数。修复 ([mcp_tools.exec_tool](../src/snap4city_mobility_mcp/mcp_tools.py)): 强制 `excludePOI=false` (让地标可被找到) + 客户端按 `TUSCANY_BBOX` (lng 9.6–12.5, lat 42.2–44.5) 过滤 feature, 保留 score 序; 区内空 → 返 `{error}` 给 agent 重试。另: Llama4 偶把多 tool call 写成 `;` 分隔裸 pythonic 文本 (`fn(); fn()`), `_parse_pythonic_calls` 原只认 `[...]`/单调用 → 漏成最终答案; 已加 exec-mode 解析多语句。
+
 L10 Llama4 旧 endpoint `llama4-inference` 即使 auth 成功 (200) 也返 `{"message":"Rule not found..."}` (~0.1-0.3s) — auth ≠ inference 授权。用 OpenAI 兼容的 agentic endpoint `llama4-agentic-inference` ([llm.py](../src/snap4city_mobility_mcp/llm.py) 默认), 顺带解锁原生 tool calling。响应是 OpenAI `{choices:[{message:{content,tool_calls}}]}`。

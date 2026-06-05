@@ -164,6 +164,20 @@ def test_parse_pythonic_two_calls():
     assert json.loads(fn0["arguments"]) == {"search": "Duomo", "excludePOI": False, "lang": "en"}
 
 
+def test_parse_pythonic_semicolon_separated_calls():
+    """Llama4 sometimes emits bare ';'-separated calls instead of a '[...]' list."""
+    content = (
+        'address_search_location(search="Piazza del Duomo, Firenze"); '
+        'address_search_location(search="Santa Croce, Firenze")'
+    )
+    calls = llm_mod._parse_pythonic_calls(content)
+    assert [c["function"]["name"] for c in calls] == [
+        "address_search_location",
+        "address_search_location",
+    ]
+    assert json.loads(calls[1]["function"]["arguments"]) == {"search": "Santa Croce, Firenze"}
+
+
 def test_parse_pythonic_single_call_and_numbers():
     calls = llm_mod._parse_pythonic_calls('routing(startlatitude=43.77, routetype="car")')
     assert len(calls) == 1

@@ -144,20 +144,32 @@ def _literal(node: ast.AST) -> Any:
 
 
 def _parse_pythonic_calls(content: str) -> list[dict[str, Any]]:
-    """Parse '[fn(kw=val, ...), ...]' (or a single 'fn(...)') into OpenAI tool_calls."""
+    """Parse pythonic tool calls into OpenAI tool_calls. Accepts the list form
+    '[fn(kw=val, ...), ...]', a single 'fn(...)', and several bare calls separated
+    by ';' or newlines ('fn(...); fn(...)') — Llama4 emits all of these."""
     text = content.strip()
     if "<|python_start|>" in text:
         text = text.split("<|python_start|>", 1)[1].split("<|python_end|>", 1)[0].strip()
-    if not text.startswith("["):
+    if text.startswith("["):
+        # List form: a single eval expression whose body is the call list.
+        try:
+            body = ast.parse(text, mode="eval").body
+        except SyntaxError:
+            return []
+        nodes = body.elts if isinstance(body, ast.List) else [body]
+    else:
+        # Bare form: one or more `fn(...)` statements (';'- or newline-separated).
         if "(" not in text or not text.endswith(")"):
             return []
-        text = f"[{text}]"
-    try:
-        tree = ast.parse(text, mode="eval")
-    except SyntaxError:
-        return []
-    body = tree.body
-    nodes = body.elts if isinstance(body, ast.List) else [body]
+        try:
+            module = ast.parse(text, mode="exec")
+        except SyntaxError:
+            return []
+        nodes = []
+        for stmt in module.body:
+            if not isinstance(stmt, ast.Expr):  # a non-expression stmt → not a call list
+                return []
+            nodes.append(stmt.value)
     calls: list[dict[str, Any]] = []
     for i, node in enumerate(nodes):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):

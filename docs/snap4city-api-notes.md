@@ -53,7 +53,9 @@ Without `excludePOI=true`, `/location/?search=...` matches against POI / service
 
 ### Behaviour with noisy or out-of-region input is inconsistent
 
-- `Stazione Termini, Roma` (clean input) → returned `Biblioteca del Club Alpino Italiano - Sezione E. Bertini` at `(43.8809, 11.0957)`, in Tuscany. The API's index does not cover Lazio; out-of-region queries fall back to a fuzzy in-region match. **Conclusion: the deployment is region-locked to Tuscany.**
+- `Stazione Termini, Roma` (clean input) → returned `Biblioteca del Club Alpino Italiano - Sezione E. Bertini` at `(43.8809, 11.0957)`, in Tuscany. The API's index does not cover Lazio; out-of-region queries fall back to a fuzzy in-region match. ~~**Conclusion: the deployment is region-locked to Tuscany.**~~
+
+> **CORRECTION (2026-06-04, see lesson L11):** the region-lock NO LONGER holds. The current referente `address_search_location` backend indexes Valencia (ES) and southern France too — `"Piazza del Duomo, Firenze"` now returns 100 Spanish/French hits and zero Tuscan. The advisor pins results to a Tuscany bbox client-side ([mcp_tools._filter_geocode_to_tuscany](../src/snap4city_mobility_mcp/mcp_tools.py)) and forces `excludePOI=false`. Do not rely on an implicit region lock anywhere.
 - `asdfasdfasdf` (clean input) → **HTTP 500 server error**: `Server error '500 ' for url '.../location/?search=asdfasdfasdf&maxResults=1'`. Pure-noise input is not handled gracefully; the API blows up rather than returning an empty FeatureCollection.
 - `asdfasdfasdf` wrapped in a JSON-shaped string (earlier contaminated test) → returned `CLAUS TATTOO DI CLAUDIO CARLO ANDRESSI`. Behaviour clearly depends on whether the tokenizer can extract anything to match.
 
