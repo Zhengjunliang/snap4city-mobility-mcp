@@ -171,9 +171,11 @@ async def test_respond_uses_llm_answer(make_llm):
     out = await respond(state, llm=llm)
     final = out["final"]
     assert final["ok"] is True
-    assert "1.83 km" in final["answer"]
+    assert "answer" not in final  # reply lives in messages[-1], not a custom field
+    reply = final["messages"][-1]
+    assert reply["role"] == "assistant"
+    assert "1.83 km" in reply["content"]
     assert final["data"]["distance_km"] == 1.83
-    assert final["messages"][-1] == {"role": "assistant", "content": final["answer"]}
 
 
 async def test_respond_falls_back_to_template_on_llm_error():
@@ -184,15 +186,16 @@ async def test_respond_falls_back_to_template_on_llm_error():
         "unsupported": False,
     }
     out = await respond(state, llm=_RaisingLLM())
-    assert out["final"]["answer"].startswith("📍")
-    assert "1.83 km" in out["final"]["answer"]
+    reply = out["final"]["messages"][-1]["content"]
+    assert reply.startswith("📍")
+    assert "1.83 km" in reply
 
 
 async def test_respond_unsupported_template_on_llm_error():
     state = {"intent": "other", "messages": [{"role": "user", "content": "hi"}],
              "tool_results": [], "unsupported": True}
     out = await respond(state, llm=_RaisingLLM())
-    assert "point-to-point" in out["final"]["answer"]
+    assert "point-to-point" in out["final"]["messages"][-1]["content"]
 
 
 # --- _template_answer --------------------------------------------------------

@@ -14,9 +14,6 @@ dependencies = [
     "requests>=2.31",
 ]
 
-[project.scripts]
-snap4city-mobility-cli = "snap4city_mobility_mcp.cli:main"
-
 [tool.ruff.lint.per-file-ignores]
 # token_manager.py is vendored verbatim from referente's reference notebook —
 # keep it lint-exempt so upstream updates drop in without re-applying fixes.
@@ -29,6 +26,11 @@ asyncio_mode = "auto"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+]
+# Chat UI for multi-turn testing on the JupyterHub (chainlit_app.py). Pulls a heavy
+# transitive tree (fastapi/uvicorn) — kept out of the core `dependencies`.
+ui = [
+    "chainlit>=1.3",
 ]
 
 [build-system]

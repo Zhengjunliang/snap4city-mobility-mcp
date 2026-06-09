@@ -6,8 +6,8 @@ import sys
 
 
 def _log(message: str) -> None:
-    """TokenManager diagnostics go to stderr, keeping stdout clean for the CLI's
-    JSON output — so `snap4city-mobility-cli --json ... > out.txt` is parseable."""
+    """TokenManager diagnostics go to stderr, keeping stdout clean for callers that
+    parse JSON output (the orchestrator / chat UI)."""
     print(message, file=sys.stderr)
 
 

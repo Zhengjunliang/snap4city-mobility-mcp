@@ -33,6 +33,5 @@ clearml_config.json
 .omc/
 .claude/
 
-# Ad-hoc CLI debug dumps (e.g. `cli ... > outputs4c,txt`)
+# Chainlit full-output audit dumps (chainlit_app.py writes outputs.txt per turn)
 outputs*.txt
-outputs*,txt

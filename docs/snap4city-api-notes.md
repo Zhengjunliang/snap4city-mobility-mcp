@@ -237,7 +237,7 @@ message_version, response, journey
 - `journey.source_node` / `journey.destination_node`: `{lat, lon, node_id}` (OSM node id)
 - `journey.search_max_feet_km` / `journey.search_route_type` / `journey.start_datetime` (ISO with Z)
 
-The advisor's `format_widget` surfaces `routes[0].{wkt, distance, eta, time, arc}` into the widget `data` (full WKT, not truncated) via [orchestrator._extract_data](../src/snap4city_mobility_mcp/orchestrator.py).
+The advisor's `respond` node surfaces `routes[0].{wkt, distance, eta, time}` (+ source/destination_node) into the widget `data` (full WKT, not truncated) via [orchestrator._extract_data](../src/snap4city_mobility_mcp/orchestrator.py). `arc` (per-segment detail) is currently commented out there to slim the payload — re-enable if the dashboard widget needs it.
 
 ### Failure shapes observed in the wild
 

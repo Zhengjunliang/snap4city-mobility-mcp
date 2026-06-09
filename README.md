@@ -2,7 +2,7 @@
 
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip or public-transport question → a Langgraph agentic graph drives the Snap4City **Llama4** LLM to call the remote MCP server's tools (geocoding, routing, public transport) → returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + CLI glue**.
+User asks a trip question → a Langgraph **deterministic** graph (`understand → execute → respond`) resolves it: the Snap4City **Llama4** LLM only extracts the request slots (origin/destination/mode) and phrases the final answer, while Python deterministically drives the remote MCP server's tools (geocoding, routing) — the LLM never free-calls tools. Returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + a Chainlit chat UI for testing**.
 
 ---
 
@@ -77,7 +77,7 @@ uv sync
 ### Option A — Don't activate (recommended for newcomers to `uv`)
 
 ```powershell
-PS D:\...\snap4city-mobility-mcp> uv run snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
+PS D:\...\snap4city-mobility-mcp> uv run chainlit run chainlit_app.py
 PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
 ```
 
@@ -88,13 +88,13 @@ Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
 ```powershell
 # PowerShell
 PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
+(.venv) PS D:\...\snap4city-mobility-mcp> chainlit run chainlit_app.py
 ```
 
 ```cmd
 :: Windows cmd.exe
 D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
+(.venv) D:\...\snap4city-mobility-mcp> chainlit run chainlit_app.py
 ```
 
 The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
@@ -123,38 +123,41 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
    ```
    Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 
-### Mobility advisor CLI
+### Mobility advisor chat UI (Chainlit)
 
-`snap4city-mobility-cli` is the project's user-facing entry point — it runs the agentic advisor (a natural-language question in, widget JSON out). Internally a Langgraph graph `understand → agent ⇄ tools → format` lets Llama4 decide which of the remote `snap4agentic_advisor_native` tools to call (geocoding, routing, public-transport), executed deterministically over HTTP Streamable transport.
+`chainlit_app.py` is the project's testing front end — a persistent multi-turn web chat over the advisor. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
+
+Install the UI deps (a separate dependency group — Chainlit's tree is not in the core deps) and run:
 
 ```bash
-# One-shot: pass the question as arguments
-snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
+uv sync --group ui
+uv run chainlit run chainlit_app.py --host 0.0.0.0 --port 8501
+```
 
-# Interactive multi-turn REPL: no arguments, then type questions
-snap4city-mobility-cli
+On the JupyterHub, Chainlit serves a web app — open the JupyterHub URL with `/proxy/8501/` appended (needs `jupyter-server-proxy`, usually preinstalled; otherwise `pip install jupyter-server-proxy`). Port `8501` is chosen to avoid clashing with the MCP dashboard's `:8000`. Then chat:
+
+```
 > how do I get from Piazza Duomo to Santa Croce on foot?
 > 那坐公交呢?          # follow-up reuses the previous origin/destination
 ```
 
-Output shape:
+The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline. That JSON is the widget payload the dashboard consumes:
 
 ```json
 {
   "ok": true,
   "intent": "route",
-  "answer": "On foot it's about 0.68 km, ETA ~10 min ...",
   "data": {
     "wkt": "LINESTRING(11.255 43.773, ...)",   // FULL geometry — map widget draws this
-    "distance_km": 0.679, "eta": "HH:MM:SS", "duration": "00:10:00", "arcs": [ ... ]
+    "distance_km": 0.679, "eta": "HH:MM:SS", "duration": "00:10:00"
   },
-  "messages": [ ... updated conversation, pass back as history for multi-turn ... ]
+  "messages": [ ... updated conversation; LAST assistant turn = the reply text ... ]
 }
 ```
 
-`data` is intent-specific: a route carries the full `wkt` LINESTRING + distance + ETA; transport queries (`tpl_lines` / `tpl_routes` / `tpl_stops` / `tpl_timeline`) carry the relevant list. `answer` is always the LLM's natural-language reply.
+The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (Chainlit keeps it in the session). Transport (tpl_*) queries are not wired yet — they return an "unsupported" reply.
 
-> **Note**: after this CLI / `[project.scripts]` change, the first call should be `uv run snap4city-mobility-cli ...` (or `uv pip install -e .` once) so the launcher stub regenerates — see `docs/lessons.md` L4. The LLM only answers from the JupyterHub (a `user_credentials.json` present).
+> **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
 
 ---
 
@@ -166,6 +169,7 @@ snap4city-mobility-mcp/
 ├── uv.lock                     # exact-version lockfile (committed)
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
+├── chainlit_app.py             # Chainlit multi-turn chat UI for testing (writes full JSON to outputs.txt)
 ├── docs/
 │   ├── next-phase.md           # running plan (phase tracking)
 │   ├── lessons.md              # architectural traps (km4city / runtime)
@@ -175,10 +179,9 @@ snap4city-mobility-mcp/
     └── snap4city_mobility_mcp/    # client-only package — MCP server itself is referente-managed (remote)
         ├── __init__.py            # package version only
         ├── mcp_tools.py           # client MCP layer: Client config, fetch_tool_schemas (from server list_tools), routing_with_retry, exec_tool
-        ├── orchestrator.py        # agentic Langgraph graph: understand → agent ⇄ tools → format; run_advisor
+        ├── orchestrator.py        # deterministic Langgraph graph: understand → execute → respond; run_advisor
         ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
-        ├── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
-        └── cli.py                 # console-script entry for snap4city-mobility-cli (multi-turn REPL + one-shot)
+        └── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
 ```
 
 ---
@@ -203,7 +206,7 @@ asyncio.run(main())
 "
 ```
 
-Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor exposes **7 of these tools** to the LLM (`address_search_location`, `routing`, `tpl_agencies`, `tpl_lines`, `tpl_routes_by_line`, `tpl_stops_by_route`, `tpl_stop_timeline`); the model chains them (geocode → routing for a trip; `tpl_agencies → … → tpl_stop_timeline` for transport), and `mcp_tools.exec_tool` executes each call deterministically.
+Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The client fetches schemas for **7 of these tools** (`address_search_location`, `routing`, `tpl_agencies`, `tpl_lines`, `tpl_routes_by_line`, `tpl_stops_by_route`, `tpl_stop_timeline`); the deterministic `execute` node chains them in Python (geocode → geocode → routing for a trip — the LLM does not pick tools), and `mcp_tools.exec_tool` executes each call. The `tpl_*` discovery chain is not wired into `execute` yet.
 
 ---
 
@@ -216,11 +219,12 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
   curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
   ```
   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
-- [ ] End-to-end advisor check via CLI (JupyterHub — drives the LLM + remote MCP server):
+- [ ] End-to-end advisor check via the chat UI (JupyterHub — drives the LLM + remote MCP server):
   ```bash
-  snap4city-mobility-cli "from Piazza Duomo to Santa Croce on foot"
+  uv run chainlit run chainlit_app.py --host 0.0.0.0 --port 8501
+  # open <JupyterHub URL>/proxy/8501/, ask "from Piazza Duomo to Santa Croce on foot"
   ```
-  Expected: `ok=true`, `intent="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `ok=true` but `data.route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
+  Expected (see `outputs.txt`): `ok=true`, `intent="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `ok=true` but `data.route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
 
 ---
 
@@ -229,7 +233,8 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 | Symptom | Cause / Fix |
 |---|---|
 | `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
-| `'snap4city-mobility-cli' is not recognized` after editing `pyproject.toml [project.scripts]` | The launcher binary in `.venv\Scripts\` was not regenerated. Run `uv pip install -e .` once to re-create it (or just `uv run snap4city-mobility-cli ...` — `uv run` auto-syncs and rebuilds the editable wheel on first call after a `pyproject.toml` change). Pure source-code edits don't need a re-install; only `[project.scripts]` additions/changes do. |
+| `chainlit: command not found` | The `ui` dependency group is not installed. Run `uv sync --group ui` (or `uv run --group ui chainlit run chainlit_app.py ...`). |
+| Chainlit starts but the browser can't reach it on the JupyterHub | Chainlit serves a web app; open `<JupyterHub URL>/proxy/8501/` (needs `jupyter-server-proxy`, `pip install jupyter-server-proxy` if missing). Make sure you passed `--host 0.0.0.0 --port 8501`. |
 | `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | 不在 JupyterHub 内网跑 (内网 IP 只能从 JupyterHub 直连), 或 dashboard 那头挂了。确认在 JupyterHub terminal/notebook 里跑, 且 `S4C_DASHBOARD_URL` 没被设成别的地址。 |
 | `routing failed: empty body (L3 stale didn't clear after retry)` 在 `car` 路径 (尤其中心步行街 Duomo→Santa Croce) | **referente 的 routing wrapper 已知 bug** (lesson L8): km4city 内部对 ZTL 区 car 返 `-2` 没被 wrapper 透传, 反吃成空 body。重试也不愈 (区别 transient L3)。换 `foot_shortest` / `foot_quiet` 走人行可绕过, 或等 referente 修。 |
 | `routing failed: successful (code=0)` | 历史 bug (Phase 5 §2 R4 retest 时踩过), 现已修复; 见 lesson L7。如果仍出现说明代码回退了。 |

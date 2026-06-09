@@ -244,7 +244,8 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                     "distance_km": first.get("distance"),
                     "eta": first.get("eta"),
                     "duration": first.get("time"),
-                    "arcs": first.get("arc"),
+                    # "arcs": first.get("arc"),  # per-segment detail hidden — bloats payload
+                    # ~90%; re-enable once referente confirms the dashboard widget needs it.
                     "source_node": journey.get("source_node"),
                     "destination_node": journey.get("destination_node"),
                 }
@@ -322,13 +323,15 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
         answer = _template_answer(intent, data, unsupported=unsupported)
 
     messages.append({"role": "assistant", "content": answer})
+    # Widget JSON: the reply lives in `messages[-1].content` (OpenAI-standard) — no
+    # custom top-level `answer` field. `data` is the route payload; `messages` is the
+    # multi-turn history to pass back.
     return {
         "final": {
             "ok": True,
             "intent": intent,
-            "answer": answer,
             "data": data,
-            "messages": messages,  # updated history for multi-turn
+            "messages": messages,  # updated history for multi-turn (last turn = the reply)
         }
     }
 
