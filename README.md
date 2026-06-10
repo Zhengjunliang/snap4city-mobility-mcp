@@ -2,7 +2,7 @@
 
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip question → a Langgraph **deterministic** graph (`understand → execute → respond`) resolves it: the Snap4City **Llama4** LLM only extracts the request slots (origin/destination/mode) and phrases the final answer, while Python deterministically drives the remote MCP server's tools (geocoding, routing) — the LLM never free-calls tools. Returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + a Chainlit chat UI for testing**.
+User asks a trip question → a Langgraph **deterministic** graph (`understand → execute → respond`) resolves it: the Snap4City **Llama4** LLM only extracts the request slots (origin/destination/mode) and phrases the final answer, while Python deterministically drives the remote MCP server's tools (geocoding, routing) — the LLM never free-calls tools. Returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + a terminal chat REPL (`chat.py`) for testing**.
 
 ---
 
@@ -77,7 +77,7 @@ uv sync
 ### Option A — Don't activate (recommended for newcomers to `uv`)
 
 ```powershell
-PS D:\...\snap4city-mobility-mcp> uv run chainlit run chainlit_app.py
+PS D:\...\snap4city-mobility-mcp> uv run python chat.py
 PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
 ```
 
@@ -88,13 +88,13 @@ Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
 ```powershell
 # PowerShell
 PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> chainlit run chainlit_app.py
+(.venv) PS D:\...\snap4city-mobility-mcp> python chat.py
 ```
 
 ```cmd
 :: Windows cmd.exe
 D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> chainlit run chainlit_app.py
+(.venv) D:\...\snap4city-mobility-mcp> python chat.py
 ```
 
 The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
@@ -123,22 +123,22 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
    ```
    Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 
-### Mobility advisor chat UI (Chainlit)
+### Mobility advisor terminal chat (`chat.py`)
 
-`chainlit_app.py` is the project's testing front end — a persistent multi-turn web chat over the advisor. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
+`chat.py` is the project's testing front end — an interactive multi-turn terminal chat over the advisor. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
 
-Install the UI deps (a separate dependency group — Chainlit's tree is not in the core deps) and run:
+Run it on the JupyterHub (a plain terminal program — no web server, no proxy; see `docs/lessons.md` L14 for why a terminal REPL over a web UI here):
 
 ```bash
-uv sync --group ui
-uv run chainlit run chainlit_app.py --host 0.0.0.0 --port 8501
+python chat.py
 ```
 
-On the JupyterHub, Chainlit serves a web app — open the JupyterHub URL with `/proxy/8501/` appended (needs `jupyter-server-proxy`, usually preinstalled; otherwise `pip install jupyter-server-proxy`). Port `8501` is chosen to avoid clashing with the MCP dashboard's `:8000`. Then chat:
+Then chat — type a question, get the reply, keep going (empty line quits):
 
 ```
-> how do I get from Piazza Duomo to Santa Croce on foot?
-> 那坐公交呢?          # follow-up reuses the previous origin/destination
+🧑 > how do I get from Piazza Duomo to Santa Croce on foot?
+🤖 ...
+🧑 > 那坐公交呢?          # follow-up reuses the previous origin/destination
 ```
 
 The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline. That JSON is the widget payload the dashboard consumes:
@@ -155,7 +155,7 @@ The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also
 }
 ```
 
-The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (Chainlit keeps it in the session). Transport (tpl_*) queries are not wired yet — they return an "unsupported" reply.
+The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (`chat.py` keeps it in memory across turns). Transport (tpl_*) queries are not wired yet — they return an "unsupported" reply.
 
 > **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
 
@@ -169,7 +169,7 @@ snap4city-mobility-mcp/
 ├── uv.lock                     # exact-version lockfile (committed)
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
-├── chainlit_app.py             # Chainlit multi-turn chat UI for testing (writes full JSON to outputs.txt)
+├── chat.py                     # terminal multi-turn chat REPL for testing (writes full JSON to outputs.txt)
 ├── docs/
 │   ├── next-phase.md           # running plan (phase tracking)
 │   ├── lessons.md              # architectural traps (km4city / runtime)
@@ -221,8 +221,8 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 - [ ] End-to-end advisor check via the chat UI (JupyterHub — drives the LLM + remote MCP server):
   ```bash
-  uv run chainlit run chainlit_app.py --host 0.0.0.0 --port 8501
-  # open <JupyterHub URL>/proxy/8501/, ask "from Piazza Duomo to Santa Croce on foot"
+  python chat.py
+  # then ask "from Piazza Duomo to Santa Croce on foot"
   ```
   Expected (see `outputs.txt`): `ok=true`, `intent="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `ok=true` but `data.route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
 
@@ -233,8 +233,8 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 | Symptom | Cause / Fix |
 |---|---|
 | `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
-| `chainlit: command not found` | The `ui` dependency group is not installed. Run `uv sync --group ui` (or `uv run --group ui chainlit run chainlit_app.py ...`). |
-| Chainlit starts but the browser can't reach it on the JupyterHub | Chainlit serves a web app; open `<JupyterHub URL>/proxy/8501/` (needs `jupyter-server-proxy`, `pip install jupyter-server-proxy` if missing). Make sure you passed `--host 0.0.0.0 --port 8501`. |
+| `python chat.py` → `ModuleNotFoundError: snap4city_mobility_mcp` | The package isn't installed in the active env. Run `pip install -e .` (inside the `s4c` conda env on the JupyterHub) or `uv run python chat.py` locally. |
+| `python chat.py` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
 | `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | 不在 JupyterHub 内网跑 (内网 IP 只能从 JupyterHub 直连), 或 dashboard 那头挂了。确认在 JupyterHub terminal/notebook 里跑, 且 `S4C_DASHBOARD_URL` 没被设成别的地址。 |
 | `routing failed: empty body (L3 stale didn't clear after retry)` 在 `car` 路径 (尤其中心步行街 Duomo→Santa Croce) | **referente 的 routing wrapper 已知 bug** (lesson L8): km4city 内部对 ZTL 区 car 返 `-2` 没被 wrapper 透传, 反吃成空 body。重试也不愈 (区别 transient L3)。换 `foot_shortest` / `foot_quiet` 走人行可绕过, 或等 referente 修。 |
 | `routing failed: successful (code=0)` | 历史 bug (Phase 5 §2 R4 retest 时踩过), 现已修复; 见 lesson L7。如果仍出现说明代码回退了。 |

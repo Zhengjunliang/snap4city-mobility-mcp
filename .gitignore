@@ -33,5 +33,5 @@ clearml_config.json
 .omc/
 .claude/
 
-# Chainlit full-output audit dumps (chainlit_app.py writes outputs.txt per turn)
+# Full-output audit dumps (chat.py writes outputs.txt per turn)
 outputs*.txt
