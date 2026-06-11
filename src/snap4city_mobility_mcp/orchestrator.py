@@ -116,9 +116,14 @@ the leg fields given — never invent line numbers, stop names, or times.
 - If RESULTS holds an error, explain it simply and suggest a sensible alternative \
 (another travel mode, a more precise address). When geocoded addresses are present, \
 mention how you interpreted the origin/destination so the user can spot a wrong match.
-- When a CAR route fails (routetype "car" with "no route found" or an empty routing \
-response), the destination is often inside Florence's pedestrian/ZTL area — suggest \
-going on foot or by public transport.
+- When RESULTS' route error is "no route found (empty routes list)" for a CAR route, \
+the destination is often inside Florence's pedestrian/ZTL area — suggest going on \
+foot or by public transport.
+- When RESULTS' route error mentions "empty response from routing service" (any \
+travel mode), the routing service did not return a result for that mode (a \
+service-side problem), NOT necessarily a ZTL/pedestrian restriction — do NOT claim \
+the destination is in a ZTL/pedestrian zone. Suggest trying on foot (walking routes \
+are available) or trying again later.
 - If RESULTS has status "missing_place", ask the user for the field(s) listed in \
 `missing` (the origin/destination of a trip, or the line/stop of a public-transport \
 question) — do NOT say the request is unsupported.

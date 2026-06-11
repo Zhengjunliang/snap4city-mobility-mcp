@@ -5,6 +5,7 @@ from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
+    RESPOND_SYSTEM,
     _build_graph,
     _extract_data,
     _pick_coord,
@@ -480,6 +481,18 @@ def test_template_answer_route():
 
 def test_template_answer_route_error():
     assert _template_answer("route", {"route_error": "no route"}, unsupported=False) == "⚠ no route"
+
+
+def test_respond_system_separates_service_error_from_ztl():
+    """L19: the L8 bare {"error":""} (car/PT broken server-side) must NOT be narrated as a
+    ZTL/pedestrian restriction — that misled the user and the referente (a drivable, non-ZTL
+    destination got blamed on a ZTL). ZTL phrasing is reserved for the genuine L2 empty-routes
+    error string. Both error strings appear in the prompt, and the service-side one is tied to
+    an explicit 'do NOT claim ZTL' instruction."""
+    assert "empty response from routing service" in RESPOND_SYSTEM
+    assert "no route found (empty routes list)" in RESPOND_SYSTEM
+    idx = RESPOND_SYSTEM.index("empty response from routing service")
+    assert "do NOT claim" in RESPOND_SYSTEM[idx:idx + 400]
 
 
 def test_template_answer_unsupported():
