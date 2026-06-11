@@ -28,8 +28,6 @@ Llama4 client in llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 """
 import json
 import logging
-import re
-import unicodedata
 from functools import partial
 from typing import Any, TypedDict
 
@@ -44,6 +42,7 @@ from snap4city_mobility_mcp.llm import (
 )
 from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
+    _label_tokens,
     exec_tool,
     slim_result_for_llm,
 )
@@ -59,6 +58,9 @@ Rules:
 did not give). Never drop the destination when the user named one.
 - Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
 coordinates — a separate tool geocodes places.
+- Keep a city/town the user names attached to the place text ("da piazza Duomo \
+a piazza Dalmazia in Firenze" → origin_text="piazza Duomo, Firenze", \
+destination_text="piazza Dalmazia, Firenze"); NEVER add a city the user did not say.
 - Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
 request — they never change the slots. E.g. "ciao, voglio andare da stazione di \
 Rifredi a piazza Dalmazia a piedi" → intent="route", origin_text="stazione di \
@@ -175,21 +177,6 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
     return {"slots": slots, "intent": slots.get("intent", "other")}
 
 
-# Italian function words carry no signal when matching a feature label against the
-# user's place text ("Piazza del Duomo" ↔ "PIAZZA DUOMO").
-_LABEL_STOPWORDS = frozenset(
-    "di del dell della dello dei degli delle da de la il lo le li gli l d e a i in".split()
-)
-
-
-def _label_tokens(text: str) -> set[str]:
-    """Accent-stripped, casefolded word tokens minus Italian function words."""
-    flat = "".join(
-        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
-    )
-    return {t for t in re.findall(r"\w+", flat.casefold()) if t not in _LABEL_STOPWORDS}
-
-
 def _pick_coord(geocode: Any, search: str) -> list[float] | None:
     """Best feature's `[lng, lat]` for `search` from an `address_search_location`
     result, or None.
@@ -281,7 +268,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
 
     mode = slots.get("mode") or "foot_shortest"
 
-    async def _route(routetype: str) -> dict[str, Any]:
+    async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
         # GeoJSON coordinate order is [longitude, latitude].
         args = {
             "startlatitude": origin[1],
@@ -290,7 +277,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
             "endlongitude": dest[0],
             "routetype": routetype,
         }
-        result = await exec_tool(client, "routing", args)
+        result = await exec_tool(client, "routing", args, routing_attempts=attempts)
         results.append({"name": "routing", "args": json.dumps(args), "result": result})
         if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
             logger.debug(
@@ -302,7 +289,10 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
 
     routed = await _route(mode)
     if isinstance(routed, dict) and "error" in routed and mode in _FOOT_FALLBACK:
-        await _route(_FOOT_FALLBACK[mode])  # deterministic walking-profile fallback
+        # Deterministic walking-profile fallback, single shot: the requested profile
+        # already burned the full L3 stale ladder (~27 s), so the transient is ruled
+        # out — this only probes the other foot graph path.
+        await _route(_FOOT_FALLBACK[mode], attempts=1)
 
     return {"tool_results": results, "unsupported": False}
 

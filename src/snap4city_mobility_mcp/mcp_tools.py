@@ -23,6 +23,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import unicodedata
 from typing import Any, Literal
 
 import httpx
@@ -143,14 +145,20 @@ def _looks_stale(data: dict[str, Any]) -> bool:
     return not isinstance(data.get("journey"), dict)
 
 
-async def routing_with_retry(client: Client, args: dict[str, Any]) -> dict[str, Any]:
+async def routing_with_retry(
+    client: Client, args: dict[str, Any], *, attempts: int | None = None
+) -> dict[str, Any]:
     """km4city routing with L3 stale retry + L2/L7/L8 envelope checks.
 
     args = {startlatitude, startlongitude, endlatitude, endlongitude, routetype, [startdatetime]}.
     Returns {"journey": {...}} on success or {"error": "<msg>"} on any failure shape.
+    `attempts` overrides the L3 stale ladder — the foot-profile fallback probe
+    passes 1, since the requested profile's full ladder already ruled the
+    transient out (each failing attempt costs ~5 s call + 6 s delay).
     """
     # First attempt + bounded retries for L3 short-window stale (referente cold-start quirk).
-    attempts = ROUTING_STALE_RETRIES + 1
+    if attempts is None:
+        attempts = ROUTING_STALE_RETRIES + 1
     res = await _call_routing_once(client, args)
     for attempt in range(1, attempts):
         if "error" in res:
@@ -214,6 +222,48 @@ def _in_tuscany(coords: Any) -> bool:
     )
 
 
+# Italian function words carry no signal when matching a feature label or city
+# against the user's place text ("Piazza del Duomo" ↔ "PIAZZA DUOMO").
+_LABEL_STOPWORDS = frozenset(
+    "di del dell della dello dei degli delle da de la il lo le li gli l d e a i in".split()
+)
+
+
+def _label_tokens(text: str) -> set[str]:
+    """Accent-stripped, casefolded word tokens minus Italian function words."""
+    flat = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
+    return {t for t in re.findall(r"\w+", flat.casefold()) if t not in _LABEL_STOPWORDS}
+
+
+# The advisor is Florence-centric (UNDERSTAND_SYSTEM in orchestrator.py): a bare
+# "Piazza Duomo" must resolve in Florence even though exact address matches exist
+# in other Tuscan towns (Castelnuovo di Garfagnana, Pietrasanta — L17). A city the
+# user named explicitly always beats the default.
+DEFAULT_CITY_TOKENS = frozenset({"firenze"})
+
+
+def _narrow_by_city(features: list[dict[str, Any]], search: str) -> list[dict[str, Any]] | None:
+    """City-confident subset of `features` (score order kept), or None.
+
+    A feature's city counts as *named* when all its tokens appear in the search
+    text ("via Roma, Pietrasanta"). Named city beats the Florence default; None
+    means no feature belongs to a named city or Florence — the caller decides
+    the fallback (next geocode pass, then the raw in-bbox list).
+    """
+    want = _label_tokens(search)
+
+    def city_toks(f: dict[str, Any]) -> set[str]:
+        return _label_tokens(str((f.get("properties") or {}).get("city") or ""))
+
+    named = [f for f in features if (ct := city_toks(f)) and ct <= want]
+    if named:
+        return named
+    florence = [f for f in features if city_toks(f) == DEFAULT_CITY_TOKENS]
+    return florence or None
+
+
 def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
     """Keep only Tuscany-area features from an `address_search_location` result.
 
@@ -248,31 +298,57 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
 
 
 async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
-    """Two-pass `address_search_location`: addresses first, POIs only as fallback.
+    """Two-pass `address_search_location`: addresses first, POIs as fallback,
+    city-confident hits before anything else.
 
     With POIs included the server ranks fuzzy catalogue hits above the real place
     (L17: "Piazza Duomo" → a company 1.1 km west of the square), while pure address
-    entries (excludePOI=true) sit on the routable street graph. But stations and
-    landmarks exist ONLY in the POI catalogue (L11), so when the address pass has
-    no in-region hit — or errors — retry with POIs included. Both passes are pinned
-    to the Tuscany bbox; only the final outcome surfaces an `{"error": ...}`.
+    entries (excludePOI=true) sit on the routable street graph — but exact address
+    matches exist all over Tuscany ("PIAZZA DUOMO" in Castelnuovo di Garfagnana and
+    Pietrasanta outranked Florence), so a pass only wins outright when it has
+    features in the city the user named (or Florence, the advisor's default).
+    Ladder, all pinned to the Tuscany bbox:
+      1. address pass, named-city/Florence subset
+      2. POI pass, named-city/Florence subset (stations/landmarks are POI-only, L11)
+      3. whole-Tuscany address hits
+      4. whole-Tuscany POI hits / {"error": ...}
     """
     search = str(args.get("search", ""))
+    addresses = None  # rung 3: in-bbox address hits without city confidence
     try:
-        addresses = _filter_geocode_to_tuscany(
+        first = _filter_geocode_to_tuscany(
             _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": True})),
             search,
         )
-        if isinstance(addresses, dict) and addresses.get("type") == "FeatureCollection":
-            logger.debug("geocode %r: address pass hit (excludePOI=true)", search)
-            return addresses
-        logger.debug("geocode %r: address pass empty — falling back to the POI pass", search)
+        if isinstance(first, dict) and first.get("type") == "FeatureCollection":
+            narrowed = _narrow_by_city(first["features"], search)
+            if narrowed is not None:
+                logger.debug("geocode %r: address pass hit (excludePOI=true)", search)
+                return {**first, "features": narrowed, "count": len(narrowed)}
+            addresses = first
+        logger.debug("geocode %r: address pass not city-confident — trying the POI pass", search)
     except Exception as e:
-        logger.debug("geocode %r: address pass failed (%s) — falling back to the POI pass", search, e)
-    # Deliberately NOT wrapped: a POI-pass failure has no further fallback, so it
-    # propagates to exec_tool's outer handler and surfaces as {"error": ...}.
-    payload = _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": False}))
-    return _filter_geocode_to_tuscany(payload, search)
+        logger.debug("geocode %r: address pass failed (%s) — trying the POI pass", search, e)
+    try:
+        pois = _filter_geocode_to_tuscany(
+            _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": False})),
+            search,
+        )
+    except Exception:
+        if addresses is not None:
+            logger.debug("geocode %r: POI pass failed — keeping whole-Tuscany address hits", search)
+            return addresses
+        raise  # no fallback left — surfaces via exec_tool's outer handler as {"error": ...}
+    if isinstance(pois, dict) and pois.get("type") == "FeatureCollection":
+        narrowed = _narrow_by_city(pois["features"], search)
+        if narrowed is not None:
+            logger.debug("geocode %r: POI pass hit", search)
+            return {**pois, "features": narrowed, "count": len(narrowed)}
+        if addresses is not None:
+            logger.debug("geocode %r: no city-confident hit anywhere — keeping whole-Tuscany address hits", search)
+            return addresses
+        return pois
+    return addresses if addresses is not None else pois
 
 
 # Llama4 has a modest context window and degrades (hallucinates, or its backend
@@ -323,11 +399,14 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
     return result
 
 
-async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
+async def exec_tool(
+    client: Client, name: str, args: dict[str, Any], *, routing_attempts: int | None = None
+) -> Any:
     """Execute one tool call by forwarding it to the remote server. NEVER raises —
     returns the payload or {"error": ...}.
 
-    `routing` routes through routing_with_retry (keeps km4city quirk handling);
+    `routing` routes through routing_with_retry (keeps km4city quirk handling;
+    `routing_attempts` caps its stale ladder, see routing_with_retry);
     every other tool passes straight through `client.call_tool` + `_unwrap`.
     `authentication` is stripped (public backend).
     """
@@ -347,7 +426,7 @@ async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
             }
             if clean.get("startdatetime"):
                 route_args["startdatetime"] = clean["startdatetime"]
-            return await routing_with_retry(client, route_args)
+            return await routing_with_retry(client, route_args, attempts=routing_attempts)
 
         if name == "address_search_location":
             return await _geocode_address_first(client, clean)

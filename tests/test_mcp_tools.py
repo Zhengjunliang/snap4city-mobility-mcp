@@ -73,6 +73,14 @@ async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch
     assert len(client.calls) == 3
 
 
+async def test_routing_single_attempt_skips_the_stale_ladder(make_client, make_result):
+    """attempts=1 (foot-fallback probe): one call, no sleeps, straight to the error."""
+    client = make_client([make_result(structured={"error": ""})])
+    out = await routing_with_retry(client, _ROUTE_ARGS, attempts=1)
+    assert "empty response" in out["error"]
+    assert len(client.calls) == 1
+
+
 async def test_routing_stale_recovers_on_first_retry(make_client, make_result, monkeypatch):
     async def _noop(*a, **k):
         return None
@@ -145,9 +153,9 @@ def test_slim_passthrough_errors_and_unknown():
     assert slim_result_for_llm("tpl_agencies", {"agencies": [1, 2]}) == {"agencies": [1, 2]}
 
 
-def _feature(lng, lat, addr="x"):
+def _feature(lng, lat, addr="x", city="FIRENZE"):
     return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
-            "properties": {"address": addr}}
+            "properties": {"address": addr, "city": city}}
 
 
 async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
@@ -189,11 +197,63 @@ async def test_exec_tool_geocode_address_pass_error_falls_back(make_client, make
     assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 
+async def test_exec_tool_geocode_poi_pass_error_keeps_address_hits(make_client, make_result):
+    """Rung 3 must survive a POI-pass blowup: whole-Tuscany address hits beat a
+    network-error result."""
+    addr = {"type": "FeatureCollection", "count": 1, "features": [
+        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
+    ]}
+    client = make_client([make_result(structured=addr), RuntimeError("HTTP 500")])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
+    assert out["features"][0]["properties"]["city"] == "CASTELNUOVO DI GARFAGNANA"
+
+
 async def test_exec_tool_geocode_no_tuscan_match_errors(make_client, make_result):
     fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
     client = make_client([make_result(structured=fc), make_result(structured=fc)])  # both passes miss
     out = await exec_tool(client, "address_search_location", {"search": "nowhere"})
     assert "error" in out and "no Tuscany-area match" in out["error"]
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+
+
+async def test_exec_tool_geocode_named_city_beats_florence_default(make_client, make_result):
+    fc = {"type": "FeatureCollection", "count": 2, "features": [
+        _feature(11.2560, 43.7731, "PIAZZA DEL DUOMO", city="FIRENZE"),
+        _feature(10.2270, 43.9596, "PIAZZA DUOMO", city="PIETRASANTA"),
+    ]}
+    client = make_client([make_result(structured=fc)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo Pietrasanta"})
+    assert out["count"] == 1
+    assert out["features"][0]["properties"]["city"] == "PIETRASANTA"
+
+
+async def test_exec_tool_geocode_wrong_city_addresses_fall_to_poi_pass(make_client, make_result):
+    """Exact address matches in OTHER Tuscan towns must not beat a Florence POI:
+    "Piazza Duomo" once resolved to Castelnuovo di Garfagnana, 90 km away (L17)."""
+    addr = {"type": "FeatureCollection", "count": 1, "features": [
+        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
+    ]}
+    poi = {"type": "FeatureCollection", "count": 1, "features": [
+        _feature(11.2421, 43.7736, None, city="FIRENZE"),
+    ]}
+    client = make_client([make_result(structured=addr), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
+    assert out["features"][0]["properties"]["city"] == "FIRENZE"
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+
+
+async def test_exec_tool_geocode_keeps_address_hits_without_city_confidence(make_client, make_result):
+    """Neither pass has a named-city/Florence feature → whole-Tuscany address hits win
+    over whole-Tuscany POI hits (rung 3 before rung 4)."""
+    addr = {"type": "FeatureCollection", "count": 1, "features": [
+        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
+    ]}
+    poi = {"type": "FeatureCollection", "count": 1, "features": [
+        _feature(10.2270, 43.9596, None, city="PIETRASANTA"),
+    ]}
+    client = make_client([make_result(structured=addr), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
+    assert out["features"][0]["properties"]["city"] == "CASTELNUOVO DI GARFAGNANA"
     assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 

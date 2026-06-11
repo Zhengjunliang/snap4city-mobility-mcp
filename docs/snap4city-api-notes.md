@@ -93,6 +93,12 @@ Run 4 (2026-06-11, via `chat.py` on the JupyterHub, `excludePOI=false` forced + 
 - `via dello Steccuto` (real Florence street) → 100 raw hits, ALL near Maastricht (NL), zero Tuscan → the index covers more than Valencia/France; the bbox filter turned it into the friendly "no Tuscany-area match" error.
 - `routing` foot_shortest/foot_quiet to the Dalmazia point `(43.7956, 11.2402)` → bare `{"error": ""}` from two different origins, 3 attempts each (L8-class stable failure, evidence in `debug.log`), while Duomo-area → Santa Croce succeeded in the same session. Suspected foot-graph coverage/snap problem in the Rifredi/Dalmazia quarter — reported to the referente.
 
+Run 5 (2026-06-11 later, first live run of the two-pass strategy — address pass `excludePOI=true`):
+
+- `Piazza Duomo` → top in-bbox hits are exact `PIAZZA DUOMO` entries in CASTELNUOVO DI GARFAGNANA and PIETRASANTA (90 km away) — same-name squares across Tuscany outrank Florence (whose entry is `PIAZZA DEL DUOMO`, if present in the top-100 at all).
+- `Santa Croce` → 100 × `VIA BENEDETTO CROCE` in SANTA CROCE SULL'ARNO (the municipality name matched, not the Florence basilica).
+- Each failing route then burned the full stale ladder twice (~54 s user-visible). The advisor now narrows results by named city → Florence default → whole Tuscany ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)) and probes the fallback foot profile with a single attempt.
+
 ---
 
 ## §2. `GET /shortestpath` — routing (Stage M2 observations, 2026-05-25)

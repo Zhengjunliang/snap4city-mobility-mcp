@@ -1,6 +1,7 @@
 """Unit tests for the deterministic graph nodes (orchestrator.py)."""
 import json
 
+from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
@@ -241,6 +242,29 @@ async def test_execute_foot_shortest_falls_back_to_foot_quiet(make_client, make_
     assert json.loads(routings[0]["args"])["routetype"] == "foot_shortest"
     assert json.loads(routings[1]["args"])["routetype"] == "foot_quiet"
     assert _extract_data(out["tool_results"])["distance_km"] == 1.83
+
+
+async def test_execute_foot_fallback_is_a_single_probe(make_client, make_result, monkeypatch):
+    """After the requested profile burns its full stale ladder (3 attempts), the
+    fallback profile gets exactly ONE attempt — the transient is already ruled out
+    and each extra attempt costs ~11 s of user-visible latency."""
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
+    stale = {"error": ""}
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=stale),                               # foot_shortest #1
+        make_result(structured=stale),                               # foot_shortest #2
+        make_result(structured=stale),                               # foot_shortest #3
+        make_result(structured=stale),                               # foot_quiet: single probe
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots}, client=client)
+    assert len([n for n, _ in client.calls if n == "routing"]) == 4  # 3 + 1, not 3 + 3
+    assert "route_error" in _extract_data(out["tool_results"])
 
 
 async def test_execute_both_foot_profiles_fail_keeps_requested_mode_error(make_client, make_result):
