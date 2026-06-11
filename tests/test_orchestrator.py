@@ -6,7 +6,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
     _build_graph,
     _extract_data,
-    _first_coord,
+    _pick_coord,
     _results_view,
     _template_answer,
     execute,
@@ -92,16 +92,74 @@ async def test_understand_invalid_args_falls_back(make_llm):
     assert out["intent"] == "other"
 
 
-# --- _first_coord ------------------------------------------------------------
+# --- _pick_coord -------------------------------------------------------------
 
-def test_first_coord_reads_lng_lat():
-    assert _first_coord(_feature_collection(11.25, 43.77)) == [11.25, 43.77]
+def _fc_with_addresses(*entries) -> dict:
+    """FeatureCollection from (lng, lat, address) triples (address may be None)."""
+    return {"type": "FeatureCollection", "features": [
+        {"geometry": {"coordinates": [lng, lat]},
+         "properties": {"address": addr, "city": "FIRENZE"}}
+        for lng, lat, addr in entries
+    ]}
 
 
-def test_first_coord_none_on_error_or_empty():
-    assert _first_coord({"error": "no Tuscany-area match"}) is None
-    assert _first_coord({"type": "FeatureCollection", "features": []}) is None
-    assert _first_coord(None) is None
+def test_pick_coord_reads_lng_lat():
+    assert _pick_coord(_feature_collection(11.25, 43.77), "Duomo") == [11.25, 43.77]
+
+
+def test_pick_coord_none_on_error_or_empty():
+    assert _pick_coord({"error": "no Tuscany-area match"}, "x") is None
+    assert _pick_coord({"type": "FeatureCollection", "features": []}, "x") is None
+    assert _pick_coord(None, "x") is None
+
+
+def test_pick_coord_prefers_address_matching_search():
+    # The server ranks fuzzy POIs above the real square — the address-matched
+    # feature must win even when it ranks last ("piazza Dalmazia" case).
+    fc = _fc_with_addresses(
+        (11.2421, 43.7736, None),
+        (11.2400, 43.7900, None),
+        (11.2402, 43.7956, "PIAZZA DALMAZIA"),
+    )
+    assert _pick_coord(fc, "piazza Dalmazia") == [11.2402, 43.7956]
+
+
+def test_pick_coord_rejects_labels_with_extra_tokens():
+    # "PIAZZA DUOMO DI PRIZIO STEFANO & C. S.A.S." (a company, L17) contains the
+    # search tokens but adds its own → no match; the real square matches even
+    # across case and the Italian function word "del".
+    fc = _fc_with_addresses(
+        (11.2421, 43.7736, "PIAZZA DUOMO DI PRIZIO STEFANO & C. S.A.S."),
+        (11.2560, 43.7731, "PIAZZA DEL DUOMO"),
+    )
+    assert _pick_coord(fc, "Piazza Duomo") == [11.2560, 43.7731]
+
+
+def test_pick_coord_matches_across_accents():
+    fc = _fc_with_addresses(
+        (11.2300, 43.7800, None),
+        (11.2589, 43.7770, "PIAZZA DELL'UNITÀ ITALIANA"),
+    )
+    assert _pick_coord(fc, "piazza dell'Unita Italiana") == [11.2589, 43.7770]
+
+
+def test_pick_coord_never_matches_a_bare_city_label():
+    # A municipality entry (address="FIRENZE") is a subset of any search ending
+    # in ", Firenze" — it must not beat the real street entry.
+    fc = _fc_with_addresses(
+        (11.2000, 43.7700, "FIRENZE"),
+        (11.2560, 43.7731, "PIAZZA DEL DUOMO"),
+    )
+    assert _pick_coord(fc, "Piazza del Duomo, Firenze") == [11.2560, 43.7731]
+
+
+def test_pick_coord_falls_back_to_first_feature():
+    # Station queries: POI features carry no address → the server order stands.
+    fc = _fc_with_addresses(
+        (11.2386, 43.8045, None),
+        (11.2482, 43.8047, None),
+    )
+    assert _pick_coord(fc, "stazione di Firenze Rifredi") == [11.2386, 43.8045]
 
 
 # --- execute -----------------------------------------------------------------
@@ -141,8 +199,9 @@ async def test_execute_missing_place_is_unsupported(make_client):
 
 async def test_execute_geocode_error_skips_routing(make_client, make_result):
     client = make_client([
-        make_result(structured=_feature_collection(-0.37, 39.47)),  # Valencia → filtered out
-        make_result(structured=_feature_collection(11.26, 43.76)),
+        make_result(structured=_feature_collection(-0.37, 39.47)),  # origin, address pass → Valencia
+        make_result(structured=_feature_collection(-0.37, 39.47)),  # origin, POI pass → Valencia again
+        make_result(structured=_feature_collection(11.26, 43.76)),  # dest, address pass → Tuscan hit
     ])
     slots = {"intent": "route", "origin_text": "x", "destination_text": "y", "mode": "car"}
     out = await execute({"slots": slots}, client=client)

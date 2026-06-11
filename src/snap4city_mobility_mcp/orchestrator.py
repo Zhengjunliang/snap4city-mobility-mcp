@@ -28,6 +28,8 @@ Llama4 client in llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 """
 import json
 import logging
+import re
+import unicodedata
 from functools import partial
 from typing import Any, TypedDict
 
@@ -173,18 +175,56 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
     return {"slots": slots, "intent": slots.get("intent", "other")}
 
 
-def _first_coord(geocode: Any) -> list[float] | None:
-    """First feature's `[lng, lat]` from an `address_search_location` result, or None.
+# Italian function words carry no signal when matching a feature label against the
+# user's place text ("Piazza del Duomo" ↔ "PIAZZA DUOMO").
+_LABEL_STOPWORDS = frozenset(
+    "di del dell della dello dei degli delle da de la il lo le li gli l d e a i in".split()
+)
 
-    `exec_tool` already pins the result to Tuscany and returns `{"error": ...}` when
-    nothing matches, so a non-FeatureCollection / empty payload yields None here.
+
+def _label_tokens(text: str) -> set[str]:
+    """Accent-stripped, casefolded word tokens minus Italian function words."""
+    flat = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
+    return {t for t in re.findall(r"\w+", flat.casefold()) if t not in _LABEL_STOPWORDS}
+
+
+def _pick_coord(geocode: Any, search: str) -> list[float] | None:
+    """Best feature's `[lng, lat]` for `search` from an `address_search_location`
+    result, or None.
+
+    The server ranks fuzzy POI hits above the real place (L17: "Piazza Duomo"'s
+    first feature was a company 1.1 km west of the square), so prefer the first
+    feature whose address/name tokens are all covered by the search text — strict
+    on extra tokens, so that company hit never matches. When no label matches
+    (e.g. stations, whose POI features carry no address) the server's first hit
+    stands. `exec_tool` already pins the result to Tuscany and returns
+    `{"error": ...}` when nothing matches, so a non-FeatureCollection / empty
+    payload yields None here.
     """
     if not isinstance(geocode, dict) or "error" in geocode:
         return None
     features = geocode.get("features")
     if not (isinstance(features, list) and features):
         return None
-    coords = (features[0].get("geometry") or {}).get("coordinates")
+    want = _label_tokens(search)
+    idx, best = 0, features[0]
+    if want:
+        for i, f in enumerate(features):
+            props = f.get("properties") or {}
+            label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
+            toks = _label_tokens(label)
+            # A label that is just the municipality ("FIRENZE") would match any
+            # search ending in ", Firenze" — never a useful pick target.
+            if toks and toks <= want and not toks <= _label_tokens(str(props.get("city") or "")):
+                idx, best = i, f
+                break
+    logger.debug(
+        "geocode %r picked feature #%d (address=%r)",
+        search, idx, (best.get("properties") or {}).get("address"),
+    )
+    coords = (best.get("geometry") or {}).get("coordinates")
     if isinstance(coords, (list, tuple)) and len(coords) >= 2:
         lng, lat = coords[0], coords[1]
         if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
@@ -223,7 +263,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         args = {"search": search}
         result = await exec_tool(client, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
-        coord = _first_coord(result)
+        coord = _pick_coord(result, search)
         if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
             # The slim view no longer carries coordinates — log the picked one here.
             logger.debug(

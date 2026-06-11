@@ -55,7 +55,9 @@ Without `excludePOI=true`, `/location/?search=...` matches against POI / service
 
 - `Stazione Termini, Roma` (clean input) → returned `Biblioteca del Club Alpino Italiano - Sezione E. Bertini` at `(43.8809, 11.0957)`, in Tuscany. The API's index does not cover Lazio; out-of-region queries fall back to a fuzzy in-region match. ~~**Conclusion: the deployment is region-locked to Tuscany.**~~
 
-> **CORRECTION (2026-06-04, see lesson L11):** the region-lock NO LONGER holds. The current referente `address_search_location` backend indexes Valencia (ES) and southern France too — `"Piazza del Duomo, Firenze"` now returns 100 Spanish/French hits and zero Tuscan. The advisor pins results to a Tuscany bbox client-side ([mcp_tools._filter_geocode_to_tuscany](../src/snap4city_mobility_mcp/mcp_tools.py)) and forces `excludePOI=false`. Do not rely on an implicit region lock anywhere.
+> **CORRECTION (2026-06-04, see lesson L11):** the region-lock NO LONGER holds. The current referente `address_search_location` backend indexes Valencia (ES) and southern France too — `"Piazza del Duomo, Firenze"` now returns 100 Spanish/French hits and zero Tuscan. The advisor pins results to a Tuscany bbox client-side ([mcp_tools._filter_geocode_to_tuscany](../src/snap4city_mobility_mcp/mcp_tools.py)). Do not rely on an implicit region lock anywhere.
+>
+> **UPDATE (2026-06-11, see lesson L17):** with `excludePOI=false` the catalogue POIs rank ABOVE the real place again (Run 4 below: the PRIZIO STEFANO company beat the actual square). The advisor now geocodes in two passes — `excludePOI=true` first, POI fallback only when the address pass has no in-region hit ([mcp_tools._geocode_address_first](../src/snap4city_mobility_mcp/mcp_tools.py)) — and picks the first feature whose label matches the search tokens ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)).
 - `asdfasdfasdf` (clean input) → **HTTP 500 server error**: `Server error '500 ' for url '.../location/?search=asdfasdfasdf&maxResults=1'`. Pure-noise input is not handled gracefully; the API blows up rather than returning an empty FeatureCollection.
 - `asdfasdfasdf` wrapped in a JSON-shaped string (earlier contaminated test) → returned `CLAUS TATTOO DI CLAUDIO CARLO ANDRESSI`. Behaviour clearly depends on whether the tokenizer can extract anything to match.
 
@@ -82,7 +84,14 @@ Run 2 (clean input, `excludePOI` not yet enabled):
 - `Stazione Termini, Roma` → `(43.8809, 11.0957)` `Biblioteca del Club Alpino Italiano` — confirms the Tuscany region lock.
 - `asdfasdfasdf` → HTTP 500.
 
-Run 3 (with `excludePOI=true`) — pending.
+Run 3 (with `excludePOI=true`) — never probed standalone; superseded by the two-pass strategy (L17), whose address pass exercises it on every lookup.
+
+Run 4 (2026-06-11, via `chat.py` on the JupyterHub, `excludePOI=false` forced + Tuscany bbox, two sessions):
+
+- `Piazza Duomo` → 100 in-bbox hits, first = `(43.7736, 11.2421)` the PRIZIO STEFANO company again — POIs outrank the real square; walking route came out 1.83 km vs the 0.68 km baseline.
+- `piazza Dalmazia` → first hit `address: null` POI at `(43.7956, 11.2402)`; the exact `PIAZZA DALMAZIA` address entries rank 4th-5th — the address index DOES contain square names.
+- `via dello Steccuto` (real Florence street) → 100 raw hits, ALL near Maastricht (NL), zero Tuscan → the index covers more than Valencia/France; the bbox filter turned it into the friendly "no Tuscany-area match" error.
+- `routing` foot_shortest/foot_quiet to the Dalmazia point `(43.7956, 11.2402)` → bare `{"error": ""}` from two different origins, 3 attempts each (L8-class stable failure, evidence in `debug.log`), while Duomo-area → Santa Croce succeeded in the same session. Suspected foot-graph coverage/snap problem in the Rifredi/Dalmazia quarter — reported to the referente.
 
 ---
 

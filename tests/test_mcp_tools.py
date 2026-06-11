@@ -151,7 +151,8 @@ def _feature(lng, lat, addr="x"):
 
 
 async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
-    """Out-of-region (Valencia/France) hits are dropped; Tuscan ones kept, score order."""
+    """Out-of-region (Valencia/France) hits are dropped; Tuscan ones kept, score order.
+    The address pass (excludePOI=true) hits, so the POI pass is never sent."""
     fc = {"type": "FeatureCollection", "count": 3, "features": [
         _feature(-0.3068184, 39.59272, "Valencia"),   # Spain — drop
         _feature(11.2560, 43.7714, "Firenze Duomo"),  # Tuscany — keep
@@ -161,15 +162,39 @@ async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
     out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
     assert out["count"] == 1
     assert out["features"][0]["properties"]["address"] == "Firenze Duomo"
+    assert len(client.calls) == 1
     _, sent = client.calls[0]
-    assert sent["excludePOI"] is False  # forced so landmarks are findable
+    assert sent["excludePOI"] is True  # addresses first — POIs only as fallback (L17)
+
+
+async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result):
+    """Address pass finds nothing in-region (stations/landmarks are POI-only, L11)
+    → retried with excludePOI=false."""
+    spain = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
+    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
+    client = make_client([make_result(structured=spain), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
+    assert out["count"] == 1
+    assert out["features"][0]["geometry"]["coordinates"] == [11.2482, 43.8047]
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+
+
+async def test_exec_tool_geocode_address_pass_error_falls_back(make_client, make_result):
+    """A 500 on the address pass (km4city blows up on some inputs) must not kill
+    the lookup — the POI pass still runs."""
+    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
+    client = make_client([RuntimeError("HTTP 500"), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
+    assert out["count"] == 1
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 
 async def test_exec_tool_geocode_no_tuscan_match_errors(make_client, make_result):
     fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
-    client = make_client([make_result(structured=fc)])
+    client = make_client([make_result(structured=fc), make_result(structured=fc)])  # both passes miss
     out = await exec_tool(client, "address_search_location", {"search": "nowhere"})
     assert "error" in out and "no Tuscany-area match" in out["error"]
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 
 async def test_exec_tool_passthrough_strips_auth(make_client, make_result):

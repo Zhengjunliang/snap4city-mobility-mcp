@@ -41,7 +41,8 @@ ROUTING_STALE_RETRY_DELAY_S = 6.0
 # Valencia (ES) and southern France, so a fuzzy `address_search_location` match for
 # a Florence place can rank Spanish streets first (e.g. "Piazza del Duomo, Firenze"
 # → 100 Valencia/France hits, zero Tuscan). We pin results to a Tuscany bbox
-# client-side and force excludePOI=false so squares/landmarks are findable. See L11.
+# client-side and geocode in two passes — addresses first, POIs only as fallback
+# (`_geocode_address_first`). See L11/L17.
 # Bounds are generous (whole region, not just Florence) since the advisor serves Tuscany.
 TUSCANY_BBOX = {"min_lng": 9.6, "max_lng": 12.5, "min_lat": 42.2, "max_lat": 44.5}
 
@@ -246,6 +247,34 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
     return {**payload, "features": kept, "count": len(kept)}
 
 
+async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
+    """Two-pass `address_search_location`: addresses first, POIs only as fallback.
+
+    With POIs included the server ranks fuzzy catalogue hits above the real place
+    (L17: "Piazza Duomo" → a company 1.1 km west of the square), while pure address
+    entries (excludePOI=true) sit on the routable street graph. But stations and
+    landmarks exist ONLY in the POI catalogue (L11), so when the address pass has
+    no in-region hit — or errors — retry with POIs included. Both passes are pinned
+    to the Tuscany bbox; only the final outcome surfaces an `{"error": ...}`.
+    """
+    search = str(args.get("search", ""))
+    try:
+        addresses = _filter_geocode_to_tuscany(
+            _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": True})),
+            search,
+        )
+        if isinstance(addresses, dict) and addresses.get("type") == "FeatureCollection":
+            logger.debug("geocode %r: address pass hit (excludePOI=true)", search)
+            return addresses
+        logger.debug("geocode %r: address pass empty — falling back to the POI pass", search)
+    except Exception as e:
+        logger.debug("geocode %r: address pass failed (%s) — falling back to the POI pass", search, e)
+    # Deliberately NOT wrapped: a POI-pass failure has no further fallback, so it
+    # propagates to exec_tool's outer handler and surfaces as {"error": ...}.
+    payload = _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": False}))
+    return _filter_geocode_to_tuscany(payload, search)
+
+
 # Llama4 has a modest context window and degrades (hallucinates, or its backend
 # 500s) when fed large tool payloads. `slim_result_for_llm` returns a compact view
 # for the agent's MESSAGE history — top-K geocode hits with only the fields the model
@@ -321,11 +350,7 @@ async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
             return await routing_with_retry(client, route_args)
 
         if name == "address_search_location":
-            # Force excludePOI=false so squares/landmarks are findable (not only
-            # street numbers), then pin the fuzzy multi-region hits to Tuscany.
-            clean["excludePOI"] = False
-            payload = _unwrap(await client.call_tool(name, clean))
-            return _filter_geocode_to_tuscany(payload, str(clean.get("search", "")))
+            return await _geocode_address_first(client, clean)
 
         return _unwrap(await client.call_tool(name, clean))
     except Exception as e:
