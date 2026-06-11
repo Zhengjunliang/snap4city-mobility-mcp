@@ -53,6 +53,8 @@ You are the intent-extraction stage of a Florence (Tuscany, Italy) public-mobili
 advisor. Read the conversation and the user's LATEST message, then call \
 `extract_slots` exactly once.
 Rules:
+- Always fill EVERY field of `extract_slots` (use '' for a slot the user truly \
+did not give). Never drop the destination when the user named one.
 - Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
 coordinates — a separate tool geocodes places.
 - Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
@@ -72,21 +74,23 @@ public_transport.
 - The service area is Tuscany only; do not invent places outside it."""
 
 RESPOND_SYSTEM = """\
-You are a Florence (Tuscany, Italy) public-mobility advisor. Write a concise final \
-answer for the user, in the user's own language, based ONLY on the RESULTS given to \
-you. Do not call any tools. Do not invent coordinates, distances, line names, or \
-route IDs.
-- For a route: state the distance in km and the ETA (and walking/driving time if \
-present). You may mention a few main streets if listed.
-- If RESULTS holds an error, explain it plainly and suggest an alternative (e.g. \
-"no car route — Piazza del Duomo is a pedestrian zone; try a walking route or \
-public transport"). When geocoded addresses are present in RESULTS, mention how \
-you interpreted the origin/destination so the user can spot a wrong match.
-- If RESULTS has status "missing_place", ask the user (in their language) for the \
-missing origin and/or destination — do NOT say the request is unsupported.
-- If the request is unsupported, say you currently answer point-to-point trip \
-questions (foot, car, or public transport), e.g. "from Piazza Duomo to Santa Croce \
-on foot", and invite the user to rephrase."""
+You are a friendly Florence (Tuscany, Italy) mobility assistant. Write the final \
+answer to the user in the user's own language — when the language is unclear (e.g. \
+a bare greeting), default to ITALIAN. Phrasing, tone and structure are yours: be \
+natural, warm and helpful, not robotic or template-like.
+Hard rules (never break these):
+- Every fact must come ONLY from the RESULTS given to you. Never invent \
+coordinates, distances, durations, line names, or route IDs. Do not call tools.
+- For a successful route: give the distance in km and the duration/ETA; main \
+streets, if listed, are a nice touch.
+- If RESULTS holds an error, explain it simply and suggest a sensible alternative \
+(another travel mode, a more precise address). When geocoded addresses are present, \
+mention how you interpreted the origin/destination so the user can spot a wrong match.
+- If RESULTS has status "missing_place", ask the user for the missing origin and/or \
+destination — do NOT say the request is unsupported.
+- If RESULTS has status "unsupported", explain in your own words that for now you \
+answer point-to-point trip questions (on foot, by car, or by public transport) and \
+invite the user to rephrase."""
 
 # Synthetic function (not an MCP tool) — forces structured output from `understand`.
 _EXTRACT_SLOTS_SCHEMA = {
@@ -112,11 +116,14 @@ _EXTRACT_SLOTS_SCHEMA = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["car", "public_transport", "foot_quiet", "foot_shortest"],
-                    "description": "Travel mode; default foot_shortest for walking, public_transport for bus/tram.",
+                    "enum": ["car", "public_transport", "foot_quiet", "foot_shortest", ""],
+                    "description": "Travel mode ('' if not specified); foot_shortest for walking, public_transport for bus/tram.",
                 },
             },
-            "required": ["intent"],
+            # All fields required: Llama4 only fills required params, silently dropping
+            # optional ones (a real run extracted origin but no destination). '' marks
+            # a genuinely absent slot.
+            "required": ["intent", "origin_text", "destination_text", "mode"],
         },
     },
 }
@@ -290,16 +297,17 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
 def _template_answer(
     intent: str, data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
 ) -> str:
-    """Deterministic fallback answer when the respond LLM is unavailable."""
+    """Deterministic fallback answer when the respond LLM is unavailable.
+
+    Italian — the advisor's default language (Florence service; see RESPOND_SYSTEM)."""
     if missing:
-        return (
-            f"Please tell me the {' and '.join(missing)} of your trip, e.g. "
-            "'from Piazza Duomo to Santa Croce on foot'."
-        )
+        labels = {"origin": "il punto di partenza", "destination": "la destinazione"}
+        asked = " e ".join(labels[m] for m in missing)
+        return f"Mi serve ancora {asked}: es. 'da Piazza Duomo a Santa Croce a piedi'."
     if unsupported:
         return (
-            "I currently answer point-to-point trip questions (foot, car, or public "
-            "transport), e.g. 'from Piazza Duomo to Santa Croce on foot'."
+            "Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto "
+            "o con i mezzi pubblici), es. 'da Piazza Duomo a Santa Croce a piedi'."
         )
     if data.get("distance_km") is not None:
         bits = [f"{data['distance_km']} km"]
@@ -310,7 +318,7 @@ def _template_answer(
         return "📍 " + " · ".join(bits)
     if data.get("route_error"):
         return f"⚠ {data['route_error']}"
-    return "Sorry, I couldn't find a route for that request."
+    return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
 
 
 def _missing_places(slots: dict[str, Any]) -> list[str]:
@@ -369,7 +377,9 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
                 },
             ],
             tool_choice="none",
-            temperature=0,
+            # Some creative room for phrasing — facts stay grounded by the prompt's
+            # hard rules (only RESULTS data). Slot extraction keeps temperature=0.
+            temperature=0.7,
         )
         content = assistant_message(resp).get("content")
         if isinstance(content, str) and content.strip():

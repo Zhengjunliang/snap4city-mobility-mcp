@@ -3,6 +3,7 @@ import json
 
 from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
+    _EXTRACT_SLOTS_SCHEMA,
     _build_graph,
     _extract_data,
     _first_coord,
@@ -75,6 +76,14 @@ async def test_understand_parses_slots(make_llm):
     assert out["intent"] == "route"
     assert out["slots"]["origin_text"] == "Duomo"
     assert out["slots"]["mode"] == "foot_shortest"
+
+
+def test_extract_slots_schema_requires_all_fields():
+    """Llama4 only fills required params — a real run dropped destination_text when
+    it was optional. All slots must stay required ('' marks an absent one)."""
+    params = _EXTRACT_SLOTS_SCHEMA["function"]["parameters"]
+    assert set(params["required"]) == {"intent", "origin_text", "destination_text", "mode"}
+    assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
 
 
 async def test_understand_invalid_args_falls_back(make_llm):
@@ -226,7 +235,7 @@ async def test_respond_unsupported_template_on_llm_error():
     state = {"intent": "other", "messages": [{"role": "user", "content": "hi"}],
              "tool_results": [], "unsupported": True}
     out = await respond(state, llm=_RaisingLLM())
-    assert "point-to-point" in out["final"]["messages"][-1]["content"]
+    assert "punto-punto" in out["final"]["messages"][-1]["content"]
 
 
 async def test_respond_missing_place_asks_instead_of_unsupported():
@@ -240,8 +249,8 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
     }
     out = await respond(state, llm=_RaisingLLM())
     reply = out["final"]["messages"][-1]["content"]
-    assert "origin and destination" in reply
-    assert "point-to-point" not in reply
+    assert "partenza" in reply and "destinazione" in reply
+    assert "punto-punto" not in reply
 
 
 # --- _template_answer --------------------------------------------------------
@@ -256,13 +265,13 @@ def test_template_answer_route_error():
 
 
 def test_template_answer_unsupported():
-    assert "point-to-point" in _template_answer("other", {}, unsupported=True)
+    assert "punto-punto" in _template_answer("other", {}, unsupported=True)
 
 
 def test_template_answer_missing_place():
     answer = _template_answer("route", {}, unsupported=True, missing=["destination"])
-    assert "destination" in answer
-    assert "point-to-point" not in answer
+    assert "destinazione" in answer
+    assert "punto-punto" not in answer
 
 
 # --- _results_view -----------------------------------------------------------

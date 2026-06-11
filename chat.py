@@ -81,7 +81,7 @@ async def main() -> None:
     print("Snap4City mobility advisor — ask a trip/transport question (empty line to quit).")
     while True:
         try:
-            query = input("🧑 > ").strip()
+            query = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         except UnicodeDecodeError:  # defensive: stdin without reconfigure support
@@ -95,7 +95,7 @@ async def main() -> None:
             final = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         _log_turn(query, final)  # backend: full JSON → outputs.txt
         history = final.get("messages", history)  # carry multi-turn state
-        print("🤖", _reply(final), "\n")  # UI: only the LLM's own words
+        print("✦", _reply(final), "\n")  # UI: only the LLM's own words
 
 
 if __name__ == "__main__":
