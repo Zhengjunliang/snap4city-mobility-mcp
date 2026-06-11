@@ -141,7 +141,7 @@ Then chat — type a question, get the reply, keep going (empty line quits):
 🧑 > 那坐公交呢?          # follow-up reuses the previous origin/destination
 ```
 
-The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, raw routing payloads on failure) go to `debug.log` (gitignored). That JSON is the widget payload the dashboard consumes:
+The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every `chat.py` start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
 
 ```json
 {

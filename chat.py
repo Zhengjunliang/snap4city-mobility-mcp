@@ -7,7 +7,8 @@ Shows ONLY the LLM's own reply (`messages[-1].content`) — the `respond` node a
 phrased distance/ETA into natural language (and fell back to its own template into the
 same slot on LLM error), so nothing is hardcoded here. The FULL output JSON the dashboard
 consumes (ok/intent/data-with-WKT/messages) is appended per turn to `outputs.txt` for
-offline inspection of the whole flow.
+offline inspection of the whole flow; both `outputs.txt` and `debug.log` are reset at
+each session start (only the current session's turns are kept).
 
 Why a terminal script (not a web UI): the only runtime is the Snap4City JupyterHub, where
 exposing a web port needs jupyter-server-proxy and is fragile (see docs/lessons.md L14) — a
@@ -18,6 +19,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import sys
 
 from snap4city_mobility_mcp.orchestrator import run_advisor
 
@@ -32,7 +34,8 @@ def _setup_debug_log() -> None:
     pkg_logger = logging.getLogger("snap4city_mobility_mcp")
     if pkg_logger.handlers:
         return
-    handler = logging.FileHandler(DEBUG_LOG, encoding="utf-8")
+    # mode="w": each chat session starts a fresh log — no unbounded accumulation.
+    handler = logging.FileHandler(DEBUG_LOG, mode="w", encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
     pkg_logger.setLevel(logging.DEBUG)
     pkg_logger.addHandler(handler)
@@ -66,6 +69,14 @@ def _log_turn(query: str, final: dict) -> None:
 
 async def main() -> None:
     _setup_debug_log()
+    OUTPUTS.write_text("", encoding="utf-8")  # fresh audit log per chat session
+    # Terminal streams aren't always clean UTF-8: accented input/paste on the
+    # JupyterHub terminal crashed input() with UnicodeDecodeError (stdin, decode),
+    # and legacy cp1252 consoles can't encode the emoji prompt (stdout, encode).
+    # Replace unmappable characters instead of raising on either side.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     history: list[dict] = []
     print("Snap4City mobility advisor — ask a trip/transport question (empty line to quit).")
     while True:
@@ -73,9 +84,15 @@ async def main() -> None:
             query = input("🧑 > ").strip()
         except (EOFError, KeyboardInterrupt):
             break
+        except UnicodeDecodeError:  # defensive: stdin without reconfigure support
+            print("⚠ input encoding error — please retype the question.")
+            continue
         if not query:
             break
-        final = await run_advisor(query, history)
+        try:
+            final = await run_advisor(query, history)
+        except Exception as e:  # infra failure (MCP/LLM unreachable) — keep the REPL alive
+            final = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         _log_turn(query, final)  # backend: full JSON → outputs.txt
         history = final.get("messages", history)  # carry multi-turn state
         print("🤖", _reply(final), "\n")  # UI: only the LLM's own words

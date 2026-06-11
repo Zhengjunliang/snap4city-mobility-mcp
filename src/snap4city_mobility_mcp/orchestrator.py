@@ -153,8 +153,11 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
             parsed = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(parsed, dict) and parsed.get("intent"):
                 slots = parsed
-    except (json.JSONDecodeError, Llama4Error):
-        pass  # fall back to {"intent": "other"} — execute treats it as unsupported
+    except (json.JSONDecodeError, Llama4Error) as e:
+        # Fall back to {"intent": "other"} — execute treats it as unsupported; the
+        # debug log keeps the cause visible (LLM error vs. genuinely empty slots).
+        logger.debug("understand slot extraction failed: %s", e)
+    logger.debug("understand slots: %s", slots)
     return {"slots": slots, "intent": slots.get("intent", "other")}
 
 
