@@ -352,6 +352,32 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
     return addresses if addresses is not None else pois
 
 
+# The referente geocoder is non-deterministic over time: the SAME query returns 100
+# in-region hits one moment and 100% foreign hits (zero Tuscan) the next — observed
+# 2026-06-11, "Università ... Morgagni" failed mid-chat yet geocoded fine minutes later
+# via scripts/probe_geocode.py. The 2-pass + bbox filter already recovers whenever ANY
+# Tuscan hit comes back, so the only failure is the transient zero-Tuscan window; a
+# bounded retry usually clears it (fires only on that specific error). See lesson L20.
+GEOCODE_FLAKY_RETRIES = 2
+GEOCODE_FLAKY_RETRY_DELAY_S = 1.5
+_GEOCODE_TRANSIENT_HINT = "no Tuscany-area match"
+
+
+async def geocode_with_retry(client: Client, args: dict[str, Any]) -> Any:
+    """`_geocode_address_first` with bounded retries for the flaky zero-region window."""
+    result = await _geocode_address_first(client, args)
+    for attempt in range(1, GEOCODE_FLAKY_RETRIES + 1):
+        if not (isinstance(result, dict) and _GEOCODE_TRANSIENT_HINT in str(result.get("error", ""))):
+            break
+        logger.debug(
+            "geocode %r: transient zero-region result, retry %d/%d",
+            args.get("search"), attempt, GEOCODE_FLAKY_RETRIES,
+        )
+        await asyncio.sleep(GEOCODE_FLAKY_RETRY_DELAY_S)
+        result = await _geocode_address_first(client, args)
+    return result
+
+
 # Llama4 has a modest context window and degrades (hallucinates, or its backend
 # 500s) when fed large tool payloads. `slim_result_for_llm` returns a compact view
 # for the agent's MESSAGE history — top-K geocode hits with only the fields the model
@@ -474,7 +500,7 @@ async def exec_tool(
             return await routing_with_retry(client, route_args, attempts=routing_attempts)
 
         if name == "address_search_location":
-            return await _geocode_address_first(client, clean)
+            return await geocode_with_retry(client, clean)
 
         return _unwrap(await client.call_tool(name, clean))
     except Exception as e:

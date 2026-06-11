@@ -257,12 +257,36 @@ async def test_exec_tool_geocode_poi_pass_error_keeps_address_hits(make_client, 
     assert out["features"][0]["properties"]["city"] == "CASTELNUOVO DI GARFAGNANA"
 
 
-async def test_exec_tool_geocode_no_tuscan_match_errors(make_client, make_result):
+async def test_exec_tool_geocode_retries_then_errors(make_client, make_result, monkeypatch):
+    """L20: a zero-Tuscany response is a transient flaky-geocoder window, so it's retried;
+    when every attempt still misses, the lookup errors after the bounded ladder."""
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
     fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
-    client = make_client([make_result(structured=fc), make_result(structured=fc)])  # both passes miss
+    n = (mcp_tools.GEOCODE_FLAKY_RETRIES + 1) * 2  # each attempt = address + POI pass
+    client = make_client([make_result(structured=fc)] * n)
     out = await exec_tool(client, "address_search_location", {"search": "nowhere"})
     assert "error" in out and "no Tuscany-area match" in out["error"]
-    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+    assert len(client.calls) == n  # full ladder burned
+
+
+async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkeypatch):
+    """The flaky zero-Tuscany window clears on retry → the next attempt's Tuscan hit wins."""
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
+    miss = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}  # Spain
+    hit = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714, "Duomo")]}
+    # attempt 1: address(miss) + POI(miss) → error; attempt 2: address(hit) → success, POI not sent
+    client = make_client([make_result(structured=miss), make_result(structured=miss),
+                          make_result(structured=hit)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
+    assert out["count"] == 1
+    assert out["features"][0]["properties"]["address"] == "Duomo"
+    assert len(client.calls) == 3  # failed attempt (2 passes) + recovered address pass (1)
 
 
 async def test_exec_tool_geocode_named_city_beats_florence_default(make_client, make_result):
