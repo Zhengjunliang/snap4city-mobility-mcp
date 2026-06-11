@@ -83,8 +83,25 @@ def test_extract_slots_schema_requires_all_fields():
     """Llama4 only fills required params — a real run dropped destination_text when
     it was optional. All slots must stay required ('' marks an absent one)."""
     params = _EXTRACT_SLOTS_SCHEMA["function"]["parameters"]
-    assert set(params["required"]) == {"intent", "origin_text", "destination_text", "mode"}
+    assert set(params["required"]) == {
+        "intent", "origin_text", "destination_text", "mode",
+        "agency_text", "line_text", "stop_text",
+    }
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
+
+
+async def test_understand_parses_tpl_slots(make_llm):
+    llm = make_llm([_slots_response(
+        '{"intent":"tpl_timeline","origin_text":"","destination_text":"","mode":"",'
+        '"agency_text":"","line_text":"6","stop_text":"San Marco"}'
+    )])
+    out = await understand(
+        {"messages": [{"role": "user", "content": "orari della linea 6 alla fermata San Marco"}]},
+        llm=llm,
+    )
+    assert out["intent"] == "tpl_timeline"
+    assert out["slots"]["line_text"] == "6"
+    assert out["slots"]["stop_text"] == "San Marco"
 
 
 async def test_understand_invalid_args_falls_back(make_llm):
@@ -184,10 +201,20 @@ async def test_execute_route_success(make_client, make_result):
 
 async def test_execute_unsupported_intent(make_client):
     client = make_client([])  # must never reach the client
-    out = await execute({"slots": {"intent": "tpl_lines"}}, client=client)
+    out = await execute({"slots": {"intent": "other"}}, client=client)
     assert out["unsupported"] is True
     assert out["tool_results"] == []
     assert client.calls == []
+
+
+async def test_execute_dispatches_tpl_intents(make_client, make_result):
+    client = make_client([
+        make_result(structured={"agencies": [{"name": "ATAF", "uri": "http://a/AtF"}]}),
+        make_result(structured=[{"shortName": "6"}]),
+    ])
+    out = await execute({"slots": {"intent": "tpl_lines", "agency_text": ""}}, client=client)
+    assert out["unsupported"] is False
+    assert [n for n, _ in client.calls] == ["tpl_agencies", "tpl_lines"]
 
 
 async def test_execute_missing_place_is_unsupported(make_client):
@@ -281,6 +308,98 @@ async def test_execute_both_foot_profiles_fail_keeps_requested_mode_error(make_c
     assert _extract_data(out["tool_results"]) == {"route_error": "no route found (empty routes list)"}
 
 
+# --- execute: car ------------------------------------------------------------
+
+async def test_execute_car_success_no_fallback(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey()),                          # routing car
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Campo di Marte", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
+    assert len(routings) == 1  # car has no profile fallback
+    assert json.loads(routings[0]["args"])["routetype"] == "car"
+    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
+
+
+async def test_execute_car_empty_routes_no_fallback(make_client, make_result):
+    """L2: car in a pedestrian zone — success envelope, empty routes. No stale
+    retry (the envelope is well-formed), no profile swap; the error reaches the
+    widget data so respond can suggest another mode."""
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[])),                 # car → empty routes
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert len([e for e in out["tool_results"] if e["name"] == "routing"]) == 1
+    assert _extract_data(out["tool_results"]) == {"route_error": "no route found (empty routes list)"}
+
+
+async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result, monkeypatch):
+    """L8: the stable car-ZTL wrapper bug returns bare {"error": ""} — the stale
+    ladder runs its 3 attempts but NO foot-style profile fallback follows."""
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
+    stale = {"error": ""}
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=stale),                               # car #1
+        make_result(structured=stale),                               # car #2
+        make_result(structured=stale),                               # car #3
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert len([n for n, _ in client.calls if n == "routing"]) == 3  # ladder only, no 4th probe
+    assert "route_error" in _extract_data(out["tool_results"])
+
+
+# --- execute / _extract_data: public transport -------------------------------
+
+async def test_execute_pt_success_data_has_legs(make_client, make_result, pt_arcs):
+    journey = {"journey": {"routes": [{"wkt": "LINESTRING(1 2,3 4)", "distance": 2.8,
+                                       "eta": "10:26:00", "time": "00:26:00", "arc": pt_arcs}]},
+               "response": {"error_code": "0"}}
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=journey),                             # routing PT
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Dalmazia",
+             "mode": "public_transport"}
+    out = await execute({"slots": slots}, client=client)
+    data = _extract_data(out["tool_results"])
+    assert [leg["transport"] for leg in data["legs"]] == ["foot", "bus", "foot"]
+    assert data["wkt"] == "LINESTRING(1 2,3 4)"  # widget payload unchanged otherwise
+
+
+async def test_execute_pt_failure_has_no_profile_fallback(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[])),                 # PT → empty routes
+    ])
+    slots = {"intent": "route", "origin_text": "a", "destination_text": "b",
+             "mode": "public_transport"}
+    out = await execute({"slots": slots}, client=client)
+    assert len([e for e in out["tool_results"] if e["name"] == "routing"]) == 1
+
+
+def test_extract_data_foot_and_car_never_get_legs(pt_arcs):
+    # Same multi-transport arcs, non-PT routetype → no legs field in the widget.
+    for mode in ("foot_shortest", "car"):
+        results = [{"name": "routing", "args": json.dumps({"routetype": mode}),
+                    "result": {"journey": {"routes": [
+                        {"wkt": "L", "distance": 1.0, "arc": pt_arcs}]}}}]
+        assert "legs" not in _extract_data(results)
+
+
 # --- respond -----------------------------------------------------------------
 
 async def test_respond_uses_llm_answer(make_llm):
@@ -336,6 +455,22 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
     assert "punto-punto" not in reply
 
 
+async def test_respond_tpl_missing_line_asks_instead_of_unsupported():
+    """tpl intent with a blank required slot → targeted ask (the missing gate
+    must cover tpl intents, not just route)."""
+    state = {
+        "intent": "tpl_timeline",
+        "messages": [{"role": "user", "content": "orari alla fermata San Marco"}],
+        "tool_results": [],
+        "unsupported": True,
+        "slots": {"intent": "tpl_timeline", "line_text": "", "stop_text": "San Marco"},
+    }
+    out = await respond(state, llm=_RaisingLLM())
+    reply = out["final"]["messages"][-1]["content"]
+    assert "linea" in reply
+    assert "punto-punto" not in reply
+
+
 # --- _template_answer --------------------------------------------------------
 
 def test_template_answer_route():
@@ -362,6 +497,25 @@ def test_template_answer_missing_place():
 def test_results_view_missing_place_beats_unsupported():
     view = _results_view([], unsupported=True, missing=["destination"])
     assert view == {"status": "missing_place", "missing": ["destination"]}
+
+
+def test_results_view_routing_carries_routetype():
+    """The respond LLM needs the failed mode to suggest a sensible alternative."""
+    results = [
+        {"name": "address_search_location", "args": json.dumps({"search": "x"}),
+         "result": {"features": []}},
+        {"name": "routing", "args": json.dumps({"routetype": "car"}),
+         "result": {"error": "no route found (empty routes list)"}},
+    ]
+    view = _results_view(results, unsupported=False)
+    by_name = {i["name"]: i for i in view["results"]}
+    assert by_name["routing"]["routetype"] == "car"
+    assert "routetype" not in by_name["address_search_location"]
+
+
+def test_results_view_tolerates_argless_entries():
+    view = _results_view([{"name": "routing", "result": {"error": "x"}}], unsupported=False)
+    assert view["results"][0]["routetype"] is None
 
 
 # --- _extract_data -----------------------------------------------------------

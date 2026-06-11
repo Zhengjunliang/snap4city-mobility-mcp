@@ -10,9 +10,9 @@ A natural-language query drives a single linear graph:
   A forced `tool_choice` guarantees structured output, so this stage is reliable.
 - `execute` (pure Python, NO LLM): for a `route` intent it deterministically runs
   the fixed tool flow — geocode origin, geocode destination, then `routing` with
-  the requested mode — instead of letting the model free-call tools. Other intents
-  (tpl_* discovery) are not handled deterministically yet and fall through to a
-  friendly "unsupported" reply.
+  the requested mode — instead of letting the model free-call tools. tpl_* intents
+  dispatch to the deterministic discovery chains in tpl.py (`run_tpl_flow`); only
+  "other" falls through to a friendly "unsupported" reply.
 - `respond` (LLM, tool_choice="none" — NO tools): phrases a concise, multilingual
   answer from the structured results, then assembles the widget JSON (incl. the
   FULL route WKT and the updated `messages` for multi-turn).
@@ -44,7 +44,17 @@ from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
     _label_tokens,
     exec_tool,
+    group_arc_legs,
     slim_result_for_llm,
+)
+from snap4city_mobility_mcp.tpl import (
+    REQUIRED_SLOTS as TPL_REQUIRED_SLOTS,
+    TPL_INTENTS,
+    TPL_TOOL_NAMES,
+    extract_tpl_data,
+    run_tpl_flow,
+    slim_tpl_result,
+    tpl_template_answer,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,13 +78,21 @@ Rifredi", destination_text="piazza Dalmazia", mode="foot_shortest". Same for \
 "I want to go from A to B" / "come arrivo da A a B".
 - For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
 reuse the origin/destination from earlier in the conversation and change only what \
-the user changed (here: mode → public_transport).
+the user changed (here: mode → public_transport). Same for tpl follow-ups ("e le \
+fermate?" after asking about line 6 → intent="tpl_stops", line_text="6").
 - Map travel mode: walk / on foot → foot_shortest (quiet or scenic walk → \
 foot_quiet); drive / car → car; bus / tram / public transport / 公交 → \
 public_transport.
 - Pick intent: a point-to-point trip → "route"; "which lines does agency X run" → \
 "tpl_lines"; "routes of line N" → "tpl_routes"; "stops on a route" → "tpl_stops"; \
 "timetable at a stop" → "tpl_timeline"; anything else → "other".
+- For tpl intents fill the tpl slots: "quali linee ha Autolinee Toscane?" → \
+intent="tpl_lines", agency_text="Autolinee Toscane"; "percorsi della linea 6" → \
+intent="tpl_routes", line_text="6"; "fermate della linea T1" → intent="tpl_stops", \
+line_text="T1"; "orari della linea 6 alla fermata San Marco" → \
+intent="tpl_timeline", line_text="6", stop_text="San Marco".
+- agency_text / line_text / stop_text stay '' unless the user asked about \
+transport lines, routes, stops or timetables.
 - The service area is Tuscany only; do not invent places outside it."""
 
 RESPOND_SYSTEM = """\
@@ -92,14 +110,29 @@ numbers and ask for a more specific address.
 - Never include raw coordinates in your answer.
 - For a successful route: give the distance in km and the duration/ETA; main \
 streets, if listed, are a nice touch.
+- For a public-transport route whose RESULTS carry `legs`, narrate the trip leg \
+by leg (walk to X, ride the <transport> of <provider> to Y, walk on) using ONLY \
+the leg fields given — never invent line numbers, stop names, or times.
 - If RESULTS holds an error, explain it simply and suggest a sensible alternative \
 (another travel mode, a more precise address). When geocoded addresses are present, \
 mention how you interpreted the origin/destination so the user can spot a wrong match.
-- If RESULTS has status "missing_place", ask the user for the missing origin and/or \
-destination — do NOT say the request is unsupported.
+- When a CAR route fails (routetype "car" with "no route found" or an empty routing \
+response), the destination is often inside Florence's pedestrian/ZTL area — suggest \
+going on foot or by public transport.
+- If RESULTS has status "missing_place", ask the user for the field(s) listed in \
+`missing` (the origin/destination of a trip, or the line/stop of a public-transport \
+question) — do NOT say the request is unsupported.
+- For public-transport discovery RESULTS (agencies, lines, routes, stops, \
+timetables): present them as a compact list, say which agency you used, and never \
+add entries beyond those listed. When `count` exceeds the listed items, say how \
+many exist in total. Stop lists cover only the first 2 routes (directions) of the \
+line — when the route count is higher, say so. If the results hold only an agency \
+list (the requested agency was not recognized), ask the user to pick one of those \
+agencies.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
-invite the user to rephrase."""
+public-transport discovery questions (lines, routes, stops, timetables) and invite \
+the user to rephrase."""
 
 # Synthetic function (not an MCP tool) — forces structured output from `understand`.
 _EXTRACT_SLOTS_SCHEMA = {
@@ -128,11 +161,26 @@ _EXTRACT_SLOTS_SCHEMA = {
                     "enum": ["car", "public_transport", "foot_quiet", "foot_shortest", ""],
                     "description": "Travel mode ('' if not specified); foot_shortest for walking, public_transport for bus/tram.",
                 },
+                "agency_text": {
+                    "type": "string",
+                    "description": "Public transport agency the user named, '' if none.",
+                },
+                "line_text": {
+                    "type": "string",
+                    "description": "Public transport line short name (e.g. '6', 'T1'), '' if none.",
+                },
+                "stop_text": {
+                    "type": "string",
+                    "description": "Public transport stop name, '' if none.",
+                },
             },
             # All fields required: Llama4 only fills required params, silently dropping
             # optional ones (a real run extracted origin but no destination). '' marks
             # a genuinely absent slot.
-            "required": ["intent", "origin_text", "destination_text", "mode"],
+            "required": [
+                "intent", "origin_text", "destination_text", "mode",
+                "agency_text", "line_text", "stop_text",
+            ],
         },
     },
 }
@@ -141,9 +189,9 @@ _EXTRACT_SLOTS_SCHEMA = {
 class AdvisorState(TypedDict, total=False):
     messages: list[dict[str, Any]]  # chat history (system + user + assistant) for multi-turn
     intent: str  # from understand: route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
-    slots: dict[str, Any]  # understand output: {intent, origin_text, destination_text, mode}
+    slots: dict[str, Any]  # understand output: {intent, origin_text, destination_text, mode, agency_text, line_text, stop_text}
     tool_results: list[dict[str, Any]]  # structured audit: [{name, args, result}] per call
-    unsupported: bool  # True when execute could not run a deterministic flow (tpl_* / missing places)
+    unsupported: bool  # True when execute could not run a deterministic flow ("other" intent / missing required slots)
     final: dict[str, Any]  # widget JSON assembled by respond node
 
 
@@ -230,14 +278,17 @@ _FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
     """Deterministically run the tool flow for the extracted intent (NO LLM).
 
-    Only `route` is handled today: geocode both endpoints, then `routing` with the
-    requested mode (+ a foot_quiet→foot_shortest retry). Every call is recorded in
-    `tool_results` so `_extract_data` can build the widget. Anything else (tpl_*,
-    missing places) sets `unsupported` for the respond node.
+    `route`: geocode both endpoints, then `routing` with the requested mode (+ a
+    foot profile retry). tpl_* intents delegate to tpl.run_tpl_flow (discovery
+    chains). Every call is recorded in `tool_results` so the widget data can be
+    mined from the audit. "other" / missing required slots set `unsupported` for
+    the respond node.
     """
     slots = state.get("slots") or {}
     results: list[dict[str, Any]] = []
 
+    if slots.get("intent") in TPL_INTENTS:
+        return await run_tpl_flow(client, slots)
     if slots.get("intent") != "route":
         return {"tool_results": results, "unsupported": True}
 
@@ -288,6 +339,22 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         return result
 
     routed = await _route(mode)
+    if (
+        mode == "public_transport"
+        and isinstance(routed, dict)
+        and isinstance(routed.get("journey"), dict)
+        and logger.isEnabledFor(logging.DEBUG)
+    ):
+        # Live probe: the real PT arc shape has never been observed — dump the
+        # first raw arcs so group_arc_legs' provisional grouping key can be
+        # calibrated offline from debug.log (gitignored).
+        first = (routed["journey"].get("routes") or [{}])[0]
+        arcs = first.get("arc") or []
+        logger.debug(
+            "PT raw arcs (first 5 of %d): %s",
+            len(arcs),
+            json.dumps(arcs[:5], ensure_ascii=False)[:2000],
+        )
     if isinstance(routed, dict) and "error" in routed and mode in _FOOT_FALLBACK:
         # Deterministic walking-profile fallback, single shot: the requested profile
         # already burned the full L3 stale ladder (~27 s), so the transient is ruled
@@ -311,7 +378,7 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             if isinstance(result, dict) and isinstance(result.get("journey"), dict):
                 journey = result["journey"]
                 first = (journey.get("routes") or [{}])[0]
-                return {
+                data = {
                     "wkt": first.get("wkt"),  # FULL LINESTRING — not truncated
                     "distance_km": first.get("distance"),
                     "eta": first.get("eta"),
@@ -321,6 +388,17 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                     "source_node": journey.get("source_node"),
                     "destination_node": journey.get("destination_node"),
                 }
+                try:
+                    routetype = json.loads(entry.get("args") or "{}").get("routetype")
+                except json.JSONDecodeError:
+                    routetype = None
+                if routetype == "public_transport":
+                    # NEW field, pending referente confirmation (same status as
+                    # data.arcs): walk/ride legs grouped from the journey arcs.
+                    legs = group_arc_legs(first.get("arc") or [])
+                    if legs:
+                        data["legs"] = legs
+                return data
             # Keep overwriting while scanning backwards: when every profile failed
             # (mode + foot fallback), the EARLIEST error — the mode the user actually
             # asked for — is the one worth surfacing, not the fallback's.
@@ -339,13 +417,24 @@ def _template_answer(
 
     Italian — the advisor's default language (Florence service; see RESPOND_SYSTEM)."""
     if missing:
-        labels = {"origin": "il punto di partenza", "destination": "la destinazione"}
+        labels = {
+            "origin": "il punto di partenza",
+            "destination": "la destinazione",
+            "line": "la linea (es. '6')",
+            "stop": "il nome della fermata",
+        }
         asked = " e ".join(labels[m] for m in missing)
-        return f"Mi serve ancora {asked}: es. 'da Piazza Duomo a Santa Croce a piedi'."
+        return f"Mi serve ancora {asked} per rispondere."
     if unsupported:
         return (
             "Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto "
-            "o con i mezzi pubblici), es. 'da Piazza Duomo a Santa Croce a piedi'."
+            "o con i mezzi pubblici) e su linee, percorsi, fermate e orari del "
+            "trasporto pubblico, es. 'da Piazza Duomo a Santa Croce a piedi'."
+        )
+    if intent in TPL_INTENTS:
+        return (
+            tpl_template_answer(intent, data)
+            or "Mi dispiace, non ho trovato informazioni per questa richiesta."
         )
     if data.get("distance_km") is not None:
         bits = [f"{data['distance_km']} km"]
@@ -359,11 +448,19 @@ def _template_answer(
     return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
 
 
-def _missing_places(slots: dict[str, Any]) -> list[str]:
-    """Which of origin/destination a `route` request left blank (slot-extraction gap)."""
+# Required slots per intent: route needs both places; the tpl table comes from
+# tpl.py (single source — run_tpl_flow skips its chain on the same keys).
+_REQUIRED_SLOTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "route": (("origin", "origin_text"), ("destination", "destination_text")),
+    **TPL_REQUIRED_SLOTS,
+}
+
+
+def _missing_slots(intent: str, slots: dict[str, Any]) -> list[str]:
+    """Which required slots of `intent` the extraction left blank."""
     return [
         label
-        for label, key in (("origin", "origin_text"), ("destination", "destination_text"))
+        for label, key in _REQUIRED_SLOTS.get(intent, ())
         if not (slots.get(key) or "").strip()
     ]
 
@@ -375,11 +472,30 @@ def _results_view(
     if missing:
         return {"status": "missing_place", "missing": missing}
     if unsupported:
-        return {"status": "unsupported", "supported": "point-to-point trips (foot, car, public transport)"}
-    view = [
-        {"name": e.get("name"), "result": slim_result_for_llm(e.get("name"), e.get("result"))}
-        for e in results
-    ]
+        return {
+            "status": "unsupported",
+            "supported": "point-to-point trips (foot, car, public transport) and "
+            "public-transport discovery (lines, routes, stops, timetables)",
+        }
+    view = []
+    for e in results:
+        name = e.get("name")
+        slim = (
+            slim_tpl_result(name, e.get("result"))
+            if name in TPL_TOOL_NAMES
+            else slim_result_for_llm(name, e.get("result"))
+        )
+        item = {"name": name, "result": slim}
+        if e.get("name") == "routing":
+            # Surface WHICH mode this routing attempt used: on failure the LLM can
+            # only suggest a sensible alternative ("in auto non si può, prova a
+            # piedi") when it knows the mode that failed. Entries built by tests
+            # may carry no args — tolerate both.
+            try:
+                item["routetype"] = json.loads(e.get("args") or "{}").get("routetype")
+            except json.JSONDecodeError:
+                pass
+        view.append(item)
     return {"status": "ok", "results": view}
 
 
@@ -390,12 +506,13 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     intent = state.get("intent", "other")
     results = state.get("tool_results") or []
     unsupported = bool(state.get("unsupported"))
-    data = _extract_data(results)
-    # A `route` intent that execute refused = slot extraction left a place blank;
-    # respond then asks for it instead of claiming the request is unsupported.
+    data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
+    # An intent that execute refused = slot extraction left a required slot blank
+    # (route: a place; tpl: line/stop); respond then asks for it instead of
+    # claiming the request is unsupported.
     missing = (
-        _missing_places(state.get("slots") or {})
-        if unsupported and intent == "route"
+        _missing_slots(intent, state.get("slots") or {})
+        if unsupported and intent in _REQUIRED_SLOTS
         else None
     ) or None
 

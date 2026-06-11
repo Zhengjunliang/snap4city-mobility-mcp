@@ -4,8 +4,9 @@ This module does NOT implement any tools — the tools live on referente's remot
 `snap4agentic_advisor_native` server. Here we only: (1) connect to it, (2) execute
 the deterministic graph's tool calls via `client.call_tool`, unwrapping the
 response and smoothing referente's known km4city quirks. `fetch_tool_schemas`
-(server schemas → OpenAI function format) has no caller in the deterministic flow
-— it stays as the discovery seam for the upcoming tpl_* intents.
+(server schemas → OpenAI function format) has no production caller — the
+deterministic flows (route + tpl_*) hand-roll their chains; it remains the only
+seam for handing the server's own schemas to an LLM, should that return.
 
 Runtime = Snap4City JupyterHub: the dashboard's intranet IP is directly reachable
 (GET http://192.168.1.117:8000/apps.json -> 200), so DASHBOARD_URL defaults to it.
@@ -358,6 +359,45 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
 # FULL result in its audit (`tool_results`), so the dashboard widget still gets
 # complete data (incl. WKT). See lesson L12.
 GEOCODE_LLM_KEEP = 5
+PT_LEGS_LLM_KEEP = 10
+
+
+def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
+    """Group consecutive routing arcs into journey legs by transport identity.
+
+    Grouping key = (transport, transport_provider) — provisional: the field that
+    carries the bus line number has never been observed live (execute dumps the
+    raw PT arcs to debug.log on the first real run); if the line actually lives
+    in `desc`, two lines met at the same stop would merge — recalibrate then.
+    Every emitted field comes from observed arc fields (api-notes §2); missing
+    ones are skipped. `desc` == "nd" (no data) never names a leg endpoint.
+    """
+    legs: list[dict[str, Any]] = []
+    last_key: tuple[Any, Any] | None = None
+    for arc in arcs:
+        if not isinstance(arc, dict):
+            continue
+        key = (arc.get("transport"), arc.get("transport_provider"))
+        if not legs or key != last_key:
+            leg: dict[str, Any] = {}
+            if arc.get("transport") is not None:
+                leg["transport"] = arc["transport"]
+            if arc.get("transport_provider") is not None:
+                leg["provider"] = arc["transport_provider"]
+            if arc.get("start_datetime"):
+                leg["start_datetime"] = arc["start_datetime"]
+            legs.append(leg)
+            last_key = key
+        leg = legs[-1]
+        desc = arc.get("desc")
+        if desc and desc != "nd":
+            leg.setdefault("from", desc)
+            leg["to"] = desc
+        if isinstance(arc.get("distance"), (int, float)):
+            leg["distance_km"] = round(leg.get("distance_km", 0.0) + arc["distance"], 6)
+        if arc.get("end_datetime"):
+            leg["end_datetime"] = arc["end_datetime"]
+    return legs
 
 
 def slim_result_for_llm(name: str, result: Any) -> Any:
@@ -383,19 +423,24 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
     if name == "routing" and isinstance(result.get("journey"), dict):
         journey = result["journey"]
         first = (journey.get("routes") or [{}])[0]
+        base = {
+            "distance_km": first.get("distance"),
+            "eta": first.get("eta"),
+            "time": first.get("time"),
+        }
+        legs = group_arc_legs(first.get("arc") or [])
+        if len(legs) > 1:
+            # A change of transport (public-transport journey: walk + ride
+            # segments) — the model needs legs to narrate the trip, not a flat
+            # street list. Single-group journeys (foot, car, or a PT request
+            # satisfied entirely on foot) keep the street view below.
+            return {"journey": {**base, "legs": legs[:PT_LEGS_LLM_KEEP]}}
         streets: list[str] = []
         for arc in first.get("arc") or []:
             desc = arc.get("desc")
             if desc and desc != "nd" and desc not in streets:  # drop unnamed + dupes
                 streets.append(desc)
-        return {
-            "journey": {
-                "distance_km": first.get("distance"),
-                "eta": first.get("eta"),
-                "time": first.get("time"),
-                "streets": streets,
-            }
-        }
+        return {"journey": {**base, "streets": streets}}
     return result
 
 

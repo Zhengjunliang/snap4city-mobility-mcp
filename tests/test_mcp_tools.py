@@ -12,6 +12,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     _unwrap,
     exec_tool,
     fetch_tool_schemas,
+    group_arc_legs,
     routing_with_retry,
     slim_result_for_llm,
 )
@@ -151,6 +152,54 @@ def test_slim_routing_drops_wkt_and_lists_streets():
 def test_slim_passthrough_errors_and_unknown():
     assert slim_result_for_llm("routing", {"error": "boom"}) == {"error": "boom"}
     assert slim_result_for_llm("tpl_agencies", {"agencies": [1, 2]}) == {"agencies": [1, 2]}
+
+
+# --- group_arc_legs / PT routing view ----------------------------------------
+
+def test_group_arc_legs_groups_by_transport_identity(pt_arcs):
+    legs = group_arc_legs(pt_arcs)
+    assert len(legs) == 3
+    walk1, bus, walk2 = legs
+    assert walk1["transport"] == "foot"
+    assert walk1["from"] == "Via Panzani" and walk1["to"] == "Via Panzani"  # "nd" skipped
+    assert walk1["distance_km"] == 0.3  # 0.2 + 0.1
+    assert bus["provider"] == "Linea 6"
+    assert bus["from"] == "Stazione SMN" and bus["to"] == "Piazza Dalmazia"
+    assert bus["distance_km"] == 2.5
+    assert bus["start_datetime"] == "10:06:00" and bus["end_datetime"] == "10:22:00"
+    assert walk2["from"] == "Via Reginaldo Giuliani"
+
+
+def test_group_arc_legs_tolerates_junk():
+    assert group_arc_legs([]) == []
+    assert group_arc_legs(["nonsense", None]) == []
+    assert group_arc_legs([{"transport": "foot"}]) == [{"transport": "foot"}]
+
+
+def test_slim_routing_pt_shows_legs_not_streets(pt_arcs):
+    full = {"journey": {"routes": [{
+        "wkt": "LINESTRING(11.25 43.77, 11.26 43.78)",  # must stay out of the view
+        "distance": 2.8, "eta": "10:26:00", "time": "00:26:00", "arc": pt_arcs,
+    }]}}
+    slim = slim_result_for_llm("routing", full)
+    j = slim["journey"]
+    assert "streets" not in j and "wkt" not in json.dumps(slim)
+    assert [leg["transport"] for leg in j["legs"]] == ["foot", "bus", "foot"]
+    assert j["distance_km"] == 2.8
+
+
+def test_slim_routing_single_group_keeps_street_view():
+    # An all-walk journey (foot, car, or a PT request the planner satisfied
+    # entirely on foot) keeps the compact street list — legs only appear with a
+    # real change of transport.
+    full = {"journey": {"routes": [{
+        "distance": 0.8, "eta": "10:10:00", "time": "00:10:00",
+        "arc": [{"desc": "Via Roma", "transport": "foot",
+                 "transport_provider": "private", "distance": 0.8}],
+    }]}}
+    slim = slim_result_for_llm("routing", full)
+    assert slim["journey"]["streets"] == ["Via Roma"]
+    assert "legs" not in slim["journey"]
 
 
 def _feature(lng, lat, addr="x", city="FIRENZE"):
