@@ -16,11 +16,27 @@ MCP server (192.168.1.117:8000) reachable.
 """
 import asyncio
 import json
+import logging
 import pathlib
 
 from snap4city_mobility_mcp.orchestrator import run_advisor
 
 OUTPUTS = pathlib.Path("outputs.txt")  # full-output audit log, written in the cwd
+DEBUG_LOG = "debug.log"  # tool-level diagnostics (geocode coords, raw stale routing payloads)
+
+
+def _setup_debug_log() -> None:
+    """Route the package's DEBUG diagnostics to debug.log (file only — the REPL
+    stays clean). Only this package's logger is touched, so httpx etc. stay quiet.
+    Idempotent: a re-run main() in the same process must not stack handlers."""
+    pkg_logger = logging.getLogger("snap4city_mobility_mcp")
+    if pkg_logger.handlers:
+        return
+    handler = logging.FileHandler(DEBUG_LOG, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    pkg_logger.setLevel(logging.DEBUG)
+    pkg_logger.addHandler(handler)
+    pkg_logger.propagate = False  # never echo DEBUG payloads to a root/notebook handler
 
 
 def _reply(final: dict) -> str:
@@ -49,6 +65,7 @@ def _log_turn(query: str, final: dict) -> None:
 
 
 async def main() -> None:
+    _setup_debug_log()
     history: list[dict] = []
     print("Snap4City mobility advisor — ask a trip/transport question (empty line to quit).")
     while True:

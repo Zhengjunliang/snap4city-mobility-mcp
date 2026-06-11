@@ -27,6 +27,7 @@ Deterministic MCP execution + km4city quirk handling live in mcp_tools.py; the
 Llama4 client in llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 """
 import json
+import logging
 from functools import partial
 from typing import Any, TypedDict
 
@@ -42,9 +43,10 @@ from snap4city_mobility_mcp.llm import (
 from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
     exec_tool,
-    fetch_tool_schemas,
     slim_result_for_llm,
 )
+
+logger = logging.getLogger(__name__)
 
 UNDERSTAND_SYSTEM = """\
 You are the intent-extraction stage of a Florence (Tuscany, Italy) public-mobility \
@@ -53,6 +55,11 @@ advisor. Read the conversation and the user's LATEST message, then call \
 Rules:
 - Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
 coordinates — a separate tool geocodes places.
+- Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
+request — they never change the slots. E.g. "ciao, voglio andare da stazione di \
+Rifredi a piazza Dalmazia a piedi" → intent="route", origin_text="stazione di \
+Rifredi", destination_text="piazza Dalmazia", mode="foot_shortest". Same for \
+"I want to go from A to B" / "come arrivo da A a B".
 - For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
 reuse the origin/destination from earlier in the conversation and change only what \
 the user changed (here: mode → public_transport).
@@ -73,7 +80,10 @@ route IDs.
 present). You may mention a few main streets if listed.
 - If RESULTS holds an error, explain it plainly and suggest an alternative (e.g. \
 "no car route — Piazza del Duomo is a pedestrian zone; try a walking route or \
-public transport").
+public transport"). When geocoded addresses are present in RESULTS, mention how \
+you interpreted the origin/destination so the user can spot a wrong match.
+- If RESULTS has status "missing_place", ask the user (in their language) for the \
+missing origin and/or destination — do NOT say the request is unsupported.
 - If the request is unsupported, say you currently answer point-to-point trip \
 questions (foot, car, or public transport), e.g. "from Piazza Duomo to Santa Croce \
 on foot", and invite the user to rephrase."""
@@ -167,10 +177,12 @@ def _first_coord(geocode: Any) -> list[float] | None:
     return None
 
 
-# Walking modes share a deterministic fallback: a foot_quiet route that comes back
-# empty (km4city L3 cold-start stale) is retried as foot_shortest — the same recovery
-# the model used to attempt by hand, now driven by Python so it always runs.
-_FOOT_FALLBACK = {"foot_quiet": "foot_shortest"}
+# Walking modes share a deterministic fallback: a walking route that fails is retried
+# once with the other foot profile (the profiles hit different graph paths, so one can
+# succeed where the other returns an empty body) — the same recovery the model used to
+# attempt by hand, now driven by Python so it always runs. Applied once, never across
+# semantics (car / public_transport failures get alternatives suggested by `respond`).
+_FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 
 
 async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
@@ -196,6 +208,12 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         args = {"search": search}
         result = await exec_tool(client, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
+        if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
+            logger.debug(
+                "tool address_search_location %s -> %s",
+                args,
+                json.dumps(slim_result_for_llm("address_search_location", result), ensure_ascii=False)[:500],
+            )
         return _first_coord(result)
 
     origin = await _geocode(origin_text)
@@ -216,6 +234,12 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         }
         result = await exec_tool(client, "routing", args)
         results.append({"name": "routing", "args": json.dumps(args), "result": result})
+        if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
+            logger.debug(
+                "tool routing %s -> %s",
+                args,
+                json.dumps(slim_result_for_llm("routing", result), ensure_ascii=False)[:500],
+            )
         return result
 
     routed = await _route(mode)
@@ -249,7 +273,10 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                     "source_node": journey.get("source_node"),
                     "destination_node": journey.get("destination_node"),
                 }
-            if is_err and route_error is None:
+            # Keep overwriting while scanning backwards: when every profile failed
+            # (mode + foot fallback), the EARLIEST error — the mode the user actually
+            # asked for — is the one worth surfacing, not the fallback's.
+            if is_err:
                 route_error = result["error"]
             continue
         if is_err:
@@ -257,8 +284,15 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {"route_error": route_error} if route_error else {}
 
 
-def _template_answer(intent: str, data: dict[str, Any], *, unsupported: bool) -> str:
+def _template_answer(
+    intent: str, data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
+) -> str:
     """Deterministic fallback answer when the respond LLM is unavailable."""
+    if missing:
+        return (
+            f"Please tell me the {' and '.join(missing)} of your trip, e.g. "
+            "'from Piazza Duomo to Santa Croce on foot'."
+        )
     if unsupported:
         return (
             "I currently answer point-to-point trip questions (foot, car, or public "
@@ -276,8 +310,21 @@ def _template_answer(intent: str, data: dict[str, Any], *, unsupported: bool) ->
     return "Sorry, I couldn't find a route for that request."
 
 
-def _results_view(results: list[dict[str, Any]], *, unsupported: bool) -> dict[str, Any]:
+def _missing_places(slots: dict[str, Any]) -> list[str]:
+    """Which of origin/destination a `route` request left blank (slot-extraction gap)."""
+    return [
+        label
+        for label, key in (("origin", "origin_text"), ("destination", "destination_text"))
+        if not (slots.get(key) or "").strip()
+    ]
+
+
+def _results_view(
+    results: list[dict[str, Any]], *, unsupported: bool, missing: list[str] | None = None
+) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (slim — no huge WKT)."""
+    if missing:
+        return {"status": "missing_place", "missing": missing}
     if unsupported:
         return {"status": "unsupported", "supported": "point-to-point trips (foot, car, public transport)"}
     view = [
@@ -295,11 +342,18 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     results = state.get("tool_results") or []
     unsupported = bool(state.get("unsupported"))
     data = _extract_data(results)
+    # A `route` intent that execute refused = slot extraction left a place blank;
+    # respond then asks for it instead of claiming the request is unsupported.
+    missing = (
+        _missing_places(state.get("slots") or {})
+        if unsupported and intent == "route"
+        else None
+    ) or None
 
     user_query = next(
         (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
     )
-    view = _results_view(results, unsupported=unsupported)
+    view = _results_view(results, unsupported=unsupported, missing=missing)
     answer: str | None = None
     try:
         resp = await llm.achat(
@@ -320,7 +374,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     except Llama4Error:
         pass  # fall back to the deterministic template below
     if answer is None:
-        answer = _template_answer(intent, data, unsupported=unsupported)
+        answer = _template_answer(intent, data, unsupported=unsupported, missing=missing)
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON: the reply lives in `messages[-1].content` (OpenAI-standard) — no
@@ -348,18 +402,38 @@ def _build_graph(client: Client, llm: Llama4Client):
     return g.compile()
 
 
+# Process-wide session state, built lazily on the first turn. Rebuilding these per
+# turn re-fetched /apps.json and re-created the TokenManager (one [INIT]/[LOAD_TOKEN]
+# stderr block per question); a chat session reuses them. Token refresh stays correct:
+# TokenManager.get_token() re-checks expiry on every call.
+_CFG: dict[str, Any] | None = None  # dashboard /apps.json topology — static
+_LLM: Llama4Client | None = None  # owns the TokenManager
+
+
+async def _session_deps() -> tuple[dict[str, Any], Llama4Client]:
+    # Unlocked check-then-set: concurrent first turns may double-build (benign — last
+    # write wins). An asyncio.Lock would bind to one event loop and break callers that
+    # run each request in its own asyncio.run(); neither cached object is loop-bound.
+    global _CFG, _LLM
+    if _CFG is None:
+        _CFG = await _build_config()
+    if _LLM is None:
+        _LLM = Llama4Client()
+    return _CFG, _LLM
+
+
 async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Multi-turn mobility advisor. Returns widget JSON including updated `messages`.
 
     Pass the previous turn's `final["messages"]` back as `history` to continue the
-    conversation (the CLI REPL and the dashboard both carry state this way).
+    conversation (the CLI REPL and the dashboard both carry state this way). The MCP
+    `Client` is deliberately reconnected per turn (clean lifecycle, cheap intranet
+    handshake); config and LLM client persist for the whole process.
     """
-    cfg = await _build_config()
-    llm = Llama4Client()
+    cfg, llm = await _session_deps()
     messages = list(history or [])
     messages.append({"role": "user", "content": query})
     async with Client(cfg) as client:
-        await fetch_tool_schemas(client)  # validate connectivity / tool availability
         graph = _build_graph(client, llm)
         out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
     return out.get("final", {"ok": False, "error": "no final state produced", "messages": messages})

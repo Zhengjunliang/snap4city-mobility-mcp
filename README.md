@@ -141,7 +141,7 @@ Then chat — type a question, get the reply, keep going (empty line quits):
 🧑 > 那坐公交呢?          # follow-up reuses the previous origin/destination
 ```
 
-The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline. That JSON is the widget payload the dashboard consumes:
+The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, raw routing payloads on failure) go to `debug.log` (gitignored). That JSON is the widget payload the dashboard consumes:
 
 ```json
 {
@@ -236,7 +236,7 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 | `python chat.py` → `ModuleNotFoundError: snap4city_mobility_mcp` | The package isn't installed in the active env. Run `pip install -e .` (inside the `s4c` conda env on the JupyterHub) or `uv run python chat.py` locally. |
 | `python chat.py` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
 | `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | 不在 JupyterHub 内网跑 (内网 IP 只能从 JupyterHub 直连), 或 dashboard 那头挂了。确认在 JupyterHub terminal/notebook 里跑, 且 `S4C_DASHBOARD_URL` 没被设成别的地址。 |
-| `routing failed: empty body (L3 stale didn't clear after retry)` 在 `car` 路径 (尤其中心步行街 Duomo→Santa Croce) | **referente 的 routing wrapper 已知 bug** (lesson L8): km4city 内部对 ZTL 区 car 返 `-2` 没被 wrapper 透传, 反吃成空 body。重试也不愈 (区别 transient L3)。换 `foot_shortest` / `foot_quiet` 走人行可绕过, 或等 referente 修。 |
+| `routing failed: empty response from routing service (3 attempts) — …` | 3 次 (间隔 6s) 仍空 ≈ **server-side 稳定 bug** (lesson L8 类, 经典案例: ZTL 区 car, km4city `-2` 没被 wrapper 透传反吃成空 body; foot 模式也实测出现过)。transient L3 在 3 次内会自愈, 走到这条说明重试不愈。步行档已自动互换 profile 重试 (`foot_shortest` ⇄ `foot_quiet`); car 可换步行/公交绕过。`chat.py` 会把每次的原始 payload 记进 `debug.log` — 拿它找 referente 报障。 |
 | `routing failed: successful (code=0)` | 历史 bug (Phase 5 §2 R4 retest 时踩过), 现已修复; 见 lesson L7。如果仍出现说明代码回退了。 |
 | VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
 

@@ -24,10 +24,9 @@ class TokenManager:
         self.load_token_data()
 
     def get_token(self):
-        _log("[GET_TOKEN] - Checking Access Token...")
-        # Se il token esiste ed è valido, lo riuso
+        # Valid cached token → reuse it silently (this is the per-call hot path;
+        # logging here would spam every LLM call in a chat session).
         if self.token and time.time() < self.token_expiry:
-            _log("[GET_TOKEN] - Access Token found and valid.")
             return self.token
 
         _log("[GET_TOKEN] - Access Token not found or expired.")

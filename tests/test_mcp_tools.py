@@ -67,10 +67,25 @@ async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch
 
     monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
     stale = make_result(structured={"error": ""})
-    client = make_client([stale, stale])  # initial + 1 retry, both stale
+    client = make_client([stale, stale, stale])  # initial + 2 retries, all stale
     out = await routing_with_retry(client, _ROUTE_ARGS)
-    assert "empty body" in out["error"]
-    assert len(client.calls) == 2
+    assert "empty response" in out["error"]
+    assert len(client.calls) == 3
+
+
+async def test_routing_stale_recovers_on_first_retry(make_client, make_result, monkeypatch):
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
+    env = {
+        "journey": {"routes": [{"distance": 0.68}]},
+        "response": {"error_code": "0", "error_message": "successful"},
+    }
+    client = make_client([make_result(structured={"error": ""}), make_result(structured=env)])
+    out = await routing_with_retry(client, _ROUTE_ARGS)
+    assert out["journey"]["routes"][0]["distance"] == 0.68
+    assert len(client.calls) == 2  # recovered → loop exits, no third attempt
 
 
 # --- exec_tool (dispatch; never raises) --------------------------------------

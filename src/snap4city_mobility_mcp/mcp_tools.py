@@ -1,10 +1,11 @@
 """Client-side MCP layer for the agentic advisor.
 
 This module does NOT implement any tools — the tools live on referente's remote
-`snap4agentic_advisor_native` server. Here we only: (1) connect to it, (2) ask it
-for its own tool schemas via `list_tools()` and hand the LLM the subset we expose,
-and (3) forward the LLM's chosen calls back to the server with `client.call_tool`,
-unwrapping the response and smoothing referente's known km4city quirks.
+`snap4agentic_advisor_native` server. Here we only: (1) connect to it, (2) execute
+the deterministic graph's tool calls via `client.call_tool`, unwrapping the
+response and smoothing referente's known km4city quirks. `fetch_tool_schemas`
+(server schemas → OpenAI function format) has no caller in the deterministic flow
+— it stays as the discovery seam for the upcoming tpl_* intents.
 
 Runtime = Snap4City JupyterHub: the dashboard's intranet IP is directly reachable
 (GET http://192.168.1.117:8000/apps.json -> 200), so DASHBOARD_URL defaults to it.
@@ -20,15 +21,20 @@ through `_unwrap`.
 """
 import asyncio
 import json
+import logging
 import os
 from typing import Any, Literal
 
 import httpx
 from fastmcp import Client
 
+logger = logging.getLogger(__name__)
+
 # L3 short-window stale workaround: referente's routing wrapper occasionally returns
-# an empty body on cold start. Auto-retry once after a delay to mask the transient.
-ROUTING_STALE_RETRIES = 1
+# an empty body on cold start. Auto-retry after a delay to mask the transient.
+# 3 total attempts also disambiguate L3 from L8 (lessons.md): still empty on the
+# third attempt ≈ the stable server-side wrapper bug, not the transient.
+ROUTING_STALE_RETRIES = 2
 ROUTING_STALE_RETRY_DELAY_S = 6.0
 
 # km4city's geocoder is NOT region-locked anymore — its index now also covers
@@ -142,13 +148,18 @@ async def routing_with_retry(client: Client, args: dict[str, Any]) -> dict[str, 
     args = {startlatitude, startlongitude, endlatitude, endlongitude, routetype, [startdatetime]}.
     Returns {"journey": {...}} on success or {"error": "<msg>"} on any failure shape.
     """
-    # First attempt + bounded retry for L3 short-window stale (referente cold-start quirk).
+    # First attempt + bounded retries for L3 short-window stale (referente cold-start quirk).
+    attempts = ROUTING_STALE_RETRIES + 1
     res = await _call_routing_once(client, args)
-    for _ in range(ROUTING_STALE_RETRIES):
+    for attempt in range(1, attempts):
         if "error" in res:
             break
         if not _looks_stale(res["data"]):
             break
+        logger.debug(
+            "routing stale payload (attempt %d/%d, routetype=%s): %s",
+            attempt, attempts, args.get("routetype"), json.dumps(res["data"])[:500],
+        )
         await asyncio.sleep(ROUTING_STALE_RETRY_DELAY_S)
         res = await _call_routing_once(client, args)
 
@@ -156,12 +167,21 @@ async def routing_with_retry(client: Client, args: dict[str, Any]) -> dict[str, 
         return {"error": res["error"]}
     data = res["data"]
 
-    # Failure shape A: still no journey after retry — L3 stale didn't clear, or L8 car-ZTL
-    # wrapper bug (stable bare {"error": ""}). Surface plainly.
+    # Failure shape A: still no journey after retries — transient L3 didn't clear, or the
+    # stable L8-class wrapper bug (bare {"error": ""}). The raw payload goes to the debug
+    # log so the two can be told apart offline; the user-facing message stays plain.
     if not isinstance(data.get("journey"), dict):
+        logger.debug(
+            "routing still stale after %d attempts (routetype=%s): %s",
+            attempts, args.get("routetype"), json.dumps(data)[:500],
+        )
         err = data.get("error")
         if not err:
-            return {"error": "routing failed: empty body (L3 stale didn't clear after retry)"}
+            return {
+                "error": f"routing failed: empty response from routing service "
+                f"({attempts} attempts) — try a different travel mode or a more "
+                f"specific address"
+            }
         return {"error": f"routing failed: {err}"}
     journey = data["journey"]
 

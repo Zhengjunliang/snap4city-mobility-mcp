@@ -6,6 +6,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _build_graph,
     _extract_data,
     _first_coord,
+    _results_view,
     _template_answer,
     execute,
     respond,
@@ -158,6 +159,36 @@ async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_
     assert _extract_data(out["tool_results"])["distance_km"] == 1.83
 
 
+async def test_execute_foot_shortest_falls_back_to_foot_quiet(make_client, make_result):
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[])),                 # foot_shortest → empty routes error
+        make_result(structured=_journey()),                          # foot_quiet → success
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots}, client=client)
+    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
+    assert len(routings) == 2
+    assert json.loads(routings[0]["args"])["routetype"] == "foot_shortest"
+    assert json.loads(routings[1]["args"])["routetype"] == "foot_quiet"
+    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
+
+
+async def test_execute_both_foot_profiles_fail_keeps_requested_mode_error(make_client, make_result):
+    """When the mode AND its fallback fail, surface the requested mode's error."""
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[])),                 # foot_shortest → empty routes
+        make_result(structured={"journey": {"routes": []},           # foot_quiet → envelope error
+                                "response": {"error_code": "-2", "error_message": "not found"}}),
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots}, client=client)
+    assert _extract_data(out["tool_results"]) == {"route_error": "no route found (empty routes list)"}
+
+
 # --- respond -----------------------------------------------------------------
 
 async def test_respond_uses_llm_answer(make_llm):
@@ -198,6 +229,21 @@ async def test_respond_unsupported_template_on_llm_error():
     assert "point-to-point" in out["final"]["messages"][-1]["content"]
 
 
+async def test_respond_missing_place_asks_instead_of_unsupported():
+    """route intent with blank places → targeted ask, not the 'unsupported' pitch."""
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "voglio andare a piedi"}],
+        "tool_results": [],
+        "unsupported": True,
+        "slots": {"intent": "route", "origin_text": "", "destination_text": ""},
+    }
+    out = await respond(state, llm=_RaisingLLM())
+    reply = out["final"]["messages"][-1]["content"]
+    assert "origin and destination" in reply
+    assert "point-to-point" not in reply
+
+
 # --- _template_answer --------------------------------------------------------
 
 def test_template_answer_route():
@@ -211,6 +257,19 @@ def test_template_answer_route_error():
 
 def test_template_answer_unsupported():
     assert "point-to-point" in _template_answer("other", {}, unsupported=True)
+
+
+def test_template_answer_missing_place():
+    answer = _template_answer("route", {}, unsupported=True, missing=["destination"])
+    assert "destination" in answer
+    assert "point-to-point" not in answer
+
+
+# --- _results_view -----------------------------------------------------------
+
+def test_results_view_missing_place_beats_unsupported():
+    view = _results_view([], unsupported=True, missing=["destination"])
+    assert view == {"status": "missing_place", "missing": ["destination"]}
 
 
 # --- _extract_data -----------------------------------------------------------

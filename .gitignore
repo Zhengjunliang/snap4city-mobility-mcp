@@ -35,3 +35,6 @@ clearml_config.json
 
 # Full-output audit dumps (chat.py writes outputs.txt per turn)
 outputs*.txt
+
+# Tool-level diagnostics (chat.py routes package DEBUG logs here)
+debug.log
