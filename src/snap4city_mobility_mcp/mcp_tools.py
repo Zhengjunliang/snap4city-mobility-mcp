@@ -230,6 +230,18 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
         return payload
     kept = [f for f in features if _in_tuscany((f.get("geometry") or {}).get("coordinates"))]
     if not kept:
+        if logger.isEnabledFor(logging.DEBUG):
+            sample = [
+                {
+                    "city": (f.get("properties") or {}).get("city"),
+                    "coordinates": (f.get("geometry") or {}).get("coordinates"),
+                }
+                for f in features[:3]
+            ]
+            logger.debug(
+                "geocode %r: %d raw hits, none in Tuscany bbox; first raw hits: %s",
+                search, len(features), json.dumps(sample),
+            )
         return {"error": f"no Tuscany-area match for {search!r} — try a more specific address"}
     return {**payload, "features": kept, "count": len(kept)}
 
@@ -246,7 +258,12 @@ GEOCODE_LLM_KEEP = 5
 def slim_result_for_llm(name: str, result: Any) -> Any:
     """Compact a tool result for the LLM context. Full fidelity stays in the audit;
     this only shrinks what the model re-reads each turn. Errors / unknown shapes
-    (TPL lists, etc.) pass through unchanged."""
+    (TPL lists, etc.) pass through unchanged.
+
+    Raw coordinates are deliberately withheld: the respond LLM once used geocode
+    coordinates to fabricate its own distance/ETA estimate when routing had failed —
+    with no coordinates in view there is nothing to improvise from. The widget and
+    the execute node read the FULL payloads, never this view."""
     if not isinstance(result, dict) or "error" in result:
         return result
     if name == "address_search_location" and isinstance(result.get("features"), list):
@@ -254,7 +271,6 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
             {
                 "address": (f.get("properties") or {}).get("address"),
                 "city": (f.get("properties") or {}).get("city"),
-                "coordinates": (f.get("geometry") or {}).get("coordinates"),  # [lng, lat]
             }
             for f in result["features"][:GEOCODE_LLM_KEEP]
         ]
@@ -273,8 +289,6 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
                 "eta": first.get("eta"),
                 "time": first.get("time"),
                 "streets": streets,
-                "source_node": journey.get("source_node"),
-                "destination_node": journey.get("destination_node"),
             }
         }
     return result

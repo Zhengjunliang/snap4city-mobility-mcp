@@ -117,7 +117,8 @@ def test_slim_geocode_caps_and_keeps_only_needed_fields():
     slim = slim_result_for_llm("address_search_location", fc)
     assert slim["count"] == 100
     assert len(slim["features"]) == GEOCODE_LLM_KEEP  # capped
-    assert slim["features"][0] == {"address": "Via 0", "city": "Firenze", "coordinates": [11.25, 43.77]}
+    # No coordinates in the LLM view — the model once fabricated a distance from them.
+    assert slim["features"][0] == {"address": "Via 0", "city": "Firenze"}
     assert "serviceUri" not in slim["features"][0] and "score" not in slim["features"][0]
 
 
@@ -136,6 +137,7 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     assert "wkt" not in json.dumps(slim)  # WKT fully gone from the model's view
     assert j["distance_km"] == 0.83 and j["eta"] == "10:11:00"
     assert j["streets"] == ["Via Ricasoli", "Borgo degli Albizi"]  # deduped, "nd" dropped
+    assert "source_node" not in j and "destination_node" not in j  # no raw coordinates
 
 
 def test_slim_passthrough_errors_and_unknown():

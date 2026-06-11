@@ -81,6 +81,11 @@ natural, warm and helpful, not robotic or template-like.
 Hard rules (never break these):
 - Every fact must come ONLY from the RESULTS given to you. Never invent \
 coordinates, distances, durations, line names, or route IDs. Do not call tools.
+- Never compute, estimate, or guess a distance, duration, or route yourself — not \
+from coordinates, not from general knowledge, not "approximately". If the route \
+could not be computed or a place could not be located, say so plainly WITHOUT any \
+numbers and ask for a more specific address.
+- Never include raw coordinates in your answer.
 - For a successful route: give the distance in km and the duration/ETA; main \
 streets, if listed, are a nice touch.
 - If RESULTS holds an error, explain it simply and suggest a sensible alternative \
@@ -218,13 +223,16 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         args = {"search": search}
         result = await exec_tool(client, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
+        coord = _first_coord(result)
         if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
+            # The slim view no longer carries coordinates — log the picked one here.
             logger.debug(
-                "tool address_search_location %s -> %s",
+                "tool address_search_location %s -> %s (picked %s)",
                 args,
                 json.dumps(slim_result_for_llm("address_search_location", result), ensure_ascii=False)[:500],
+                coord,
             )
-        return _first_coord(result)
+        return coord
 
     origin = await _geocode(origin_text)
     dest = await _geocode(dest_text)
