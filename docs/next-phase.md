@@ -1,49 +1,27 @@
 # Next Phase Tracker — Snap4City Mobility Advisor MCP
 
-> **Purpose**: starting context for a **new Claude Code conversation**. Self-contained with `README.md` + `CLAUDE.md` + `docs/lessons.md`.
-
-## TL;DR
-
-UNIFI Sistemi Distribuiti **elaborato Tipo A**: a **FastMCP client + Langgraph deterministic orchestrator + terminal chat REPL** that answers Florence/Tuscany trip questions by driving DISIT's Snap4City **Llama4** LLM over the remote `snap4agentic_advisor_native` MCP server. The MCP server is referente-managed; this project ships only the client. Runtime = **Snap4City JupyterHub** (LLM + intranet MCP reachable only there).
-
-## Architecture (current)
-
-Linear **deterministic** graph (no agentic loop), multi-turn conversation:
-
-```
-query → understand → execute → respond → JSON
-```
-
-- **understand** (LLM, forced `extract_slots` call): pulls `{origin_text, destination_text, mode, intent, agency_text, line_text, stop_text}` from the latest turn (place TEXT only — coords come from a tool); resolves follow-ups ("那坐公交呢?", "e le fermate?") against history. A forced `tool_choice` guarantees structured output — reliable.
-- **execute** (pure Python, NO LLM): for a `route` intent, deterministically runs the fixed flow — geocode origin, geocode destination, then `routing(mode)` (+ a foot_quiet→foot_shortest fallback; PT journeys get `data.legs` grouped from the arcs). tpl_* intents dispatch to `tpl.run_tpl_flow` (agency→line→route→stop→timeline chains). The LLM never free-calls tools.
-- **respond** (LLM `tool_choice="none"`, NO tools): phrases a concise multilingual reply from the structured results, appends it as the last `assistant` turn, then assembles widget JSON `{ok, intent, data, messages}` — the reply is `messages[-1].content` (OpenAI-standard, no custom `answer` field); `data` holds the route WKT for the map; `messages` is the multi-turn history. Falls back to a template if the LLM errors.
-
-**Why deterministic** (lesson L13): Llama4 with `tool_choice="auto"` is unreliable — when it narrates it emits tool calls as pythonic TEXT that leak into the answer. Letting the model pick *slots* (forced) and *prose* (none) while Python drives the tools removes that failure mode. The old `agent`/`tools` nodes + `recover_pythonic_tool_calls` are deleted.
-
-Modules:
-- `src/snap4city_mobility_mcp/mcp_tools.py` — client layer: Client config, `fetch_tool_schemas` (the 7 exposed schemas pulled from the server's own `list_tools()`), `routing_with_retry` (km4city quirk handling L2/L3/L7/L8), `exec_tool` (forwards calls to the remote tools), `group_arc_legs` (PT walk/ride legs from journey arcs).
-- `src/snap4city_mobility_mcp/orchestrator.py` — the graph: `AdvisorState`, prompts, `understand`/`execute`/`respond`, `run_advisor`.
-- `src/snap4city_mobility_mcp/tpl.py` — deterministic tpl_* discovery chains (`run_tpl_flow`), tpl slim views (L12 caps), tpl widget-data extraction + Italian fallback templates. Payload shapes are defensive guesses until the first live run (raw heads go to debug.log).
-- `chat.py` (repo root) — terminal multi-turn chat REPL for testing; prints the LLM reply, full output JSON appended to `outputs.txt` per turn.
-- `src/snap4city_mobility_mcp/llm.py` — `Llama4Client` (OpenAI-compatible agentic endpoint).
-
-Core tools the client uses: `address_search_location`, `routing` (route flow, all 4 routetypes); `tpl_agencies`/`tpl_lines`/`tpl_routes_by_line`/`tpl_stops_by_route`/`tpl_stop_timeline` (tpl_* discovery chains in `tpl.py`). (Real signatures: `docs/snap4city-api-notes.md §3`.)
+> 新会话起步用。架构/规则 → `CLAUDE.md §1`; 工具签名 → `docs/snap4city-api-notes.md`; 踩坑 → `docs/lessons.md` (至 L19)。本文件只跟踪**活动状态**: 做完啥 / 下一步 / 待问 referente。
 
 ## Done
-- Remote referente MCP server connected; transport = HTTP Streamable, intranet-direct from JupyterHub.
-- Llama4 LLM client (`llm.py`) — endpoint `llama4-agentic-inference`.
-- **Deterministic orchestrator** (`understand → execute → respond`) + **terminal multi-turn chat REPL** (`chat.py`; full output JSON → `outputs.txt`); local mock unit tests (`tests/`, no LLM/MCP needed) green.
-- **JupyterHub end-to-end (route)**: foot route happy-path verified (clean multilingual answer + full WKT, no pythonic leak); car/public_transport return graceful "routing failed" messages (server-side empty-body — see below).
+- 远程 referente MCP server 接通 (HTTP Streamable, JupyterHub 内网直连)。
+- Llama4 LLM client (`llm.py`, endpoint `llama4-agentic-inference`)。
+- 确定性 orchestrator (`understand → execute → respond`) + 终端多轮 REPL (`chat.py`, 全量 JSON → `outputs.txt`); 本地 mock 单测 (`tests/`) 绿。
+- **foot route** JupyterHub 实测通 (干净多语回复 + 全 WKT, 无 pythonic leak)。
+- **car / public_transport routing 失败已定性** (`scripts/probe_routing.py` 裸调 + L19): car/PT 对**任意 OD** (含非-ZTL Campo di Marte) 全返裸 `{"error":""}`, 同 OD 的 foot_quiet 正常 → **服务端 car/PT wrapper 专门坏, 非 ZTL / 非坐标 / 非客户端**。
+- respond 不再把服务端空错误谎报成 ZTL/步行区 (L19c)。
+- geocode 加固: 两段式 `excludePOI` + 城市阶梯 + label 子集选点 (L17), 治跨城同名 / POI 误排。
+- 会话级对象 (`_CFG`/`_LLM`) 进程级懒缓存, 删每轮 schema 拉取 (L16)。
+- tpl_* 发现链已编码 (`tpl.py`, `run_tpl_flow`) — payload 形状为防御性猜测, **未 live 校准**。
 
 ## Next
-1. **Live verification on JupyterHub** (chat.py): car in/outside the ZTL; PT route in a working quarter (e.g. Duomo→Campo di Marte) → calibrate `group_arc_legs`' provisional grouping key against the raw arcs dumped to debug.log; tpl queries ("quali linee ci sono?", "percorsi/fermate della linea 6", "orari della linea 6 alla fermata X") → calibrate the tpl payload-shape assumptions (raw heads in debug.log; AtF URI acceptance).
-2. **Classify the car / public_transport routing failures** (server-side): re-run car a few times (transient L3 vs stable L8 ZTL) and test car/PT outside the ZTL; raise with referente if the profile is unsupported.
-3. **Dashboard widget wiring** — chat UI → `run_advisor`; map widget renders `data.wkt` LINESTRING. Widget URL pattern: confirm with referente.
-4. **Final report + ZIP** (disit.org/5986) — code + report + screenshots.
+1. **上报 referente**: car/PT routing 服务端返空 (附 `probe_routing.py` 输出 + L19) → 确认是 wrapper bug 还是 routetype 不支持。
+2. **tpl_* live 校准** (chat.py): "quali linee ci sono?" / "percorsi/fermate della linea 6" / "orari della linea 6 alla fermata X" → 校准 `tpl.py` payload 形状假设 (raw head 进 debug.log; AtF URI 接受度)。
+3. **PT route 校准**: 找能通的 quarter 跑 PT → 校准 `group_arc_legs` 临时 leg 分组键 (依赖 Next #1 先确认 PT 服务端可用)。
+4. **Dashboard widget 接线**: chat UI → `run_advisor`; map widget 渲染 `data.wkt` LINESTRING (widget URL 模式问 referente)。
+5. **终报 + ZIP** (disit.org/5986) — 代码 + 报告 + 截图。
 
-## Open questions
-1. Does the referente server require an auth token for any tool? (none seen on the core tools so far)
-2. car / public_transport `routing` returns empty body — is it transient (L3), the stable car-ZTL wrapper bug (L8), or is `public_transport` routetype unsupported server-side?
-3. Does the dashboard widget consume `data.arcs` (per-segment detail)? Currently commented out in `_extract_data` to slim the payload ~90%; re-enable if needed. Same confirmation needed for the NEW data fields: `data.legs` (PT walk/ride legs) and `data.lines`/`routes`/`stops`/`timeline` (tpl intents).
-4. Dashboard widget URL pattern for embedding rendered routes?
-5. Report language: it / en / zh?
+## Open questions (待问 referente)
+1. core 工具是否需 auth token? (目前未见)
+2. widget 是否消费 `data.arcs` (逐段明细, 现注释掉省 ~90% payload)? 同样确认新字段 `data.legs` (PT) 、`data.lines/routes/stops/timeline` (tpl)。
+3. dashboard widget 嵌入渲染路线的 URL 模式?
+4. 报告语言: it / en / zh?

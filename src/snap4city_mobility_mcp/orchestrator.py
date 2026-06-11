@@ -71,6 +71,11 @@ coordinates — a separate tool geocodes places.
 - Keep a city/town the user names attached to the place text ("da piazza Duomo \
 a piazza Dalmazia in Firenze" → origin_text="piazza Duomo, Firenze", \
 destination_text="piazza Dalmazia, Firenze"); NEVER add a city the user did not say.
+- The geocoder resolves STREET and SQUARE names, not institution or building names. \
+When the place text contains a street or square (via/viale/piazza/largo/...) next to \
+an institution/department/building name, output ONLY the street/square plus the city \
+and drop the institution words — e.g. "Università di Firenze, Viale Giovan Battista \
+Morgagni" → "Viale Morgagni, Firenze". Never invent a street the user did not name.
 - Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
 request — they never change the slots. E.g. "ciao, voglio andare da stazione di \
 Rifredi a piazza Dalmazia a piedi" → intent="route", origin_text="stazione di \

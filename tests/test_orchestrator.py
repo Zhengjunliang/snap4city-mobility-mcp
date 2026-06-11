@@ -6,6 +6,7 @@ from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
     RESPOND_SYSTEM,
+    UNDERSTAND_SYSTEM,
     _build_graph,
     _extract_data,
     _pick_coord,
@@ -493,6 +494,15 @@ def test_respond_system_separates_service_error_from_ztl():
     assert "no route found (empty routes list)" in RESPOND_SYSTEM
     idx = RESPOND_SYSTEM.index("empty response from routing service")
     assert "do NOT claim" in RESPOND_SYSTEM[idx:idx + 400]
+
+
+def test_understand_system_maps_institution_to_street():
+    """The geocoder resolves STREET/SQUARE names, not institution names (L11/L17): a long
+    institution string ("Università di Firenze, Viale Morgagni") returns foreign junk and no
+    Tuscan hit, so understand must drop the institution prefix and keep the street. Pinned on
+    the prompt rule — the LLM extraction itself is mocked in the node tests."""
+    assert "Viale Morgagni" in UNDERSTAND_SYSTEM
+    assert "institution" in UNDERSTAND_SYSTEM
 
 
 def test_template_answer_unsupported():
