@@ -55,10 +55,18 @@ TPL_TOOL_NAMES = frozenset(TPL_LLM_KEEPS)
 TPL_DATA_KEEP = 50
 ROUTES_DATA_KEEP = 10
 
-# Florence default agency (the advisor is Florence-centric): the URI suffix comes
-# from the server's own tpl_lines example ('.../km4city/resource/AtF').
-_DEFAULT_AGENCY_SUFFIX = "/AtF"
-_DEFAULT_AGENCY_HINTS = ("ataf", "autolinee")
+# Florence default network. km4city has NO single "Autolinee Toscane"/"AtF"/"ATAF" entry
+# (the URI in the server's own tpl_lines example, '.../resource/AtF', does NOT exist live —
+# probe_tpl STEP 1): the brand is split into ~40 sub-networks (ExtraUrbano <provincia> /
+# Urbano <città> / Linee Regionali). Florence city lines (incl. line 6) live under
+# "Autolinee Toscane - Urbano Area Metropolitana Fiorentina" (…_Agency_888-48), so a bare or
+# brand-only agency request resolves there. Token-based so it survives minor name variants.
+_FLORENCE_URBAN_TOKENS = frozenset({"firenze", "fiorentina", "metropolitana"})
+
+
+def _is_florence_urban(name: str | None) -> bool:
+    toks = _label_tokens(str(name or ""))
+    return "urbano" in toks and bool(toks & _FLORENCE_URBAN_TOKENS)
 
 
 def _unwrap_tpl(payload: Any) -> Any:
@@ -166,23 +174,28 @@ def _match_stop(entries: list[dict[str, Any]], stop_text: str) -> dict[str, Any]
 
 
 def _resolve_agency(agencies: list[dict[str, Any]], agency_text: str) -> str | None:
-    """Agency URI for the user's text, or the Florence default; None = unknown
-    (the agencies audit entry reaches respond, which asks the user to pick)."""
+    """Agency URI for the user's text, or the Florence-urban default; None = unknown
+    (the agencies audit entry reaches respond, which asks the user to pick).
+
+    Brand match is bidirectional: a generic brand ("Autolinee Toscane") is a SUBSET of the
+    specific sub-network names, while a verbose user phrase can be a SUPERSET — accept either
+    direction. When a brand matches many sub-networks, the Florence-centric advisor prefers
+    the Florence urban one (proven live: 888-48 + line "6" → 22 routes; ExtraUrbano Arezzo
+    → []). Empty text resolves to that same Florence-urban default. See lesson L21.
+    """
     if agency_text.strip():
         want = _label_tokens(agency_text)
-        for a in agencies:
-            toks = _label_tokens(str(a.get("name") or ""))
-            if toks and toks <= want:
-                return a["uri"]
+        cands = [
+            a
+            for a in agencies
+            if (toks := _label_tokens(str(a.get("name") or ""))) and (toks <= want or want <= toks)
+        ]
+        if cands:
+            return next(
+                (a["uri"] for a in cands if _is_florence_urban(a.get("name"))), cands[0]["uri"]
+            )
         return None
-    for a in agencies:
-        if a["uri"].rstrip("/").endswith(_DEFAULT_AGENCY_SUFFIX):
-            return a["uri"]
-    for a in agencies:
-        toks = _label_tokens(str(a.get("name") or ""))
-        if toks & set(_DEFAULT_AGENCY_HINTS):
-            return a["uri"]
-    return None
+    return next((a["uri"] for a in agencies if _is_florence_urban(a.get("name"))), None)
 
 
 async def run_tpl_flow(client: Client, slots: dict[str, Any]) -> dict[str, Any]:
@@ -251,7 +264,7 @@ def slim_tpl_result(name: str, result: Any) -> Any:
     items = _generic_list(result)
     if name == "tpl_routes_by_line":
         slimmed = [
-            {k: v for k, v in it.items() if k not in ("wkt", "polyline", "geometry")}
+            {k: v for k, v in it.items() if k not in ("wkt", "wktGeometry", "polyline", "geometry")}
             if isinstance(it, dict) else it
             for it in items[:keep]
         ]

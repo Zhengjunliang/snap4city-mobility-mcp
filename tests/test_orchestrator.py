@@ -210,7 +210,9 @@ async def test_execute_unsupported_intent(make_client):
 
 async def test_execute_dispatches_tpl_intents(make_client, make_result):
     client = make_client([
-        make_result(structured={"agencies": [{"name": "ATAF", "uri": "http://a/AtF"}]}),
+        make_result(structured={"agencies": [
+            {"name": "Autolinee Toscane - Urbano Area Metropolitana Fiorentina", "uri": "http://a/888-48"},
+        ]}),
         make_result(structured=[{"shortName": "6"}]),
     ])
     out = await execute({"slots": {"intent": "tpl_lines", "agency_text": ""}}, client=client)

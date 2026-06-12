@@ -264,7 +264,28 @@ The advisor's `respond` node surfaces `routes[0].{wkt, distance, eta, time}` (+ 
   - `-2` ≈ "route not found" (src==dst, no path, etc.)
 - **Shape C (empty routes, success envelope)** — `response.error_code = "0"` but `journey.routes = []`. Same as L2: km4city said OK but graph search returned no path (e.g. car in pedestrian zone). orchestrator surfaces this as `"no route found (empty routes list)"`.
 
+### TPL chain — live shapes (probe_tpl.py, 2026-06-12, see lesson L21)
+
+`scripts/probe_tpl.py` walked the full chain raw on the JupyterHub. Findings:
+
+- **No single "Autolinee Toscane"/`AtF`/`ATAF` agency.** The example URI in the `tpl_lines`
+  tool description (`.../km4city/resource/AtF`) **does not exist** in the live `tpl_agencies`
+  list (54 agencies). The brand is split into ~40 sub-networks: `Autolinee Toscane - ExtraUrbano <provincia>`,
+  `Autolinee Toscane - Urbano <città>`, `Autolinee Toscane - Linee Regionali`. **Florence city
+  network = `Autolinee Toscane - Urbano Area Metropolitana Fiorentina` → `…48-UrbanoAreaMetropolitanaFiorentina-gtfs_Agency_888-48`.**
+- **`tpl_routes_by_line.line` accepts a bare shortName** (e.g. `"6"`), `agency` optional. With
+  the Florence-urban agency, `line="6"` → **22 routes**; with ExtraUrbano Arezzo → `{"result": []}`.
+  Item shape: `{firstBusStop, lastBusStop, line, route, routeName, wktGeometry}` — route URI key is
+  **`route`**, geometry key is **`wktGeometry`** (NOT `wkt`).
+- **`tpl_stops_by_route` returns ONLY a Service-URI array** (`…gtfs_Stop_FI0083_600`, …) — **no
+  human stop names, no GeoJSON with `name`**. So matching a stop by name ("San Marco") is not
+  possible from this endpoint alone; `tpl_stop_timeline` (stop-by-name) needs another strategy
+  (probe STEP 6/7 extended to capture the full stops payload + raw timeline shape next run).
+
 ### Open questions (carry forward)
 
-- Do TPL tools accept the Florence `AtF` agency URI as-is?
-- Will referente fix the car-ZTL wrapper bug (L8)? — watch for the next native version bump.
+- How to resolve a stop NAME → Service URI for `tpl_stop_timeline`, given `tpl_stops_by_route`
+  yields URIs only? (pending the extended probe STEP 6/7 data)
+- Will referente fix the car/public_transport empty-body bug? `routing` returns `{"error": ""}`
+  for car (even a drivable non-ZTL destination) and public_transport (even WITH `startdatetime`),
+  while foot_* work — server-side, see lesson L19. Watch for the next native version bump.

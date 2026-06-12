@@ -35,6 +35,7 @@ from snap4city_mobility_mcp.tpl import (
     _resolve_agency,
     _route_uris,
     _stop_entries,
+    _unwrap_tpl,
     run_tpl_flow,
 )
 
@@ -158,19 +159,36 @@ async def main() -> None:
             print("  no route URI from any candidate agency — cannot probe stops", flush=True)
         else:
             print(f"  using route: {first_route_uri}", flush=True)
-            stops_payload = await _raw(client, "tpl_stops_by_route", {"route": first_route_uri})
+            stops_payload = await _raw(
+                client, "tpl_stops_by_route", {"route": first_route_uri}, dump=False)
+            # Structure first, then a wider dump — confirm whether stop NAMES / coords exist
+            # anywhere beyond the bare Service-URI array (they didn't in the first run).
+            unwrapped = _unwrap_tpl(stops_payload)
+            if isinstance(unwrapped, list):
+                print(f"  top-level: list[{len(unwrapped)}] parts -> "
+                      f"{[type(p).__name__ for p in unwrapped]}", flush=True)
+            elif isinstance(unwrapped, dict):
+                print(f"  top-level: dict keys={list(unwrapped)[:8]}", flush=True)
+            _dump(stops_payload, limit=6000)
             stops_entries = _stop_entries(stops_payload)
-            print(f"  _stop_entries -> {len(stops_entries)} stop(s): "
+            print(f"  _stop_entries -> {len(stops_entries)} stop(s); names: "
                   f"{[s.get('name') for s in stops_entries[:10]]}", flush=True)
 
-        # STEP 7 — tpl_stop_timeline raw for the matched stop
+        # STEP 7 — tpl_stop_timeline raw (calibrate timeline shape + check if it carries a name)
         print(f"\n===== STEP 7: tpl_stop_timeline (match {PROBE_STOP!r}) =====", flush=True)
         match = _match_stop(stops_entries, PROBE_STOP)
-        if match is None:
-            print(f"  no stop matched {PROBE_STOP!r} among {len(stops_entries)} stops", flush=True)
-        else:
+        if match is not None:
             print(f"  matched: {match.get('name')!r} -> {match['uri']}", flush=True)
             await _raw(client, "tpl_stop_timeline", {"stop": match["uri"]})
+        elif stops_entries:
+            # No name match (stops have no names) — still probe the FIRST stop URI to capture
+            # the raw timeline shape and see whether it echoes the stop name (next-fix input).
+            probe_uri = stops_entries[0]["uri"]
+            print(f"  no name match for {PROBE_STOP!r}; probing first stop URI: {probe_uri}",
+                  flush=True)
+            await _raw(client, "tpl_stop_timeline", {"stop": probe_uri})
+        else:
+            print("  no stops to probe", flush=True)
 
         # STEP 8 — run_tpl_flow end-to-end (NO LLM): where does the CURRENT client chain stop?
         print("\n===== STEP 8: run_tpl_flow end-to-end (no LLM) =====", flush=True)

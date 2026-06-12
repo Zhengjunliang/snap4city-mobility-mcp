@@ -8,16 +8,33 @@ from snap4city_mobility_mcp.tpl import (
     tpl_template_answer,
 )
 
-ATF_URI = "http://www.disit.org/km4city/resource/AtF"
+# Mirrors the live tpl_agencies catalogue (probe_tpl STEP 1): NO single "Autolinee Toscane"
+# entry — only per-network sub-agencies, with ExtraUrbano Arezzo ordered BEFORE the Florence
+# urban one (the regression guard: the empty/brand default must skip Arezzo for 888-48).
+TRENITALIA_URI = "http://www.disit.org/km4city/resource/Bus_roma_Agency_OP3"
+FI_URBAN_URI = (
+    "http://www.disit.org/km4city/resource/48-UrbanoAreaMetropolitanaFiorentina-gtfs_Agency_888-48"
+)
 AGENCIES = {"agencies": [
-    {"name": "Trenitalia", "uri": "http://www.disit.org/km4city/resource/Trenitalia"},
-    {"name": "ATAF Autolinee Toscane", "uri": ATF_URI},
+    {"name": "Trenitalia", "uri": TRENITALIA_URI},
+    {"name": "Autolinee Toscane - ExtraUrbano Arezzo",
+     "uri": "http://www.disit.org/km4city/resource/28-ExtraurbanoArezzo-gtfs_Agency_888-28"},
+    {"name": "Autolinee Toscane - Urbano Area Metropolitana Fiorentina", "uri": FI_URBAN_URI},
 ]}
 
 
 def _routes(n=3):
+    """Observed tpl_routes_by_line item shape (probe_tpl STEP 5): route URI under `route`,
+    geometry under `wktGeometry` (NOT `wkt`)."""
     return [
-        {"routeUri": f"http://r/{i}", "direction": f"dir{i}", "wkt": "LINESTRING(1 2,3 4)"}
+        {
+            "line": "6",
+            "route": f"http://r/{i}",
+            "firstBusStop": "Novelli",
+            "lastBusStop": "Ospedale Torre Galli",
+            "routeName": "",
+            "wktGeometry": "LINESTRING(1 2,3 4)",
+        }
         for i in range(n)
     ]
 
@@ -55,7 +72,19 @@ async def test_tpl_lines_defaults_to_florence_agency(make_client, make_result):
     ])
     out = await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": ""})
     assert out["unsupported"] is False
-    assert client.calls == [("tpl_agencies", {}), ("tpl_lines", {"agency": ATF_URI})]
+    # Empty text → Florence urban (888-48), skipping the earlier-listed ExtraUrbano Arezzo.
+    assert client.calls == [("tpl_agencies", {}), ("tpl_lines", {"agency": FI_URBAN_URI})]
+
+
+async def test_tpl_lines_brand_autolinee_toscane_prefers_florence(make_client, make_result):
+    # Reproduces chat test 7: the brand "Autolinee Toscane" has no single entry; it must
+    # resolve to the Florence urban network (888-48), NOT the first ExtraUrbano Arezzo.
+    client = make_client([
+        make_result(structured=AGENCIES),
+        make_result(structured=[{"shortName": "6"}]),
+    ])
+    await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": "Autolinee Toscane"})
+    assert client.calls[1] == ("tpl_lines", {"agency": FI_URBAN_URI})
 
 
 async def test_tpl_lines_matches_named_agency(make_client, make_result):
@@ -64,7 +93,7 @@ async def test_tpl_lines_matches_named_agency(make_client, make_result):
         make_result(structured=[]),
     ])
     await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": "linee di Trenitalia"})
-    assert client.calls[1][1]["agency"].endswith("/Trenitalia")
+    assert client.calls[1][1]["agency"] == TRENITALIA_URI
 
 
 async def test_tpl_lines_unknown_agency_stops_after_listing(make_client, make_result):
@@ -89,7 +118,7 @@ async def test_tpl_routes_happy_chain(make_client, make_result):
     ])
     out = await run_tpl_flow(client, {"intent": "tpl_routes", "line_text": "6"})
     assert out["unsupported"] is False
-    assert client.calls[1] == ("tpl_routes_by_line", {"line": "6", "agency": ATF_URI})
+    assert client.calls[1] == ("tpl_routes_by_line", {"line": "6", "agency": FI_URBAN_URI})
 
 
 async def test_tpl_stops_probes_first_two_routes_only(make_client, make_result):
@@ -156,8 +185,8 @@ def test_slim_tpl_lines_caps_and_counts():
 def test_slim_tpl_routes_drops_geometry():
     slim = slim_tpl_result("tpl_routes_by_line", _routes(2))
     assert slim["count"] == 2
-    assert all("wkt" not in r and "polyline" not in r for r in slim["routes"])
-    assert slim["routes"][0]["direction"] == "dir0"
+    assert all("wktGeometry" not in r and "wkt" not in r for r in slim["routes"])
+    assert slim["routes"][0]["line"] == "6"  # non-geometry fields kept
 
 
 def test_slim_tpl_stops_names_for_both_shapes():
@@ -181,7 +210,7 @@ def test_extract_tpl_data_lines_and_routes():
     results = [{"name": "tpl_routes_by_line", "result": _routes(2)}]
     data = extract_tpl_data("tpl_routes", results)
     assert len(data["routes"]) == 2
-    assert data["routes"][0]["wkt"]  # WKT kept for the map widget
+    assert data["routes"][0]["wktGeometry"]  # geometry kept for the map widget
 
 
 def test_extract_tpl_data_stops_dedupes_across_routes():
