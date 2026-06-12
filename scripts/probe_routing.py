@@ -33,6 +33,24 @@ ODS = {
 }
 MODES = ["car", "foot_shortest", "foot_quiet", "public_transport"]
 
+# public_transport is timetable-dependent — an empty body may mean "no departure time
+# given", not "mode broken". Probe PT a second time WITH a startdatetime to disambiguate.
+# api-notes §3: routing.startdatetime is free-form ("DD/MM/YYYY, HH:MM" or ISO), default now.
+# Edit to a weekday daytime that actually has service if the default returns nothing.
+PT_STARTDATETIME = "15/06/2026, 09:00"  # Mon morning — buses running
+
+
+async def _probe(client: Client, label: str, args: dict) -> None:
+    """One raw routing call, dumped (shared by the per-mode loop and the PT@datetime pass)."""
+    print(f"\n### {label} ###  (calling...)", flush=True)
+    try:
+        res = await asyncio.wait_for(client.call_tool("routing", args), timeout=30)
+        print(json.dumps(_unwrap(res), ensure_ascii=False)[:2000], flush=True)
+    except asyncio.TimeoutError:
+        print("[TIMEOUT >30s]", flush=True)
+    except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
+        print(f"[EXC] {type(e).__name__}: {e}", flush=True)
+
 
 async def main() -> None:
     print(">>> connecting / fetching apps.json ...", flush=True)
@@ -45,15 +63,17 @@ async def main() -> None:
               json.dumps(tools["routing"].inputSchema, ensure_ascii=False), flush=True)
         for label, od in ODS.items():
             for rt in MODES:
-                print(f"\n### {label} | routetype={rt} ###  (calling...)", flush=True)
-                try:
-                    res = await asyncio.wait_for(
-                        client.call_tool("routing", {**od, "routetype": rt}), timeout=30)
-                    print(json.dumps(_unwrap(res), ensure_ascii=False)[:2000], flush=True)
-                except asyncio.TimeoutError:
-                    print("[TIMEOUT >30s]", flush=True)
-                except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
-                    print(f"[EXC] {type(e).__name__}: {e}", flush=True)
+                await _probe(client, f"{label} | routetype={rt}", {**od, "routetype": rt})
+        # PT-with-departure-time pass: same ODs, public_transport + startdatetime. Compare
+        # against the no-datetime public_transport rows above — if these return a journey
+        # while the bare ones were empty, the orchestrator just needs to pass a startdatetime.
+        print(f"\n--- public_transport WITH startdatetime={PT_STARTDATETIME!r} ---", flush=True)
+        for label, od in ODS.items():
+            await _probe(
+                client,
+                f"{label} | routetype=public_transport @{PT_STARTDATETIME}",
+                {**od, "routetype": "public_transport", "startdatetime": PT_STARTDATETIME},
+            )
     print("\n>>> DONE", flush=True)
 
 
