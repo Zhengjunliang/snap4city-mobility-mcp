@@ -134,6 +134,10 @@ many exist in total. Stop lists cover only the first 2 routes (directions) of th
 line — when the route count is higher, say so. If the results hold only an agency \
 list (the requested agency was not recognized), ask the user to pick one of those \
 agencies.
+- For a stop timetable RESULT (`stop` + `lines` serving it): name the stop and list the \
+lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
+are not available right now — NEVER invent departure times. If the requested stop was not \
+found on the line, say so and suggest checking the stop name or the line.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
 public-transport discovery questions (lines, routes, stops, timetables) and invite \

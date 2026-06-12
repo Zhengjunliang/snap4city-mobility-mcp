@@ -30,6 +30,21 @@ ODS = {
         startlatitude=43.772556, startlongitude=11.257641,
         endlatitude=43.767956, endlongitude=11.260316,
     ),
+    # Both ends OUTSIDE Florence's ZTL — the clean car test. The two ODs above start at the
+    # Duomo (pedestrian zone), so a car failure there is ambiguous; these are pure drives.
+    # If car STILL returns {"error": ""} for these, the car profile is dead server-side.
+    "Sesto Fiorentino->Scandicci (suburb->suburb, no ZTL)": dict(
+        startlatitude=43.8329, startlongitude=11.1986,
+        endlatitude=43.7546, endlongitude=11.1893,
+    ),
+    "Aeroporto Peretola->Prato centro (intercity, fully drivable)": dict(
+        startlatitude=43.8099, startlongitude=11.2051,
+        endlatitude=43.8777, endlongitude=11.1021,
+    ),
+    "Campo di Marte->Coverciano (east Florence, drivable, short)": dict(
+        startlatitude=43.7787, startlongitude=11.2822,
+        endlatitude=43.7770, endlongitude=11.2920,
+    ),
 }
 MODES = ["car", "foot_shortest", "foot_quiet", "public_transport"]
 

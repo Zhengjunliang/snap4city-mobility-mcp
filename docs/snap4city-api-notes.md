@@ -277,15 +277,22 @@ The advisor's `respond` node surfaces `routes[0].{wkt, distance, eta, time}` (+ 
   the Florence-urban agency, `line="6"` → **22 routes**; with ExtraUrbano Arezzo → `{"result": []}`.
   Item shape: `{firstBusStop, lastBusStop, line, route, routeName, wktGeometry}` — route URI key is
   **`route`**, geometry key is **`wktGeometry`** (NOT `wkt`).
-- **`tpl_stops_by_route` returns ONLY a Service-URI array** (`…gtfs_Stop_FI0083_600`, …) — **no
-  human stop names, no GeoJSON with `name`**. So matching a stop by name ("San Marco") is not
-  possible from this endpoint alone; `tpl_stop_timeline` (stop-by-name) needs another strategy
-  (probe STEP 6/7 extended to capture the full stops payload + raw timeline shape next run).
+- **`tpl_stops_by_route` shape = `[service-URI array, {"BusStops": {"features": [...]}}]`.** The
+  GeoJSON is **nested under `BusStops`** (no top-level `type`), and each feature DOES carry the
+  stop `name`, `serviceUri`, and `coordinates` under `properties` (the first 6000-char dump in an
+  earlier run hid the 2nd element → looked name-less). `_stop_entries` reads `properties.name` +
+  `properties.serviceUri`, so stop-by-name matching works.
+- **`tpl_stop_timeline` shape = `{"BusStop": {features:[{properties:{name, code}}]},
+  "busLines": {results:{bindings:[{busLine.value, lineDesc.value, lineUri.value}]}},
+  "realtime": {}, "timetable": {}}`.** It gives the stop + the lines serving it, but in the live
+  probe **`realtime` and `timetable` came back EMPTY** — the schema has no datetime param, so the
+  scheduled times appear unavailable server-side. `_timeline_view` surfaces `{stop, lines,
+  [timetable], [realtime]}`; respond reports the serving lines and says times are unavailable.
 
 ### Open questions (carry forward)
 
-- How to resolve a stop NAME → Service URI for `tpl_stop_timeline`, given `tpl_stops_by_route`
-  yields URIs only? (pending the extended probe STEP 6/7 data)
+- Why are `tpl_stop_timeline.timetable` / `.realtime` empty? Is there a parameter (date/time) or a
+  different tool for actual departure times, or is the GTFS schedule simply not loaded? — ask referente.
 - Will referente fix the car/public_transport empty-body bug? `routing` returns `{"error": ""}`
   for car (even a drivable non-ZTL destination) and public_transport (even WITH `startdatetime`),
   while foot_* work — server-side, see lesson L19. Watch for the next native version bump.

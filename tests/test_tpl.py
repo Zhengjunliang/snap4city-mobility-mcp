@@ -1,6 +1,7 @@
 """Unit tests for the deterministic TPL discovery chains (tpl.py)."""
 
 from snap4city_mobility_mcp.tpl import (
+    _stop_entries,
     _unwrap_tpl,
     extract_tpl_data,
     run_tpl_flow,
@@ -50,6 +51,33 @@ def _stops_payload(wrapped=False, with_service_uri=False):
         feats.append({"properties": props})
     payload = [uris, {"type": "FeatureCollection", "features": feats}]
     return {"result": payload} if wrapped else payload
+
+
+def _stops_payload_bus():
+    """Live tpl_stops_by_route shape (probe STEP 6): the GeoJSON is nested under `BusStops`
+    (no top-level `type`), each feature's properties carry `name` + `serviceUri`."""
+    uris = ["http://s/1", "http://s/2"]
+    feats = [
+        {"properties": {"name": "Novelli", "serviceUri": "http://s/1"}},
+        {"properties": {"name": "San Marco", "serviceUri": "http://s/2"}},
+    ]
+    return [uris, {"BusStops": {"features": feats}}]
+
+
+def _timeline_payload(timetable=None):
+    """Live tpl_stop_timeline shape (probe STEP 7): stop under `BusStop`, serving lines under
+    `busLines.results.bindings`, `realtime`/`timetable` EMPTY in the observed run."""
+    return {
+        "BusStop": {"features": [{"properties": {"name": "Novelli", "code": "FM0083"}}]},
+        "busLines": {"results": {"bindings": [
+            {"busLine": {"value": "6"}, "lineDesc": {"value": "Novelli-Smn-Torregalli"},
+             "lineUri": {"value": "http://l/6"}},
+            {"busLine": {"value": "84"}, "lineDesc": {"value": "S.Marco Vecchio-Comparetti"},
+             "lineUri": {"value": "http://l/84"}},
+        ]}},
+        "realtime": {},
+        "timetable": timetable or {},
+    }
 
 
 # --- _unwrap_tpl ---------------------------------------------------------------
@@ -193,6 +221,27 @@ def test_slim_tpl_stops_names_for_both_shapes():
     for payload in (_stops_payload(), _stops_payload(wrapped=True)):
         slim = slim_tpl_result("tpl_stops_by_route", payload)
         assert slim == {"count": 2, "stops": ["STAZIONE SMN", "SAN MARCO"]}
+    # Live BusStops-wrapper shape (probe STEP 6) — names now resolve (were None before).
+    assert slim_tpl_result("tpl_stops_by_route", _stops_payload_bus()) == {
+        "count": 2, "stops": ["Novelli", "San Marco"]
+    }
+
+
+def test_stop_entries_buswrapper_shape():
+    entries = _stop_entries(_stops_payload_bus())
+    assert [(e["name"], e["uri"]) for e in entries] == [
+        ("Novelli", "http://s/1"), ("San Marco", "http://s/2")
+    ]
+
+
+def test_slim_tpl_timeline_real_shape():
+    slim = slim_tpl_result("tpl_stop_timeline", _timeline_payload())
+    assert slim == {
+        "stop": "Novelli", "lines": ["6", "84"], "line_count": 2, "timetable_available": False
+    }
+    assert slim_tpl_result(
+        "tpl_stop_timeline", _timeline_payload(timetable={"x": 1})
+    )["timetable_available"] is True
 
 
 def test_slim_tpl_error_passthrough():
@@ -222,9 +271,12 @@ def test_extract_tpl_data_stops_dedupes_across_routes():
     assert [s["uri"] for s in data["stops"]] == ["http://s/1", "http://s/2"]
 
 
-def test_extract_tpl_data_timeline_and_empty():
-    results = [{"name": "tpl_stop_timeline", "result": [{"time": "10:15"}]}]
-    assert extract_tpl_data("tpl_timeline", results) == {"timeline": [{"time": "10:15"}]}
+def test_extract_tpl_data_timeline_real_shape_and_empty():
+    results = [{"name": "tpl_stop_timeline", "result": _timeline_payload()}]
+    data = extract_tpl_data("tpl_timeline", results)
+    assert data["stop"] == "Novelli"
+    assert [ln["line"] for ln in data["lines"]] == ["6", "84"]
+    assert "timetable" not in data  # empty in the live probe → not surfaced
     assert extract_tpl_data("tpl_timeline", []) == {}
     assert extract_tpl_data("route", results) == {}
 
@@ -234,5 +286,7 @@ def test_extract_tpl_data_timeline_and_empty():
 def test_tpl_template_answers():
     assert "6" in tpl_template_answer("tpl_lines", {"lines": [{"shortName": "6"}]})
     assert "Fermate" in tpl_template_answer("tpl_stops", {"stops": [{"name": "SAN MARCO", "uri": "u"}]})
-    assert "passaggi" in tpl_template_answer("tpl_timeline", {"timeline": [{"time": "10:15"}]})
+    tl = tpl_template_answer("tpl_timeline", {"stop": "Novelli", "lines": [{"line": "6"}, {"line": "84"}]})
+    assert "Novelli" in tl and "6" in tl
     assert tpl_template_answer("tpl_lines", {}) is None
+    assert tpl_template_answer("tpl_timeline", {}) is None

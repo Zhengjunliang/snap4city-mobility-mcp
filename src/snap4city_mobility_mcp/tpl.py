@@ -126,13 +126,31 @@ def _route_uris(payload: Any) -> list[str]:
     return uris
 
 
+def _features(obj: Any) -> list[Any]:
+    """Features list from a (possibly wrapped) FeatureCollection-ish dict. The live tpl
+    shapes nest it under a wrapper key (probe STEP 6/7): `{"BusStops": {"features": [...]}}`
+    (tpl_stops_by_route) and `{"BusStop": {"features": [...]}}` (tpl_stop_timeline) — the
+    GeoJSON has no top-level `type`. Falls back to a direct `features` list (the documented
+    plain FeatureCollection) so both shapes parse."""
+    if not isinstance(obj, dict):
+        return []
+    feats = obj.get("features")
+    if isinstance(feats, list):
+        return feats
+    for v in obj.values():
+        if isinstance(v, dict) and isinstance(v.get("features"), list):
+            return v["features"]
+    return []
+
+
 def _stop_entries(payload: Any) -> list[dict[str, Any]]:
     """[{name, uri}] from a tpl_stops_by_route payload.
 
-    Documented shape: [service URI array, GeoJSON FeatureCollection]. Assumed
-    mapping (calibrate on the first live run — run_tpl_flow logs raw heads):
-    name from feature properties.name (fallback .address); URI from
-    properties.serviceUri, else POSITIONAL alignment with the URI array.
+    Live shape (probe STEP 6): `[service-URI array, {"BusStops": {"features": [...]}}]` — the
+    GeoJSON is nested under `BusStops` and each feature's `properties` carry `name` +
+    `serviceUri` (and coordinates). Name from properties.name (fallback .address); URI from
+    properties.serviceUri, else POSITIONAL alignment with the URI array. `_features` also
+    accepts the plain documented FeatureCollection.
     """
     payload = _unwrap_tpl(payload)
     uris: list[Any] | None = None
@@ -141,12 +159,12 @@ def _stop_entries(payload: Any) -> list[dict[str, Any]]:
         for part in payload:
             if isinstance(part, list) and uris is None:
                 uris = part
-            elif isinstance(part, dict) and part.get("type") == "FeatureCollection":
+            elif isinstance(part, dict) and geo is None and _features(part):
                 geo = part
-    elif isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+    elif isinstance(payload, dict):
         geo = payload
     entries = []
-    for i, f in enumerate((geo or {}).get("features") or []):
+    for i, f in enumerate(_features(geo or {})):
         if not isinstance(f, dict):
             continue
         props = f.get("properties") or {}
@@ -155,7 +173,7 @@ def _stop_entries(payload: Any) -> list[dict[str, Any]]:
             uri = uris[i]
         if uri:
             entries.append({"name": _first_str(props, ("name", "address")), "uri": uri})
-    if not entries and isinstance(uris, list):  # no usable GeoJSON — URIs only
+    if not entries and isinstance(uris, list):  # no usable features — URIs only
         entries = [{"name": None, "uri": u} for u in uris if isinstance(u, str)]
     return entries
 
@@ -252,6 +270,43 @@ async def run_tpl_flow(client: Client, slots: dict[str, Any]) -> dict[str, Any]:
     return {"tool_results": results, "unsupported": False}
 
 
+def _timeline_view(payload: Any) -> dict[str, Any]:
+    """Structured view of a tpl_stop_timeline payload (live shape, probe STEP 7):
+    `{"BusStop": {"features": [{"properties": {"name": ...}}]},
+      "busLines": {"results": {"bindings": [{"busLine": {"value"}, "lineDesc": {"value"},
+                  "lineUri": {"value"}}]}}, "realtime": {}, "timetable": {}}`.
+
+    Returns `{stop, lines, [timetable], [realtime]}` (only the keys present), or `{}` when
+    nothing is usable. NOTE: `timetable`/`realtime` came back EMPTY in the live probe — the
+    stop's scheduled times appear unavailable server-side; they are surfaced only when present
+    so respond can report the serving lines and say times aren't available, never invent them.
+    """
+    payload = _unwrap_tpl(payload)
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, Any] = {}
+    stop_feats = _features(payload.get("BusStop") or payload.get("BusStops") or {})
+    name = (stop_feats[0].get("properties") or {}).get("name") if stop_feats else None
+    if name:
+        out["stop"] = name
+    bindings = (((payload.get("busLines") or {}).get("results") or {}).get("bindings")) or []
+    lines = []
+    for b in bindings:
+        if not isinstance(b, dict) or not (b.get("busLine") or {}).get("value"):
+            continue
+        lines.append({
+            "line": b["busLine"]["value"],
+            "desc": (b.get("lineDesc") or {}).get("value"),
+            "uri": (b.get("lineUri") or {}).get("value"),
+        })
+    if lines:
+        out["lines"] = lines
+    for key in ("timetable", "realtime"):  # the actual schedule — empty in the live probe
+        if payload.get(key):
+            out[key] = payload[key]
+    return out
+
+
 def slim_tpl_result(name: str, result: Any) -> Any:
     """Compact LLM view of a tpl payload (L12) — counts + capped items, never a
     full GeoJSON or route WKT. Full fidelity stays in the tool_results audit."""
@@ -261,6 +316,15 @@ def slim_tpl_result(name: str, result: Any) -> Any:
     if name == "tpl_stops_by_route":
         entries = _stop_entries(result)
         return {"count": len(entries), "stops": [e.get("name") or e["uri"] for e in entries[:keep]]}
+    if name == "tpl_stop_timeline":
+        view = _timeline_view(result)
+        lines = view.get("lines") or []
+        return {
+            "stop": view.get("stop"),
+            "lines": [ln.get("line") for ln in lines[:keep]],
+            "line_count": len(lines),
+            "timetable_available": bool(view.get("timetable") or view.get("realtime")),
+        }
     items = _generic_list(result)
     if name == "tpl_routes_by_line":
         slimmed = [
@@ -269,7 +333,7 @@ def slim_tpl_result(name: str, result: Any) -> Any:
             for it in items[:keep]
         ]
         return {"count": len(items), "routes": slimmed}
-    key = {"tpl_agencies": "agencies", "tpl_lines": "lines", "tpl_stop_timeline": "events"}[name]
+    key = {"tpl_agencies": "agencies", "tpl_lines": "lines"}[name]
     return {"count": len(items), key: items[:keep]}
 
 
@@ -302,8 +366,7 @@ def extract_tpl_data(intent: str, results: list[dict[str, Any]]) -> dict[str, An
                     stops.append(s)
         return {"stops": stops[:TPL_DATA_KEEP]} if stops else {}
     if intent == "tpl_timeline":
-        items = _generic_list(_last_ok_result(results, "tpl_stop_timeline"))
-        return {"timeline": items[:TPL_DATA_KEEP]} if items else {}
+        return _timeline_view(_last_ok_result(results, "tpl_stop_timeline"))
     return {}
 
 
@@ -326,11 +389,18 @@ def tpl_template_answer(intent: str, data: dict[str, Any]) -> str | None:
         names = _names(data["lines"], ("shortName", "short_name", "lineNumber", "name", "uri"))
         return f"Linee disponibili: {', '.join(names[:15])} ({len(data['lines'])} mostrate)."
     if intent == "tpl_routes" and data.get("routes"):
-        names = _names(data["routes"], ("direction", "name", "routeUri", "uri"))
+        names = _names(data["routes"], ("firstBusStop", "routeName", "route", "uri"))
         return f"Percorsi trovati: {', '.join(names[:6])} ({len(data['routes'])} mostrati)."
     if intent == "tpl_stops" and data.get("stops"):
         names = _names(data["stops"], ("name", "uri"))
         return f"Fermate: {', '.join(names[:15])} ({len(data['stops'])} mostrate)."
-    if intent == "tpl_timeline" and data.get("timeline"):
-        return f"Trovati {len(data['timeline'])} passaggi programmati alla fermata."
+    if intent == "tpl_timeline" and (data.get("lines") or data.get("timetable")):
+        stop = data.get("stop") or "questa fermata"
+        if data.get("timetable"):
+            return f"Orari programmati disponibili per {stop}."
+        lines = ", ".join(str(ln.get("line")) for ln in data.get("lines", [])[:12])
+        return (
+            f"La fermata {stop} è servita dalle linee: {lines}. "
+            "Orari programmati non disponibili al momento."
+        )
     return None
