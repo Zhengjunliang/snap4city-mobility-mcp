@@ -153,8 +153,8 @@ The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also
 
 ```json
 {
-  "ok": true,
-  "intent": "route",
+  "status": "success",
+  "request_type": "route",
   "data": {
     "wkt": "LINESTRING(11.255 43.773, ...)",   // FULL geometry — map widget draws this
     "distance_km": 0.679, "eta": "HH:MM:SS", "duration": "00:10:00"

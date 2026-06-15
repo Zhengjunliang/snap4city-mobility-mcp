@@ -73,24 +73,22 @@ a piazza Dalmazia in Firenze" → origin_text="piazza Duomo, Firenze", \
 destination_text="piazza Dalmazia, Firenze"); NEVER add a city the user did not say.
 - Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
 request — they never change the slots. E.g. "ciao, voglio andare da stazione di \
-Rifredi a piazza Dalmazia a piedi" → intent="route", origin_text="stazione di \
-Rifredi", destination_text="piazza Dalmazia", mode="foot_shortest". Same for \
+Rifredi a piazza Dalmazia a piedi" → request_type="journey", origin_text="stazione \
+di Rifredi", destination_text="piazza Dalmazia", mode="foot_shortest". Same for \
 "I want to go from A to B" / "come arrivo da A a B".
 - For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
 reuse the origin/destination from earlier in the conversation and change only what \
-the user changed (here: mode → public_transport). Same for tpl follow-ups ("e le \
-fermate?" after asking about line 6 → intent="tpl_stops", line_text="6").
+the user changed (here: mode → public_transport). Same for transit_info follow-ups \
+("e le fermate?" after asking about line 6 → request_type="transit_info", \
+info_kind="stops", line_text="6").
 - Map travel mode: walk / on foot → foot_shortest (quiet or scenic walk → \
 foot_quiet); drive / car → car; bus / tram / public transport / 公交 → \
 public_transport.
-- Pick intent: a point-to-point trip → "route"; "which lines does agency X run" → \
-"tpl_lines"; "routes of line N" → "tpl_routes"; "stops on a route" → "tpl_stops"; \
-"timetable at a stop" → "tpl_timeline"; anything else → "other".
-- For tpl intents fill the tpl slots: "quali linee ha Autolinee Toscane?" → \
-intent="tpl_lines", agency_text="Autolinee Toscane"; "percorsi della linea 6" → \
-intent="tpl_routes", line_text="6"; "fermate della linea T1" → intent="tpl_stops", \
-line_text="T1"; "orari della linea 6 alla fermata San Marco" → \
-intent="tpl_timeline", line_text="6", stop_text="San Marco".
+- request_type and info_kind: classify by STRUCTURE, not keywords. An \
+origin→destination trip (both places named or carried from earlier) is a "journey" \
+EVEN when the query says bus/line/tram ("linee che collegano A e B" is a journey, \
+not a line lookup). A network reference question with no trip is "transit_info"; \
+then set info_kind (lines/routes/stops/timeline) per the schema. Neither → "other".
 - agency_text / line_text / stop_text stay '' unless the user asked about \
 transport lines, routes, stops or timetables.
 - The service area is Tuscany only; do not invent places outside it."""
@@ -152,10 +150,15 @@ _EXTRACT_SLOTS_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "intent": {
+                "request_type": {
                     "type": "string",
-                    "enum": ["route", "tpl_lines", "tpl_routes", "tpl_stops", "tpl_timeline", "other"],
-                    "description": "What the user wants.",
+                    "enum": ["journey", "transit_info", "other"],
+                    "description": "Classify by STRUCTURE, not vocabulary. 'journey' = the user wants to get from an origin to a destination (both named, or carried over from earlier in the chat) — use 'journey' even when transit words like bus/line/tram appear. 'transit_info' = a reference question about the transport network (which lines/routes/stops, or a stop timetable) with NO origin-destination trip. 'other' = neither.",
+                },
+                "info_kind": {
+                    "type": "string",
+                    "enum": ["lines", "routes", "stops", "timeline", ""],
+                    "description": "Only when request_type='transit_info' (else ''): 'lines' = which lines a network/agency runs; 'routes' = the routes of one line; 'stops' = the stops along a line; 'timeline' = the timetable at a stop.",
                 },
                 "origin_text": {
                     "type": "string",
@@ -187,8 +190,8 @@ _EXTRACT_SLOTS_SCHEMA = {
             # optional ones (a real run extracted origin but no destination). '' marks
             # a genuinely absent slot.
             "required": [
-                "intent", "origin_text", "destination_text", "mode",
-                "agency_text", "line_text", "stop_text",
+                "request_type", "info_kind", "origin_text", "destination_text",
+                "mode", "agency_text", "line_text", "stop_text",
             ],
         },
     },
@@ -198,10 +201,33 @@ _EXTRACT_SLOTS_SCHEMA = {
 class AdvisorState(TypedDict, total=False):
     messages: list[dict[str, Any]]  # chat history (system + user + assistant) for multi-turn
     intent: str  # from understand: route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
-    slots: dict[str, Any]  # understand output: {intent, origin_text, destination_text, mode, agency_text, line_text, stop_text}
+    slots: dict[str, Any]  # understand output: {request_type, info_kind, intent (mapped), origin_text, destination_text, mode, agency_text, line_text, stop_text}
     tool_results: list[dict[str, Any]]  # structured audit: [{name, args, result}] per call
     unsupported: bool  # True when execute could not run a deterministic flow ("other" intent / missing required slots)
     final: dict[str, Any]  # widget JSON assembled by respond node
+
+
+# Two-axis classification (request_type + info_kind) folds into the internal `intent`
+# vocabulary the deterministic flow dispatches on, so execute/tpl/respond stay unchanged.
+_INFO_KIND_TO_INTENT = {
+    "lines": "tpl_lines",
+    "routes": "tpl_routes",
+    "stops": "tpl_stops",
+    "timeline": "tpl_timeline",
+}
+
+
+def _request_to_intent(slots: dict[str, Any]) -> str:
+    """Map the LLM's two-axis classification to one internal `intent` string.
+
+    journey → route; transit_info → tpl_<info_kind> (unknown/blank info_kind → other,
+    handled downstream as unsupported); anything else → other."""
+    rt = slots.get("request_type")
+    if rt == "journey":
+        return "route"
+    if rt == "transit_info":
+        return _INFO_KIND_TO_INTENT.get(slots.get("info_kind") or "", "other")
+    return "other"
 
 
 async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
@@ -209,6 +235,8 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
 
     A forced `tool_choice` makes the gateway return structured `tool_calls`, so this
     stage never falls back to the pythonic-text shape that plagues free tool use.
+    The model classifies on two axes (request_type + info_kind); `_request_to_intent`
+    folds that into the internal `intent` the rest of the graph dispatches on.
     """
     history = state["messages"]
     convo = [m for m in history if m.get("role") in ("user", "assistant")]
@@ -224,8 +252,9 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
         if calls:
             raw = (calls[0].get("function") or {}).get("arguments")
             parsed = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(parsed, dict) and parsed.get("intent"):
+            if isinstance(parsed, dict) and parsed.get("request_type"):
                 slots = parsed
+                slots["intent"] = _request_to_intent(parsed)
     except (json.JSONDecodeError, Llama4Error) as e:
         # Fall back to {"intent": "other"} — execute treats it as unsupported; the
         # debug log keeps the cause visible (LLM error vs. genuinely empty slots).
@@ -556,12 +585,13 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON: the reply lives in `messages[-1].content` (OpenAI-standard) — no
-    # custom top-level `answer` field. `data` is the route payload; `messages` is the
-    # multi-turn history to pass back.
+    # custom top-level `answer` field. `status` is the JSend-style outcome
+    # ("success"/"error"); `request_type` names the served intent; `data` is the route
+    # payload; `messages` is the multi-turn history to pass back.
     return {
         "final": {
-            "ok": True,
-            "intent": intent,
+            "status": "success",
+            "request_type": intent,
             "data": data,
             "messages": messages,  # updated history for multi-turn (last turn = the reply)
         }
@@ -614,4 +644,4 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     async with Client(cfg) as client:
         graph = _build_graph(client, llm)
         out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
-    return out.get("final", {"ok": False, "error": "no final state produced", "messages": messages})
+    return out.get("final", {"status": "error", "error": "no final state produced", "messages": messages})

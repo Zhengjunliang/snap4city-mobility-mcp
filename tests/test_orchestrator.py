@@ -13,6 +13,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _build_graph,
     _extract_data,
     _pick_coord,
+    _request_to_intent,
     execute,
     respond,
     understand,
@@ -81,14 +82,24 @@ class _RaisingLLM:
 
 async def test_understand_parses_slots(make_llm):
     llm = make_llm([_slots_response(
-        '{"intent":"route","origin_text":"Duomo","destination_text":"Santa Croce","mode":"foot_shortest"}'
+        '{"request_type":"journey","info_kind":"","origin_text":"Duomo",'
+        '"destination_text":"Santa Croce","mode":"foot_shortest"}'
     )])
     out = await understand(
         {"messages": [{"role": "user", "content": "from Duomo to Santa Croce on foot"}]}, llm=llm
     )
-    assert out["intent"] == "route"
+    assert out["intent"] == "route"  # journey folded into the internal route intent
     assert out["slots"]["origin_text"] == "Duomo"
     assert out["slots"]["mode"] == "foot_shortest"
+
+
+def test_request_to_intent_maps_both_axes():
+    """The two-axis classification folds into the internal `intent` vocabulary."""
+    assert _request_to_intent({"request_type": "journey"}) == "route"
+    assert _request_to_intent({"request_type": "transit_info", "info_kind": "lines"}) == "tpl_lines"
+    assert _request_to_intent({"request_type": "transit_info", "info_kind": "timeline"}) == "tpl_timeline"
+    assert _request_to_intent({"request_type": "transit_info", "info_kind": ""}) == "other"  # unsupported
+    assert _request_to_intent({"request_type": "other"}) == "other"
 
 
 def test_extract_slots_schema_requires_all_fields():
@@ -96,10 +107,11 @@ def test_extract_slots_schema_requires_all_fields():
     it was optional. All slots must stay required ('' marks an absent one)."""
     params = _EXTRACT_SLOTS_SCHEMA["function"]["parameters"]
     assert set(params["required"]) == {
-        "intent", "origin_text", "destination_text", "mode",
+        "request_type", "info_kind", "origin_text", "destination_text", "mode",
         "agency_text", "line_text", "stop_text",
     }
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
+    assert "" in params["properties"]["info_kind"]["enum"]  # '' = not a transit_info request
 
 
 # --- _pick_coord (L17) -------------------------------------------------------
@@ -214,7 +226,7 @@ async def test_respond_uses_llm_answer(make_llm):
     }
     out = await respond(state, llm=llm)
     final = out["final"]
-    assert final["ok"] is True
+    assert final["status"] == "success"
     assert "answer" not in final  # reply lives in messages[-1], not a custom field
     reply = final["messages"][-1]
     assert reply["role"] == "assistant"

@@ -6,7 +6,7 @@ keep chatting (follow-ups like "那坐公交呢?" resolve against history). Empt
 Shows ONLY the LLM's own reply (`messages[-1].content`) — the `respond` node already
 phrased distance/ETA into natural language (and fell back to its own template into the
 same slot on LLM error), so nothing is hardcoded here. The FULL output JSON the dashboard
-consumes (ok/intent/data-with-WKT/messages) is appended per turn to `outputs.txt` for
+consumes (status/request_type/data-with-WKT/messages) is appended per turn to `outputs.txt` for
 offline inspection of the whole flow; both `outputs.txt` and `debug.log` are reset at
 each session start (only the current session's turns are kept).
 
@@ -50,7 +50,7 @@ def _reply(final: dict) -> str:
     final/answer was produced at all (an infra failure, e.g. the MCP server was
     unreachable), where there is no assistant turn to show.
     """
-    if not final.get("ok"):
+    if final.get("status") != "success":
         return f"✗ {final.get('error', 'request failed')}"
     return next(
         (m["content"] for m in reversed(final.get("messages") or [])
@@ -60,9 +60,12 @@ def _reply(final: dict) -> str:
     )
 
 
-def _log_turn(query: str, final: dict) -> None:
-    """Append one turn's full output JSON to outputs.txt (inspectable flow log)."""
-    block = json.dumps({"query": query, "final": final}, ensure_ascii=False, indent=2)
+def _log_turn(final: dict) -> None:
+    """Append one turn's full output JSON to outputs.txt (inspectable flow log).
+
+    Writes the dashboard payload as-is — no `query`/`final` wrapper. The current
+    turn's query already lives in `final.messages[-2].content` (the last user turn)."""
+    block = json.dumps(final, ensure_ascii=False, indent=2)
     with OUTPUTS.open("a", encoding="utf-8") as f:
         f.write(block + "\n" + "=" * 80 + "\n")
 
@@ -92,8 +95,8 @@ async def main() -> None:
         try:
             final = await run_advisor(query, history)
         except Exception as e:  # infra failure (MCP/LLM unreachable) — keep the REPL alive
-            final = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        _log_turn(query, final)  # backend: full JSON → outputs.txt
+            final = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        _log_turn(final)  # backend: full JSON → outputs.txt
         history = final.get("messages", history)  # carry multi-turn state
         print("✦", _reply(final), "\n")  # UI: only the LLM's own words
 
