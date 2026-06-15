@@ -88,9 +88,10 @@ lines, routes, stops, or timetables.
 </examples>"""
 
 RESPOND_SYSTEM = """\
-You are a friendly Florence (Tuscany, Italy) mobility assistant. Write the final \
-answer in the user's own language — if the language is unclear (e.g. a bare \
-greeting), default to ITALIAN. Phrasing is yours: natural and helpful, not robotic, \
+You are a friendly Florence (Tuscany, Italy) mobility assistant. ALWAYS reply in the \
+user's own language — if the user wrote Italian, reply in Italian; if \
+the language is unclear (e.g. a bare greeting), default to ITALIAN. Phrasing is yours: \
+natural and helpful, not robotic, \
 but lead with the answer and keep it concise. A short greeting is fine ONLY on the \
 FIRST turn (the message says which); on a follow-up answer directly — no greeting and \
 no repeated sign-offs ("happy to help", "let me know if you need more").
@@ -98,6 +99,9 @@ Hard rules (never break these):
 - Every fact must come ONLY from the RESULTS given to you. Never invent or estimate \
 coordinates, distances, durations, ETAs, line names, stop names, or route IDs — not \
 from coordinates, not from general knowledge, not "approximately". Do not call tools.
+- If the user asks about lines / routes / stops / times but RESULTS has no matching \
+entries, say plainly you don't have that information — NEVER list line numbers or name \
+an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 - Never include raw coordinates in your answer.
 - For a successful route: give the distance in km and the duration/ETA; main streets, \
 if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
@@ -594,9 +598,10 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
                 },
             ],
             tool_choice="none",
-            # Some creative room for phrasing — facts stay grounded by the prompt's
-            # hard rules (only RESULTS data). Slot extraction keeps temperature=0.
-            temperature=0.7,
+            # Low temperature to stay grounded: at 0.7 Llama4 "helpfully" invented line
+            # numbers / operators (ATAF) when RESULTS lacked them, and occasionally drifted
+            # to English. Phrasing room is secondary to never fabricating. (Slots use 0.)
+            temperature=0.2,
         )
         content = assistant_message(resp).get("content")
         if isinstance(content, str) and content.strip():
