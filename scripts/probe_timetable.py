@@ -1,27 +1,29 @@
-"""Direct probe — WHY the bus timetable comes back empty, and whether ANY tool can yield
-real departure times at all.
+"""Direct probe — is the empty bus timetable REALLY server-side, or did we test too narrowly?
 
 Run on JupyterHub (s4c env): python scripts/probe_timetable.py
 Public km4city backend (auth dropped from schema) → no LLM creds needed.
 
-Background (lesson L21): `tpl_stop_timeline` returns `{stop, lines}` but its `timetable` /
-`realtime` keys came back EMPTY. An earlier, narrower probe established that the tool's schema
-has ONLY a `stop` param (5 datetime param names all rejected) → empty is NOT a missing-param
-problem. This deeper version answers the two questions still open:
+An earlier probe found ONE Florence (AT) stop with empty timetable/realtime and called it
+server-side (lesson L21). Before trusting that, this version attacks the three ways that
+conclusion could be wrong:
 
-  Q1  What EXACTLY is in timetable/realtime? (full payload, never truncated — earlier probe
-      cut at 3000 chars so the keys' real value/type/length were never seen.)
-  Q2  Is there ANY OTHER tool that can return departure times? The earlier probe only
-      keyword-matched tool NAMES; the server has been silently adding tools (L22), and a
-      schedule capability could hide in a tool DESCRIPTION or a sibling line-level endpoint.
-      So: dump every tool's full description + inputSchema, flag the schedule-ish ones, and
-      generically try each flagged tool against the resolved stop/line URIs.
+  P1  TOOLS — list every tool, flag the schedule-ish ones (name OR description). A schedule
+      capability could hide in a tool we never tried.
+  P2  OTHER STOPS / AGENCIES — does the timetable come back empty everywhere, or only for AT
+      Firenze? Resolve a stop on several agencies (Florence urban, Roma ATAC, Athens OASA) and
+      dump tpl_stop_timeline timetable/realtime for each. If some agency DOES carry times, the
+      gap is data-coverage, not "no tool can ever do it".
+  P3  CONTROL — does service_info_dev EVER return time-varying/realtime data? Pull real
+      services near Florence (and a sensor-ish category) and call service_info_dev with a time
+      window. If a sensor returns time-varying data, the TOOL + PARAMS are correct → the empty
+      bus result is genuinely "this stop has no data", not "we called it wrong". If NOTHING
+      ever returns realtime, suspect the tool/params instead.
+  P4  PARAM FORMAT — the bus stop 400'd ("failed access") only with fromtime/totime set. Retry
+      with ISO datetime and 'n-hour'/'n-day' to rule out the time FORMAT causing the 400.
 
-Decision after running:
-  - timetable/realtime POPULATED in tpl_stop_timeline → client just needs to surface them.
-  - some OTHER flagged tool returns real times → wire THAT into the tpl_timeline flow.
-  - empty everywhere → server-side, no client fix; keep the honest "times unavailable" and
-    keep it a referente item. (Re-confirms L21 with full evidence.)
+Decision: empty in P2 across agencies AND P3 proves the tool works on sensors AND P4 shows the
+400 is data-access (not format) ⇒ genuinely server-side (GTFS stop_times + realtime not loaded
+for AT). Otherwise we have a client-side path to wire in.
 """
 
 import asyncio
@@ -32,16 +34,20 @@ from fastmcp import Client
 from snap4city_mobility_mcp.mcp_tools import _build_config, _unwrap
 from snap4city_mobility_mcp.tpl import (
     _agency_entries,
+    _generic_list,
     _resolve_agency,
     _route_uris,
     _stop_entries,
     _unwrap_tpl,
 )
 
-LINE = "6"  # proven live: line "6" + Florence urban agency 888-48 → routes/stops (L21)
-PREFERRED_STOP_HINT = "marco"  # "Museo Di San Marco" was a live line-6 stop
+# Agencies to compare in P2. Florence urban resolves via "" default; the others by name token
+# (km4city carries Roma ATAC + Athens OASA — proven in the tpl_agencies dump).
+AGENCY_PROBES = ("", "ATAC", "Athens")
 
-# A tool is "schedule-ish" if any of these appear in its name OR description.
+# Florence center — search here for real (likely realtime-capable) services in P3.
+FLO_LAT, FLO_LON = 43.7765, 11.2486
+
 SCHEDULE_HINTS = (
     "time", "schedule", "timetable", "orari", "orario", "realtime", "real-time",
     "hour", "depart", "arriv", "passage", "passaggi", "avl", "gtfs", "frequency",
@@ -58,110 +64,139 @@ def _full(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
-def _describe_value(label: str, val) -> None:
-    """Print a key's exact emptiness signature — this is the Q1 evidence."""
-    kind = type(val).__name__
-    size = len(val) if isinstance(val, (list, dict, str)) else "n/a"
-    print(f"  {label}: type={kind} len={size} value={_full(val)[:600]}", flush=True)
+def _scan_service_uris(obj, out: list[str]) -> None:
+    """Recursively collect km4city service URIs from any payload shape."""
+    if isinstance(obj, str):
+        if obj.startswith("http") and "km4city/resource" in obj and obj not in out:
+            out.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _scan_service_uris(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _scan_service_uris(v, out)
 
 
-async def _try_tool(client: Client, name: str, args: dict) -> None:
-    print(f"\n### TRY {name}  args={args}", flush=True)
+def _timetable_signature(tl) -> str:
+    """One-line verdict on a tpl_stop_timeline / service_info payload."""
+    tl = _unwrap_tpl(tl)
+    if not isinstance(tl, dict):
+        return f"(not a dict: {type(tl).__name__})"
+    if "error" in tl:
+        return f"ERROR {_full(tl)[:200]}"
+    tt, rt = tl.get("timetable"), tl.get("realtime")
+    return (
+        f"timetable={type(tt).__name__}(len={len(tt) if isinstance(tt, (list, dict)) else '?'}) "
+        f"realtime={type(rt).__name__}(len={len(rt) if isinstance(rt, (list, dict)) else '?'}) "
+        f"keys={list(tl)}"
+    )
+
+
+async def _call(client: Client, name: str, args: dict):
     try:
-        res = await asyncio.wait_for(client.call_tool(name, args), timeout=30)
-        print(_full(_unwrap(res))[:2500], flush=True)
+        return _unwrap(await asyncio.wait_for(client.call_tool(name, args), timeout=30))
     except asyncio.TimeoutError:
-        print("[TIMEOUT >30s]", flush=True)
+        return {"error": "TIMEOUT >30s"}
     except Exception as e:  # noqa: BLE001 — diagnostic, surface anything
-        print(f"[EXC] {type(e).__name__}: {e}", flush=True)
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+async def _resolve_stop(client: Client, agencies, agency_text: str):
+    """First (line→route→stop) chain for an agency. Returns (agency_uri, stop_uri, stop_name)."""
+    agency_uri = _resolve_agency(agencies, agency_text)
+    if not agency_uri:
+        # name-token fallback for the non-Florence probes
+        for a in agencies:
+            if agency_text and agency_text.lower() in str(a.get("name") or "").lower():
+                agency_uri = a["uri"]
+                break
+    if not agency_uri:
+        return None, None, None
+    lines = _generic_list(await _call(client, "tpl_lines", {"agency": agency_uri}))
+    line_ref = None
+    for it in lines:
+        if isinstance(it, dict):
+            for k in ("uri", "lineUri", "line", "shortName", "name"):
+                if isinstance(it.get(k), str) and it[k].strip():
+                    line_ref = it[k]
+                    break
+        if line_ref:
+            break
+    if not line_ref:
+        return agency_uri, None, None
+    routes = await _call(client, "tpl_routes_by_line", {"line": line_ref, "agency": agency_uri})
+    route_uris = _route_uris(routes)
+    if not route_uris:
+        return agency_uri, None, None
+    stops = _stop_entries(await _call(client, "tpl_stops_by_route", {"route": route_uris[0]}))
+    if not stops:
+        return agency_uri, None, None
+    return agency_uri, stops[0]["uri"], stops[0].get("name")
 
 
 async def main() -> None:
     print(">>> connecting / fetching apps.json ...", flush=True)
     cfg = await _build_config()
     async with Client(cfg) as client:
+        # --- P1: tool inventory (compact) ---
         tools = {t.name: t for t in await client.list_tools()}
-        print(f"\n=== {len(tools)} TOOLS — full description + schema ===", flush=True)
-        flagged: list[str] = []
-        for name, t in tools.items():
-            desc = getattr(t, "description", "") or ""
-            hits = sorted(set(_flag(name) + _flag(desc)))
-            mark = f"  <<< SCHEDULE-ISH: {hits}" if hits else ""
-            if hits:
-                flagged.append(name)
-            print(f"\n- {name}{mark}", flush=True)
-            print(f"    desc: {desc[:300]}", flush=True)
-            print(f"    schema: {_full(t.inputSchema)[:500]}", flush=True)
-        print(f"\n=== FLAGGED (schedule-ish) tools: {flagged} ===", flush=True)
+        flagged = [n for n, t in tools.items()
+                   if _flag(n) or _flag(getattr(t, "description", "") or "")]
+        print(f"\n=== P1: {len(tools)} tools; schedule-ish = {flagged} ===", flush=True)
 
-        # --- resolve a real line-6 stop URI + capture its serving line URIs ---
-        print(f"\n>>> resolving a real line-{LINE} stop URI ...", flush=True)
         agencies = _agency_entries(_unwrap(await client.call_tool("tpl_agencies", {})))
-        agency_uri = _resolve_agency(agencies, "")  # "" → Florence urban default
-        print("agency_uri:", agency_uri, flush=True)
-        if not agency_uri:
-            print("!! no agency resolved — cannot continue", flush=True)
-            return
-        routes_payload = _unwrap(
-            await client.call_tool("tpl_routes_by_line", {"line": LINE, "agency": agency_uri})
+        print(f"agencies available: {len(agencies)}", flush=True)
+
+        # --- P2: timetable across several agencies (not just AT Firenze) ---
+        print("\n=== P2: tpl_stop_timeline across agencies ===", flush=True)
+        flo_stop = None
+        for atext in AGENCY_PROBES:
+            agency_uri, stop_uri, stop_name = await _resolve_stop(client, agencies, atext)
+            label = atext or "(Florence urban default)"
+            if not stop_uri:
+                print(f"- {label}: could not resolve a stop (agency_uri={agency_uri})", flush=True)
+                continue
+            tl = await _call(client, "tpl_stop_timeline", {"stop": stop_uri})
+            print(f"- {label}: stop={stop_name!r}\n    {_timetable_signature(tl)}", flush=True)
+            if atext == "":
+                flo_stop = stop_uri
+
+        # --- P3: CONTROL — can service_info_dev return time-varying data on a real sensor? ---
+        print("\n=== P3: control — service_info_dev on real services near Florence ===", flush=True)
+        cats = await _call(client, "get_service_categories", {"mode": "detailed"})
+        print("service categories (head):", _full(cats)[:400], flush=True)
+        near = await _call(
+            client, "service_search_near_gps_position",
+            {"latitude": FLO_LAT, "longitude": FLO_LON, "maxdistance": 1.0},
         )
-        route_uris = _route_uris(routes_payload)
-        print("route_uris (first 3):", route_uris[:3], flush=True)
-        if not route_uris:
-            print("!! no routes for line — cannot continue", flush=True)
-            return
-        stops_payload = _unwrap(await client.call_tool("tpl_stops_by_route", {"route": route_uris[0]}))
-        stops = _stop_entries(stops_payload)
-        print("stops found: %d" % len(stops), flush=True)
-        if not stops:
-            print("!! no stops parsed — cannot continue", flush=True)
-            return
-        pick = next(
-            (s for s in stops if PREFERRED_STOP_HINT in str(s.get("name") or "").lower()),
-            stops[len(stops) // 2],
-        )
-        stop_uri = pick["uri"]
-        print("picked stop:", pick.get("name"), "->", stop_uri, flush=True)
+        uris: list[str] = []
+        _scan_service_uris(near, uris)
+        # drop the bus-stop/route URIs — we want OTHER services (sensors/parking/etc.)
+        sensor_uris = [u for u in uris if "gtfs_Stop" not in u and "gtfs_Route" not in u][:6]
+        print(f"non-TPL service URIs found near Florence: {len(sensor_uris)}", flush=True)
+        for u in sensor_uris:
+            res = await _call(client, "service_info_dev",
+                              {"serviceuri": u, "fromtime": "1-day", "totime": "0-minute"})
+            blob = _full(res)
+            has_rt = any(k in blob for k in ('"realtime"', "valueDate", "measuredTime",
+                                             "time_series", "values", '"date"'))
+            print(f"- {u}\n    time-varying? {has_rt}  head={blob[:300]}", flush=True)
 
-        # --- Q1: full tpl_stop_timeline payload + EXACT timetable/realtime signature ---
-        print("\n=== Q1: tpl_stop_timeline FULL payload ===", flush=True)
-        tl = _unwrap_tpl(_unwrap(await client.call_tool("tpl_stop_timeline", {"stop": stop_uri})))
-        print("top-level keys:", list(tl) if isinstance(tl, dict) else f"(not a dict: {type(tl).__name__})",
-              flush=True)
-        print("full payload:", _full(tl)[:6000], flush=True)
-        line_uris: list[str] = []
-        if isinstance(tl, dict):
-            for key in ("timetable", "realtime", "departures", "passages", "orari"):
-                if key in tl:
-                    _describe_value(key, tl[key])
-            # collect serving-line Route URIs — service_info(_dev) may carry their realtime data
-            bindings = (((tl.get("busLines") or {}).get("results") or {}).get("bindings")) or []
-            line_uris = [
-                (b.get("lineUri") or {}).get("value")
-                for b in bindings if isinstance(b, dict) and (b.get("lineUri") or {}).get("value")
-            ]
-        print("serving line URIs:", line_uris[:5], flush=True)
+        # --- P4: is the bus-stop 400 a FORMAT problem or a data-access problem? ---
+        print("\n=== P4: fromtime/totime FORMAT variants on the AT Firenze stop ===", flush=True)
+        if flo_stop:
+            for ft, tt in (("1-hour", "0-minute"), ("1-day", "0-minute"),
+                           ("2026-06-16T08:00:00", "2026-06-16T10:00:00")):
+                res = await _call(client, "service_info_dev",
+                                  {"serviceuri": flo_stop, "fromtime": ft, "totime": tt})
+                print(f"- fromtime={ft!r} totime={tt!r} -> {_full(res)[:300]}", flush=True)
+        else:
+            print("(no Florence stop resolved — skipped)", flush=True)
 
-        # --- Q2: the realtime/time-varying tools, called CORRECTLY ---
-        # service_info / service_info_dev take `serviceuri` (lowercase) — earlier probe guessed
-        # wrong names. The stop URI IS a serviceUri; line Route URIs are services too. dev variant
-        # adds fromtime/totime ('n-hour'/'n-minute'/ISO) for the time-varying window. If real
-        # departures exist anywhere, they surface here, NOT in tpl_stop_timeline's empty keys.
-        print("\n=== Q2: service_info / service_info_dev on the stop + serving lines ===", flush=True)
-        targets = [("stop", stop_uri)] + [("line", u) for u in line_uris[:2]]
-        for label, uri in targets:
-            await _try_tool(client, "service_info", {"serviceuri": uri})
-            await _try_tool(client, "service_info_dev", {"serviceuri": uri})
-            await _try_tool(
-                client, "service_info_dev",
-                {"serviceuri": uri, "fromtime": "0-minute", "totime": "120-minute"},
-            )
-            print(f"    ^ ({label}) {uri}", flush=True)
-
-    print("\n>>> DONE — Q1: are tpl_stop_timeline timetable/realtime empty dicts? "
-          "Q2: does service_info(_dev) expose real departure/realtime data the timeline tool "
-          "omits? If service_info_dev returns time-varying data ⇒ wire it in; if empty too "
-          "⇒ server-side, confirms L21.", flush=True)
+    print("\n>>> DONE. Read: P2 (any agency with non-empty timetable?), P3 (does service_info_dev "
+          "EVER return time-varying data ⇒ tool/params OK), P4 (is the 400 format vs data-access). "
+          "Empty in P2 + P3 works on sensors + P4 is data-access ⇒ truly server-side for AT.",
+          flush=True)
 
 
 if __name__ == "__main__":
