@@ -3,10 +3,8 @@
 This module does NOT implement any tools — the tools live on referente's remote
 `snap4agentic_advisor_native` server. Here we only: (1) connect to it, (2) execute
 the deterministic graph's tool calls via `client.call_tool`, unwrapping the
-response and smoothing referente's known km4city quirks. `fetch_tool_schemas`
-(server schemas → OpenAI function format) has no production caller — the
-deterministic flows (route + tpl_*) hand-roll their chains; it remains the only
-seam for handing the server's own schemas to an LLM, should that return.
+response and smoothing referente's known km4city quirks. The deterministic flows
+(route + tpl_*) hand-roll their tool chains — no LLM ever picks a tool (L13).
 
 Runtime = Snap4City JupyterHub: the dashboard's intranet IP is directly reachable
 (GET http://192.168.1.117:8000/apps.json -> 200), so DASHBOARD_URL defaults to it.
@@ -26,7 +24,7 @@ import logging
 import os
 import re
 import unicodedata
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 from fastmcp import Client
@@ -55,11 +53,9 @@ DASHBOARD_URL = os.environ.get("S4C_DASHBOARD_URL", "http://192.168.1.117:8000")
 INTERNAL_DASHBOARD_URL = "http://192.168.1.117:8000"
 NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 
-RouteType = Literal["public_transport", "foot_shortest", "foot_quiet", "car"]
-
-# The subset of the server's tools we expose to the LLM (core mobility set). This is
-# a *selection*, not an implementation — the actual schemas are fetched from the
-# server in `fetch_tool_schemas`.
+# The core mobility tools the deterministic flows are allowed to call. `TOOL_NAMES`
+# (below) is the allowlist `exec_tool` checks before forwarding any call to the
+# server — an unlisted name returns `{"error": ...}` instead of hitting the network.
 EXPOSED_TOOLS = (
     "address_search_location",
     "routing",
@@ -85,35 +81,6 @@ async def _build_config() -> dict[str, Any]:
             }
         }
     }
-
-
-def _to_openai_schema(tool: Any) -> dict[str, Any]:
-    """MCP Tool (from list_tools) → OpenAI function schema. Drops `authentication`
-    (public backend — never ask the model for a token)."""
-    params = dict(getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}})
-    props = dict(params.get("properties") or {})
-    props.pop("authentication", None)
-    params["properties"] = props
-    if "required" in params:
-        params["required"] = [r for r in params["required"] if r != "authentication"]
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": (tool.description or "").strip(),
-            "parameters": params,
-        },
-    }
-
-
-async def fetch_tool_schemas(client: Client) -> list[dict[str, Any]]:
-    """OpenAI function schemas for the exposed tools, taken from the server itself.
-
-    The schemas come from the MCP server's own `list_tools()` — we never hand-write
-    them, so signatures are always whatever the server currently declares.
-    """
-    by_name = {t.name: t for t in await client.list_tools()}
-    return [_to_openai_schema(by_name[n]) for n in EXPOSED_TOOLS if n in by_name]
 
 
 def _unwrap(result: Any) -> Any:
@@ -355,7 +322,7 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
 # The referente geocoder is non-deterministic over time: the SAME query returns 100
 # in-region hits one moment and 100% foreign hits (zero Tuscan) the next — observed
 # 2026-06-11, "Università ... Morgagni" failed mid-chat yet geocoded fine minutes later
-# via scripts/probe_geocode.py. The 2-pass + bbox filter already recovers whenever ANY
+# when probed directly. The 2-pass + bbox filter already recovers whenever ANY
 # Tuscan hit comes back, so the only failure is the transient zero-Tuscan window; a
 # bounded retry usually clears it (fires only on that specific error). See lesson L20.
 GEOCODE_FLAKY_RETRIES = 2

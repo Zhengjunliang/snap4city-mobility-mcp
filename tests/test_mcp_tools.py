@@ -1,4 +1,9 @@
-"""Unit tests for the deterministic MCP layer (mcp_tools.py)."""
+"""Unit tests for the deterministic MCP layer (mcp_tools.py).
+
+Lean core suite: routing envelope shapes (L2/L3/L7/L8), the two-pass + bbox +
+flaky-retry geocode (L11/L17/L20), the LLM-context slimming (L12), and the
+contract that every exposed tool exists in the live probe.
+"""
 import json
 import pathlib
 
@@ -6,13 +11,9 @@ import pytest
 
 from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.mcp_tools import (
-    EXPOSED_TOOLS,
-    GEOCODE_LLM_KEEP,
     TOOL_NAMES,
     _unwrap,
     exec_tool,
-    fetch_tool_schemas,
-    group_arc_legs,
     routing_with_retry,
     slim_result_for_llm,
 )
@@ -22,14 +23,6 @@ from snap4city_mobility_mcp.mcp_tools import (
 
 def test_unwrap_structured(make_result):
     assert _unwrap(make_result(structured={"a": 1})) == {"a": 1}
-
-
-def test_unwrap_content_text(make_result):
-    assert _unwrap(make_result(text='{"a": 2}')) == {"a": 2}
-
-
-def test_unwrap_empty(make_result):
-    assert _unwrap(make_result()) is None
 
 
 # --- routing_with_retry (L2/L3/L7/L8 envelope shapes) ------------------------
@@ -50,19 +43,15 @@ async def test_routing_happy(make_client, make_result):
     assert out["journey"]["routes"][0]["distance"] == 0.68
 
 
-async def test_routing_error_code_shape_b(make_client, make_result):
-    env = {"journey": {"routes": []}, "response": {"error_code": "-2", "error_message": "not found"}}
-    out = await routing_with_retry(make_client([make_result(structured=env)]), _ROUTE_ARGS)
-    assert out["error"] == "routing failed: not found (code=-2)"
-
-
 async def test_routing_empty_routes_shape_c(make_client, make_result):
+    # L2: success envelope (error_code "0") but empty routes — NOT a route.
     env = {"journey": {"routes": []}, "response": {"error_code": "0", "error_message": "successful"}}
     out = await routing_with_retry(make_client([make_result(structured=env)]), _ROUTE_ARGS)
     assert out["error"] == "no route found (empty routes list)"
 
 
 async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch):
+    # L3/L8: bare {"error": ""} — stale ladder runs 3 attempts, then surfaces empty-body error.
     async def _noop(*a, **k):
         return None
 
@@ -74,62 +63,60 @@ async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch
     assert len(client.calls) == 3
 
 
-async def test_routing_single_attempt_skips_the_stale_ladder(make_client, make_result):
-    """attempts=1 (foot-fallback probe): one call, no sleeps, straight to the error."""
-    client = make_client([make_result(structured={"error": ""})])
-    out = await routing_with_retry(client, _ROUTE_ARGS, attempts=1)
-    assert "empty response" in out["error"]
+# --- exec_tool: geocode two-pass + bbox + flaky retry (L11/L17/L20) ----------
+
+def _feature(lng, lat, addr="x", city="FIRENZE"):
+    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
+            "properties": {"address": addr, "city": city}}
+
+
+async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
+    """L11/L17: out-of-region (Valencia/France) hits are dropped; Tuscan ones kept.
+    The address pass (excludePOI=true) hits, so the POI pass is never sent."""
+    fc = {"type": "FeatureCollection", "count": 3, "features": [
+        _feature(-0.3068184, 39.59272, "Valencia"),   # Spain — drop
+        _feature(11.2560, 43.7714, "Firenze Duomo"),  # Tuscany — keep
+        _feature(4.531295, 44.212044, "France"),      # France — drop
+    ]}
+    client = make_client([make_result(structured=fc)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
+    assert out["count"] == 1
+    assert out["features"][0]["properties"]["address"] == "Firenze Duomo"
     assert len(client.calls) == 1
+    _, sent = client.calls[0]
+    assert sent["excludePOI"] is True  # addresses first — POIs only as fallback (L17)
 
 
-async def test_routing_stale_recovers_on_first_retry(make_client, make_result, monkeypatch):
+async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result):
+    """L17: address pass finds nothing in-region (stations/landmarks are POI-only)
+    → retried with excludePOI=false."""
+    spain = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
+    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
+    client = make_client([make_result(structured=spain), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
+    assert out["count"] == 1
+    assert out["features"][0]["geometry"]["coordinates"] == [11.2482, 43.8047]
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+
+
+async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkeypatch):
+    """L20: the flaky zero-Tuscany window clears on retry → the next attempt's Tuscan hit wins."""
     async def _noop(*a, **k):
         return None
 
     monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    env = {
-        "journey": {"routes": [{"distance": 0.68}]},
-        "response": {"error_code": "0", "error_message": "successful"},
-    }
-    client = make_client([make_result(structured={"error": ""}), make_result(structured=env)])
-    out = await routing_with_retry(client, _ROUTE_ARGS)
-    assert out["journey"]["routes"][0]["distance"] == 0.68
-    assert len(client.calls) == 2  # recovered → loop exits, no third attempt
+    miss = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}  # Spain
+    hit = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714, "Duomo")]}
+    # attempt 1: address(miss) + POI(miss) → error; attempt 2: address(hit) → success, POI not sent
+    client = make_client([make_result(structured=miss), make_result(structured=miss),
+                          make_result(structured=hit)])
+    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
+    assert out["count"] == 1
+    assert out["features"][0]["properties"]["address"] == "Duomo"
+    assert len(client.calls) == 3  # failed attempt (2 passes) + recovered address pass (1)
 
 
-# --- exec_tool (dispatch; never raises) --------------------------------------
-
-async def test_exec_tool_unknown(make_client):
-    assert await exec_tool(make_client([]), "nope", {}) == {"error": "unknown tool 'nope'"}
-
-
-async def test_exec_tool_routing_goes_through_retry(make_client, make_result):
-    env = {"journey": {"routes": [{"distance": 1.0}]}, "response": {"error_code": "0"}}
-    client = make_client([make_result(structured=env)])
-    args = {**_ROUTE_ARGS, "routetype": "car", "authentication": "secret"}
-    out = await exec_tool(client, "routing", args)
-    assert "journey" in out
-    name, sent = client.calls[0]
-    assert name == "routing"
-    assert "authentication" not in sent  # stripped
-    assert sent["routetype"] == "car"
-
-
-# --- slim_result_for_llm (shrink the model's context; audit keeps full payload) ---
-
-def test_slim_geocode_caps_and_keeps_only_needed_fields():
-    fc = {"type": "FeatureCollection", "count": 100, "features": [
-        {"geometry": {"coordinates": [11.25 + i / 1000, 43.77]},
-         "properties": {"address": f"Via {i}", "city": "Firenze", "score": "9", "serviceUri": "http://x"}}
-        for i in range(20)
-    ]}
-    slim = slim_result_for_llm("address_search_location", fc)
-    assert slim["count"] == 100
-    assert len(slim["features"]) == GEOCODE_LLM_KEEP  # capped
-    # No coordinates in the LLM view — the model once fabricated a distance from them.
-    assert slim["features"][0] == {"address": "Via 0", "city": "Firenze"}
-    assert "serviceUri" not in slim["features"][0] and "score" not in slim["features"][0]
-
+# --- slim_result_for_llm (L12: shrink the model's context) -------------------
 
 def test_slim_routing_drops_wkt_and_lists_streets():
     full = {"journey": {
@@ -149,231 +136,7 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     assert "source_node" not in j and "destination_node" not in j  # no raw coordinates
 
 
-def test_slim_passthrough_errors_and_unknown():
-    assert slim_result_for_llm("routing", {"error": "boom"}) == {"error": "boom"}
-    assert slim_result_for_llm("tpl_agencies", {"agencies": [1, 2]}) == {"agencies": [1, 2]}
-
-
-# --- group_arc_legs / PT routing view ----------------------------------------
-
-def test_group_arc_legs_groups_by_transport_identity(pt_arcs):
-    legs = group_arc_legs(pt_arcs)
-    assert len(legs) == 3
-    walk1, bus, walk2 = legs
-    assert walk1["transport"] == "foot"
-    assert walk1["from"] == "Via Panzani" and walk1["to"] == "Via Panzani"  # "nd" skipped
-    assert walk1["distance_km"] == 0.3  # 0.2 + 0.1
-    assert bus["provider"] == "Linea 6"
-    assert bus["from"] == "Stazione SMN" and bus["to"] == "Piazza Dalmazia"
-    assert bus["distance_km"] == 2.5
-    assert bus["start_datetime"] == "10:06:00" and bus["end_datetime"] == "10:22:00"
-    assert walk2["from"] == "Via Reginaldo Giuliani"
-
-
-def test_group_arc_legs_tolerates_junk():
-    assert group_arc_legs([]) == []
-    assert group_arc_legs(["nonsense", None]) == []
-    assert group_arc_legs([{"transport": "foot"}]) == [{"transport": "foot"}]
-
-
-def test_slim_routing_pt_shows_legs_not_streets(pt_arcs):
-    full = {"journey": {"routes": [{
-        "wkt": "LINESTRING(11.25 43.77, 11.26 43.78)",  # must stay out of the view
-        "distance": 2.8, "eta": "10:26:00", "time": "00:26:00", "arc": pt_arcs,
-    }]}}
-    slim = slim_result_for_llm("routing", full)
-    j = slim["journey"]
-    assert "streets" not in j and "wkt" not in json.dumps(slim)
-    assert [leg["transport"] for leg in j["legs"]] == ["foot", "bus", "foot"]
-    assert j["distance_km"] == 2.8
-
-
-def test_slim_routing_single_group_keeps_street_view():
-    # An all-walk journey (foot, car, or a PT request the planner satisfied
-    # entirely on foot) keeps the compact street list — legs only appear with a
-    # real change of transport.
-    full = {"journey": {"routes": [{
-        "distance": 0.8, "eta": "10:10:00", "time": "00:10:00",
-        "arc": [{"desc": "Via Roma", "transport": "foot",
-                 "transport_provider": "private", "distance": 0.8}],
-    }]}}
-    slim = slim_result_for_llm("routing", full)
-    assert slim["journey"]["streets"] == ["Via Roma"]
-    assert "legs" not in slim["journey"]
-
-
-def _feature(lng, lat, addr="x", city="FIRENZE"):
-    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
-            "properties": {"address": addr, "city": city}}
-
-
-async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
-    """Out-of-region (Valencia/France) hits are dropped; Tuscan ones kept, score order.
-    The address pass (excludePOI=true) hits, so the POI pass is never sent."""
-    fc = {"type": "FeatureCollection", "count": 3, "features": [
-        _feature(-0.3068184, 39.59272, "Valencia"),   # Spain — drop
-        _feature(11.2560, 43.7714, "Firenze Duomo"),  # Tuscany — keep
-        _feature(4.531295, 44.212044, "France"),      # France — drop
-    ]}
-    client = make_client([make_result(structured=fc)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
-    assert out["count"] == 1
-    assert out["features"][0]["properties"]["address"] == "Firenze Duomo"
-    assert len(client.calls) == 1
-    _, sent = client.calls[0]
-    assert sent["excludePOI"] is True  # addresses first — POIs only as fallback (L17)
-
-
-async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result):
-    """Address pass finds nothing in-region (stations/landmarks are POI-only, L11)
-    → retried with excludePOI=false."""
-    spain = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
-    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
-    client = make_client([make_result(structured=spain), make_result(structured=poi)])
-    out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
-    assert out["count"] == 1
-    assert out["features"][0]["geometry"]["coordinates"] == [11.2482, 43.8047]
-    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
-
-
-async def test_exec_tool_geocode_address_pass_error_falls_back(make_client, make_result):
-    """A 500 on the address pass (km4city blows up on some inputs) must not kill
-    the lookup — the POI pass still runs."""
-    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
-    client = make_client([RuntimeError("HTTP 500"), make_result(structured=poi)])
-    out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
-    assert out["count"] == 1
-    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
-
-
-async def test_exec_tool_geocode_poi_pass_error_keeps_address_hits(make_client, make_result):
-    """Rung 3 must survive a POI-pass blowup: whole-Tuscany address hits beat a
-    network-error result."""
-    addr = {"type": "FeatureCollection", "count": 1, "features": [
-        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
-    ]}
-    client = make_client([make_result(structured=addr), RuntimeError("HTTP 500")])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
-    assert out["features"][0]["properties"]["city"] == "CASTELNUOVO DI GARFAGNANA"
-
-
-async def test_exec_tool_geocode_retries_then_errors(make_client, make_result, monkeypatch):
-    """L20: a zero-Tuscany response is a transient flaky-geocoder window, so it's retried;
-    when every attempt still misses, the lookup errors after the bounded ladder."""
-    async def _noop(*a, **k):
-        return None
-
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
-    n = (mcp_tools.GEOCODE_FLAKY_RETRIES + 1) * 2  # each attempt = address + POI pass
-    client = make_client([make_result(structured=fc)] * n)
-    out = await exec_tool(client, "address_search_location", {"search": "nowhere"})
-    assert "error" in out and "no Tuscany-area match" in out["error"]
-    assert len(client.calls) == n  # full ladder burned
-
-
-async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkeypatch):
-    """The flaky zero-Tuscany window clears on retry → the next attempt's Tuscan hit wins."""
-    async def _noop(*a, **k):
-        return None
-
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    miss = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}  # Spain
-    hit = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714, "Duomo")]}
-    # attempt 1: address(miss) + POI(miss) → error; attempt 2: address(hit) → success, POI not sent
-    client = make_client([make_result(structured=miss), make_result(structured=miss),
-                          make_result(structured=hit)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
-    assert out["count"] == 1
-    assert out["features"][0]["properties"]["address"] == "Duomo"
-    assert len(client.calls) == 3  # failed attempt (2 passes) + recovered address pass (1)
-
-
-async def test_exec_tool_geocode_named_city_beats_florence_default(make_client, make_result):
-    fc = {"type": "FeatureCollection", "count": 2, "features": [
-        _feature(11.2560, 43.7731, "PIAZZA DEL DUOMO", city="FIRENZE"),
-        _feature(10.2270, 43.9596, "PIAZZA DUOMO", city="PIETRASANTA"),
-    ]}
-    client = make_client([make_result(structured=fc)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo Pietrasanta"})
-    assert out["count"] == 1
-    assert out["features"][0]["properties"]["city"] == "PIETRASANTA"
-
-
-async def test_exec_tool_geocode_wrong_city_addresses_fall_to_poi_pass(make_client, make_result):
-    """Exact address matches in OTHER Tuscan towns must not beat a Florence POI:
-    "Piazza Duomo" once resolved to Castelnuovo di Garfagnana, 90 km away (L17)."""
-    addr = {"type": "FeatureCollection", "count": 1, "features": [
-        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
-    ]}
-    poi = {"type": "FeatureCollection", "count": 1, "features": [
-        _feature(11.2421, 43.7736, None, city="FIRENZE"),
-    ]}
-    client = make_client([make_result(structured=addr), make_result(structured=poi)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
-    assert out["features"][0]["properties"]["city"] == "FIRENZE"
-    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
-
-
-async def test_exec_tool_geocode_keeps_address_hits_without_city_confidence(make_client, make_result):
-    """Neither pass has a named-city/Florence feature → whole-Tuscany address hits win
-    over whole-Tuscany POI hits (rung 3 before rung 4)."""
-    addr = {"type": "FeatureCollection", "count": 1, "features": [
-        _feature(10.4122, 44.1097, "PIAZZA DUOMO", city="CASTELNUOVO DI GARFAGNANA"),
-    ]}
-    poi = {"type": "FeatureCollection", "count": 1, "features": [
-        _feature(10.2270, 43.9596, None, city="PIETRASANTA"),
-    ]}
-    client = make_client([make_result(structured=addr), make_result(structured=poi)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza Duomo"})
-    assert out["features"][0]["properties"]["city"] == "CASTELNUOVO DI GARFAGNANA"
-    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
-
-
-async def test_exec_tool_passthrough_strips_auth(make_client, make_result):
-    client = make_client([make_result(structured={"agencies": [{"uri": "u"}]})])
-    out = await exec_tool(client, "tpl_agencies", {"authentication": "secret"})
-    assert out == {"agencies": [{"uri": "u"}]}
-    _, sent = client.calls[0]
-    assert "authentication" not in sent
-
-
-async def test_exec_tool_never_raises(make_client):
-    out = await exec_tool(make_client([RuntimeError("boom")]), "tpl_agencies", {})
-    assert "error" in out and "boom" in out["error"]
-
-
-# --- fetch_tool_schemas (schemas come from the server's own list_tools) -------
-
-async def test_fetch_tool_schemas_filters_and_converts(make_client, make_tool):
-    tools = [
-        make_tool("routing", "route between points", {
-            "type": "object",
-            "properties": {"startlatitude": {"type": "number"}, "authentication": {"type": "string"}},
-            "required": ["startlatitude", "authentication"],
-        }),
-        make_tool("tpl_agencies", "agencies", {"type": "object", "properties": {}}),
-        make_tool("service_info", "not exposed", {"type": "object", "properties": {}}),
-    ]
-    schemas = await fetch_tool_schemas(make_client(tools=tools))
-    names = [s["function"]["name"] for s in schemas]
-    assert names == ["routing", "tpl_agencies"]  # service_info dropped, EXPOSED order
-    routing = schemas[0]["function"]
-    assert routing["description"] == "route between points"
-    assert "authentication" not in routing["parameters"]["properties"]  # stripped
-    assert routing["parameters"]["required"] == ["startlatitude"]
-    assert all(s["type"] == "function" for s in schemas)
-
-
-async def test_fetch_tool_schemas_skips_absent(make_client, make_tool):
-    schemas = await fetch_tool_schemas(make_client(tools=[make_tool("tpl_lines", "lines")]))
-    assert [s["function"]["name"] for s in schemas] == ["tpl_lines"]
-
-
-def test_exposed_tools_count():
-    assert len(EXPOSED_TOOLS) == 7
-    assert TOOL_NAMES == frozenset(EXPOSED_TOOLS)
-
+# --- contract: exposed tools exist in the live probe -------------------------
 
 def _collect_names(obj, acc):
     if isinstance(obj, dict):

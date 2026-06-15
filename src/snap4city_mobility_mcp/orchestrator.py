@@ -373,6 +373,15 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
     return {"tool_results": results, "unsupported": False}
 
 
+def _routetype_of(entry: dict[str, Any]) -> str | None:
+    """The `routetype` of a routing audit entry, read back from its json `args`.
+    None when args is absent or malformed (entries built by tests may carry no args)."""
+    try:
+        return json.loads(entry.get("args") or "{}").get("routetype")
+    except json.JSONDecodeError:
+        return None
+
+
 def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Mine the tool-result audit for the widget payload (last successful tool wins)."""
     route_error: str | None = None
@@ -397,11 +406,7 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                     "source_node": journey.get("source_node"),
                     "destination_node": journey.get("destination_node"),
                 }
-                try:
-                    routetype = json.loads(entry.get("args") or "{}").get("routetype")
-                except json.JSONDecodeError:
-                    routetype = None
-                if routetype == "public_transport":
+                if _routetype_of(entry) == "public_transport":
                     # NEW field, pending referente confirmation (same status as
                     # data.arcs): walk/ride legs grouped from the journey arcs.
                     legs = group_arc_legs(first.get("arc") or [])
@@ -495,15 +500,11 @@ def _results_view(
             else slim_result_for_llm(name, e.get("result"))
         )
         item = {"name": name, "result": slim}
-        if e.get("name") == "routing":
+        if name == "routing":
             # Surface WHICH mode this routing attempt used: on failure the LLM can
             # only suggest a sensible alternative ("in auto non si può, prova a
-            # piedi") when it knows the mode that failed. Entries built by tests
-            # may carry no args — tolerate both.
-            try:
-                item["routetype"] = json.loads(e.get("args") or "{}").get("routetype")
-            except json.JSONDecodeError:
-                pass
+            # piedi") when it knows the mode that failed.
+            item["routetype"] = _routetype_of(e)
         view.append(item)
     return {"status": "ok", "results": view}
 

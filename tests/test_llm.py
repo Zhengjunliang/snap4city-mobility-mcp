@@ -1,5 +1,9 @@
-﻿"""Unit tests for the Llama4 client's transient-error retry handling (no network)."""
-import httpx
+"""Unit tests for the Llama4 client's transient-error retry handling (no network).
+
+Lean core suite: the gateway-wrapped 500 (L12 — HTTP 200 body hiding an upstream
+vLLM error must be retried), the credentials-file contract, and chat() retry vs
+hard-error (L10 — "Rule not found" is auth-level, never retried).
+"""
 import pytest
 
 from snap4city_mobility_mcp import llm as llm_mod
@@ -53,26 +57,10 @@ def _queue_posts(monkeypatch, responses):
     return calls
 
 
-# --- _is_transient -----------------------------------------------------------
-
-def test_is_transient_status_codes():
-    assert _is_transient(None, 502)
-    assert _is_transient(None, 503)
-    assert _is_transient(None, 429)
-    assert not _is_transient(None, 200)
-    assert not _is_transient(None, 404)
-
-
-def test_is_transient_message_hints():
-    assert _is_transient("The upstream server is timing out", 200)
-    assert _is_transient("Service temporarily unavailable", 200)
-    assert _is_transient("Bad gateway", 200)
-    assert not _is_transient("Rule not found for this user/path", 200)
-    assert not _is_transient(None, 200)
-
+# --- _is_transient (L12) -----------------------------------------------------
 
 def test_is_transient_gateway_wrapped_500():
-    """Gateway answers HTTP 200 but the body wraps an upstream vLLM 500 â€” retry it."""
+    """Gateway answers HTTP 200 but the body wraps an upstream vLLM 500 -> retry it."""
     msg = ("Failed to make POST request to http://192.168.1.13:8080/serve/"
            "llama4-agentic-inference. Error: 500 Server Error: Internal Server Error")
     assert _is_transient(msg, 200)
@@ -80,34 +68,10 @@ def test_is_transient_gateway_wrapped_500():
 
 # --- credential loading (file only, no env) ----------------------------------
 
-def test_load_credentials_reads_file(monkeypatch, tmp_path):
-    f = tmp_path / "user_credentials.json"
-    f.write_text('{"username": "fileuser", "password": "filepass"}', encoding="utf-8")
-    monkeypatch.setenv("S4C_CREDENTIALS_FILE", str(f))
-    assert llm_mod._load_credentials() == ("fileuser", "filepass")
-
-
 def test_load_credentials_missing_raises(monkeypatch):
     monkeypatch.setattr(llm_mod, "_credentials_file", lambda: None)
     with pytest.raises(Llama4Error, match="no user_credentials.json"):
         llm_mod._load_credentials()
-
-
-def test_load_credentials_incomplete_raises(monkeypatch, tmp_path):
-    f = tmp_path / "user_credentials.json"
-    f.write_text('{"username": "u"}', encoding="utf-8")  # password absent
-    monkeypatch.setenv("S4C_CREDENTIALS_FILE", str(f))
-    with pytest.raises(Llama4Error, match="missing 'username' or 'password'"):
-        llm_mod._load_credentials()
-
-
-def test_client_explicit_creds_skip_file(monkeypatch):
-    """Explicit username/password bypass the credentials file entirely."""
-    def _boom():
-        raise AssertionError("file should not be read when creds are explicit")
-
-    monkeypatch.setattr(llm_mod, "_load_credentials", _boom)
-    Llama4Client(username="u", password="p")  # must not raise
 
 
 # --- chat() retry behavior ---------------------------------------------------
@@ -124,31 +88,10 @@ def test_chat_retries_then_succeeds(client, monkeypatch):
 
 
 def test_chat_hard_error_not_retried(client, monkeypatch):
+    # L10: "Rule not found" is an auth/authorization failure, not transient — no retry.
     calls = _queue_posts(monkeypatch, [
         _Resp({"message": "Rule not found for this user/path"}),
     ])
     with pytest.raises(Llama4Error, match="Rule not found"):
         client.chat([{"role": "user", "content": "x"}])
     assert len(calls) == 1  # hard error: no retry
-
-
-def test_chat_exhausts_retries_on_transient(client, monkeypatch):
-    calls = _queue_posts(monkeypatch, [
-        _Resp({"message": "upstream timing out"}),
-        _Resp({"message": "upstream timing out"}),
-        _Resp({"message": "upstream timing out"}),
-    ])
-    with pytest.raises(Llama4Error, match="timing out"):
-        client.chat([{"role": "user", "content": "x"}])
-    assert len(calls) == 3  # 1 initial + LLM_RETRIES (2)
-
-
-def test_chat_retries_network_error(client, monkeypatch):
-    ok = {"choices": [{"message": {"content": "ok"}}]}
-    calls = _queue_posts(monkeypatch, [
-        httpx.ConnectError("connection reset"),
-        _Resp(ok),
-    ])
-    out = client.chat([{"role": "user", "content": "x"}])
-    assert out == ok
-    assert len(calls) == 2

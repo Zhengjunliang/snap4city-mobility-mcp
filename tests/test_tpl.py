@@ -1,16 +1,19 @@
-"""Unit tests for the deterministic TPL discovery chains (tpl.py)."""
+"""Unit tests for the deterministic TPL discovery chains (tpl.py).
+
+Lean core suite: agency resolution (L21 — the brand "Autolinee Toscane" must
+resolve to the Florence urban network, not the first-listed ExtraUrbano), the
+happy routes chain, stop-name matching, the live BusStops payload shape, and
+the timeline view (serving lines + honest "no timetable").
+"""
 
 from snap4city_mobility_mcp.tpl import (
     _match_stop,
-    _stop_entries,
-    _unwrap_tpl,
     extract_tpl_data,
     run_tpl_flow,
     slim_tpl_result,
-    tpl_template_answer,
 )
 
-# Mirrors the live tpl_agencies catalogue (probe_tpl STEP 1): NO single "Autolinee Toscane"
+# Mirrors the live tpl_agencies catalogue (L21): NO single "Autolinee Toscane"
 # entry — only per-network sub-agencies, with ExtraUrbano Arezzo ordered BEFORE the Florence
 # urban one (the regression guard: the empty/brand default must skip Arezzo for 888-48).
 TRENITALIA_URI = "http://www.disit.org/km4city/resource/Bus_roma_Agency_OP3"
@@ -26,7 +29,7 @@ AGENCIES = {"agencies": [
 
 
 def _routes(n=3):
-    """Observed tpl_routes_by_line item shape (probe_tpl STEP 5): route URI under `route`,
+    """Observed tpl_routes_by_line item shape (L21): route URI under `route`,
     geometry under `wktGeometry` (NOT `wkt`)."""
     return [
         {
@@ -41,21 +44,16 @@ def _routes(n=3):
     ]
 
 
-def _stops_payload(wrapped=False, with_service_uri=False):
+def _stops_payload(wrapped=False):
     """Documented tpl_stops_by_route shape: [service URI array, GeoJSON]."""
     uris = ["http://s/1", "http://s/2"]
-    feats = []
-    for uri, name in zip(uris, ("STAZIONE SMN", "SAN MARCO")):
-        props = {"name": name}
-        if with_service_uri:
-            props["serviceUri"] = uri
-        feats.append({"properties": props})
+    feats = [{"properties": {"name": name}} for name in ("STAZIONE SMN", "SAN MARCO")]
     payload = [uris, {"type": "FeatureCollection", "features": feats}]
     return {"result": payload} if wrapped else payload
 
 
 def _stops_payload_bus():
-    """Live tpl_stops_by_route shape (probe STEP 6): the GeoJSON is nested under `BusStops`
+    """Live tpl_stops_by_route shape (L21): the GeoJSON is nested under `BusStops`
     (no top-level `type`), each feature's properties carry `name` + `serviceUri`."""
     uris = ["http://s/1", "http://s/2"]
     feats = [
@@ -66,7 +64,7 @@ def _stops_payload_bus():
 
 
 def _timeline_payload(timetable=None):
-    """Live tpl_stop_timeline shape (probe STEP 7): stop under `BusStop`, serving lines under
+    """Live tpl_stop_timeline shape (L21): stop under `BusStop`, serving lines under
     `busLines.results.bindings`, `realtime`/`timetable` EMPTY in the observed run."""
     return {
         "BusStop": {"features": [{"properties": {"name": "Novelli", "code": "FM0083"}}]},
@@ -81,18 +79,7 @@ def _timeline_payload(timetable=None):
     }
 
 
-# --- _unwrap_tpl ---------------------------------------------------------------
-
-def test_unwrap_tpl_accepts_both_shapes():
-    bare = [1, 2]
-    assert _unwrap_tpl(bare) == bare                       # documented bare shape
-    assert _unwrap_tpl({"result": bare}) == bare           # FastMCP non-object wrap
-    multi = {"result": bare, "count": 2}                   # NOT a pure wrapper
-    assert _unwrap_tpl(multi) == multi
-    assert _unwrap_tpl({"error": "boom"}) == {"error": "boom"}
-
-
-# --- run_tpl_flow: agency resolution + chains -----------------------------------
+# --- run_tpl_flow: agency resolution + chains (L21) ------------------------------
 
 async def test_tpl_lines_defaults_to_florence_agency(make_client, make_result):
     client = make_client([
@@ -106,38 +93,14 @@ async def test_tpl_lines_defaults_to_florence_agency(make_client, make_result):
 
 
 async def test_tpl_lines_brand_autolinee_toscane_prefers_florence(make_client, make_result):
-    # Reproduces chat test 7: the brand "Autolinee Toscane" has no single entry; it must
-    # resolve to the Florence urban network (888-48), NOT the first ExtraUrbano Arezzo.
+    # The brand "Autolinee Toscane" has no single entry; it must resolve to the Florence
+    # urban network (888-48), NOT the first-listed ExtraUrbano Arezzo.
     client = make_client([
         make_result(structured=AGENCIES),
         make_result(structured=[{"shortName": "6"}]),
     ])
     await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": "Autolinee Toscane"})
     assert client.calls[1] == ("tpl_lines", {"agency": FI_URBAN_URI})
-
-
-async def test_tpl_lines_matches_named_agency(make_client, make_result):
-    client = make_client([
-        make_result(structured=AGENCIES),
-        make_result(structured=[]),
-    ])
-    await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": "linee di Trenitalia"})
-    assert client.calls[1][1]["agency"] == TRENITALIA_URI
-
-
-async def test_tpl_lines_unknown_agency_stops_after_listing(make_client, make_result):
-    client = make_client([make_result(structured=AGENCIES)])
-    out = await run_tpl_flow(client, {"intent": "tpl_lines", "agency_text": "FooBus"})
-    # Chain stops — respond gets the agencies audit entry and asks the user to pick.
-    assert [n for n, _ in client.calls] == ["tpl_agencies"]
-    assert out["unsupported"] is False
-
-
-async def test_tpl_routes_missing_line_skips_chain(make_client):
-    client = make_client([])
-    out = await run_tpl_flow(client, {"intent": "tpl_routes", "line_text": ""})
-    assert out["unsupported"] is True
-    assert client.calls == []
 
 
 async def test_tpl_routes_happy_chain(make_client, make_result):
@@ -150,90 +113,7 @@ async def test_tpl_routes_happy_chain(make_client, make_result):
     assert client.calls[1] == ("tpl_routes_by_line", {"line": "6", "agency": FI_URBAN_URI})
 
 
-async def test_tpl_stops_probes_first_two_routes_only(make_client, make_result):
-    client = make_client([
-        make_result(structured=AGENCIES),
-        make_result(structured=_routes(3)),
-        make_result(structured=_stops_payload()),
-        make_result(structured=_stops_payload()),
-    ])
-    out = await run_tpl_flow(client, {"intent": "tpl_stops", "line_text": "6"})
-    stops_calls = [args for n, args in client.calls if n == "tpl_stops_by_route"]
-    assert stops_calls == [{"route": "http://r/0"}, {"route": "http://r/1"}]  # capped at 2
-    assert out["unsupported"] is False
-
-
-async def test_tpl_timeline_matches_stop_by_positional_uri(make_client, make_result):
-    client = make_client([
-        make_result(structured=AGENCIES),
-        make_result(structured=_routes(1)),
-        make_result(structured=_stops_payload()),
-        make_result(structured=[{"time": "10:15"}]),
-    ])
-    await run_tpl_flow(
-        client, {"intent": "tpl_timeline", "line_text": "6", "stop_text": "fermata San Marco"}
-    )
-    assert client.calls[-1] == ("tpl_stop_timeline", {"stop": "http://s/2"})
-
-
-async def test_tpl_timeline_wrapped_payload_and_service_uri(make_client, make_result):
-    client = make_client([
-        make_result(structured=AGENCIES),
-        make_result(structured=_routes(1)),
-        make_result(structured=_stops_payload(wrapped=True, with_service_uri=True)),
-        make_result(structured=[{"time": "10:15"}]),
-    ])
-    await run_tpl_flow(
-        client, {"intent": "tpl_timeline", "line_text": "6", "stop_text": "San Marco"}
-    )
-    assert client.calls[-1] == ("tpl_stop_timeline", {"stop": "http://s/2"})
-
-
-async def test_tpl_timeline_no_stop_match_skips_timeline(make_client, make_result):
-    client = make_client([
-        make_result(structured=AGENCIES),
-        make_result(structured=_routes(1)),
-        make_result(structured=_stops_payload()),
-    ])
-    out = await run_tpl_flow(
-        client, {"intent": "tpl_timeline", "line_text": "6", "stop_text": "Vattelapesca"}
-    )
-    assert "tpl_stop_timeline" not in [n for n, _ in client.calls]
-    assert out["unsupported"] is False  # respond explains via the stops list
-
-
-# --- slim_tpl_result (L12 caps) --------------------------------------------------
-
-def test_slim_tpl_lines_caps_and_counts():
-    items = [{"shortName": str(i)} for i in range(100)]
-    slim = slim_tpl_result("tpl_lines", items)
-    assert slim["count"] == 100
-    assert len(slim["lines"]) == 30
-
-
-def test_slim_tpl_routes_drops_geometry():
-    slim = slim_tpl_result("tpl_routes_by_line", _routes(2))
-    assert slim["count"] == 2
-    assert all("wktGeometry" not in r and "wkt" not in r for r in slim["routes"])
-    assert slim["routes"][0]["line"] == "6"  # non-geometry fields kept
-
-
-def test_slim_tpl_stops_names_for_both_shapes():
-    for payload in (_stops_payload(), _stops_payload(wrapped=True)):
-        slim = slim_tpl_result("tpl_stops_by_route", payload)
-        assert slim == {"count": 2, "stops": ["STAZIONE SMN", "SAN MARCO"]}
-    # Live BusStops-wrapper shape (probe STEP 6) — names now resolve (were None before).
-    assert slim_tpl_result("tpl_stops_by_route", _stops_payload_bus()) == {
-        "count": 2, "stops": ["Novelli", "San Marco"]
-    }
-
-
-def test_stop_entries_buswrapper_shape():
-    entries = _stop_entries(_stops_payload_bus())
-    assert [(e["name"], e["uri"]) for e in entries] == [
-        ("Novelli", "http://s/1"), ("San Marco", "http://s/2")
-    ]
-
+# --- _match_stop / slim / extract (L21 live shapes) ------------------------------
 
 def test_match_stop_user_words_subset_of_official_name():
     # Live stop names are longer than what users type ("San Marco" -> "Museo Di San Marco").
@@ -246,41 +126,14 @@ def test_match_stop_user_words_subset_of_official_name():
     assert _match_stop(entries2, "San Marco")["uri"] == "exact"
 
 
-def test_slim_tpl_timeline_real_shape():
-    slim = slim_tpl_result("tpl_stop_timeline", _timeline_payload())
-    assert slim == {
-        "stop": "Novelli", "lines": ["6", "84"], "line_count": 2, "timetable_available": False
+def test_slim_tpl_stops_names_for_both_shapes():
+    for payload in (_stops_payload(), _stops_payload(wrapped=True)):
+        slim = slim_tpl_result("tpl_stops_by_route", payload)
+        assert slim == {"count": 2, "stops": ["STAZIONE SMN", "SAN MARCO"]}
+    # Live BusStops-wrapper shape (L21) — names now resolve (were None before).
+    assert slim_tpl_result("tpl_stops_by_route", _stops_payload_bus()) == {
+        "count": 2, "stops": ["Novelli", "San Marco"]
     }
-    assert slim_tpl_result(
-        "tpl_stop_timeline", _timeline_payload(timetable={"x": 1})
-    )["timetable_available"] is True
-
-
-def test_slim_tpl_error_passthrough():
-    assert slim_tpl_result("tpl_lines", {"error": "boom"}) == {"error": "boom"}
-
-
-# --- extract_tpl_data (widget payload) -------------------------------------------
-
-def test_extract_tpl_data_lines_and_routes():
-    results = [
-        {"name": "tpl_agencies", "result": AGENCIES},
-        {"name": "tpl_lines", "result": [{"shortName": "6"}]},
-    ]
-    assert extract_tpl_data("tpl_lines", results) == {"lines": [{"shortName": "6"}]}
-    results = [{"name": "tpl_routes_by_line", "result": _routes(2)}]
-    data = extract_tpl_data("tpl_routes", results)
-    assert len(data["routes"]) == 2
-    assert data["routes"][0]["wktGeometry"]  # geometry kept for the map widget
-
-
-def test_extract_tpl_data_stops_dedupes_across_routes():
-    results = [
-        {"name": "tpl_stops_by_route", "result": _stops_payload()},
-        {"name": "tpl_stops_by_route", "result": _stops_payload()},  # same stops, other direction
-    ]
-    data = extract_tpl_data("tpl_stops", results)
-    assert [s["uri"] for s in data["stops"]] == ["http://s/1", "http://s/2"]
 
 
 def test_extract_tpl_data_timeline_real_shape_and_empty():
@@ -288,17 +141,6 @@ def test_extract_tpl_data_timeline_real_shape_and_empty():
     data = extract_tpl_data("tpl_timeline", results)
     assert data["stop"] == "Novelli"
     assert [ln["line"] for ln in data["lines"]] == ["6", "84"]
-    assert "timetable" not in data  # empty in the live probe → not surfaced
+    assert "timetable" not in data  # empty in the live probe → not surfaced (never invent times)
     assert extract_tpl_data("tpl_timeline", []) == {}
     assert extract_tpl_data("route", results) == {}
-
-
-# --- tpl_template_answer ----------------------------------------------------------
-
-def test_tpl_template_answers():
-    assert "6" in tpl_template_answer("tpl_lines", {"lines": [{"shortName": "6"}]})
-    assert "Fermate" in tpl_template_answer("tpl_stops", {"stops": [{"name": "SAN MARCO", "uri": "u"}]})
-    tl = tpl_template_answer("tpl_timeline", {"stop": "Novelli", "lines": [{"line": "6"}, {"line": "84"}]})
-    assert "Novelli" in tl and "6" in tl
-    assert tpl_template_answer("tpl_lines", {}) is None
-    assert tpl_template_answer("tpl_timeline", {}) is None

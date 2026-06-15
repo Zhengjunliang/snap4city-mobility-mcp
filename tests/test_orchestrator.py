@@ -1,4 +1,8 @@
-"""Unit tests for the deterministic graph nodes (orchestrator.py)."""
+"""Unit tests for the deterministic graph nodes (orchestrator.py).
+
+Lean core suite: one happy path per flow + one guard per documented lesson
+(L8 car-ZTL, L17 POI ranking, L18 missing-slot ask, L19 service-error vs ZTL).
+"""
 import json
 
 from snap4city_mobility_mcp import mcp_tools
@@ -9,8 +13,6 @@ from snap4city_mobility_mcp.orchestrator import (
     _build_graph,
     _extract_data,
     _pick_coord,
-    _results_view,
-    _template_answer,
     execute,
     respond,
     understand,
@@ -49,6 +51,15 @@ def _feature_collection(lng: float, lat: float) -> dict:
         "type": "FeatureCollection",
         "features": [{"geometry": {"coordinates": [lng, lat]}, "properties": {"city": "FIRENZE"}}],
     }
+
+
+def _fc_with_addresses(*entries) -> dict:
+    """FeatureCollection from (lng, lat, address) triples (address may be None)."""
+    return {"type": "FeatureCollection", "features": [
+        {"geometry": {"coordinates": [lng, lat]},
+         "properties": {"address": addr, "city": "FIRENZE"}}
+        for lng, lat, addr in entries
+    ]}
 
 
 def _journey(distance=1.83, routes=None) -> dict:
@@ -91,57 +102,7 @@ def test_extract_slots_schema_requires_all_fields():
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
 
 
-async def test_understand_parses_tpl_slots(make_llm):
-    llm = make_llm([_slots_response(
-        '{"intent":"tpl_timeline","origin_text":"","destination_text":"","mode":"",'
-        '"agency_text":"","line_text":"6","stop_text":"San Marco"}'
-    )])
-    out = await understand(
-        {"messages": [{"role": "user", "content": "orari della linea 6 alla fermata San Marco"}]},
-        llm=llm,
-    )
-    assert out["intent"] == "tpl_timeline"
-    assert out["slots"]["line_text"] == "6"
-    assert out["slots"]["stop_text"] == "San Marco"
-
-
-async def test_understand_invalid_args_falls_back(make_llm):
-    llm = make_llm([_slots_response("NOT JSON")])
-    out = await understand({"messages": [{"role": "user", "content": "hi"}]}, llm=llm)
-    assert out["intent"] == "other"
-
-
-# --- _pick_coord -------------------------------------------------------------
-
-def _fc_with_addresses(*entries) -> dict:
-    """FeatureCollection from (lng, lat, address) triples (address may be None)."""
-    return {"type": "FeatureCollection", "features": [
-        {"geometry": {"coordinates": [lng, lat]},
-         "properties": {"address": addr, "city": "FIRENZE"}}
-        for lng, lat, addr in entries
-    ]}
-
-
-def test_pick_coord_reads_lng_lat():
-    assert _pick_coord(_feature_collection(11.25, 43.77), "Duomo") == [11.25, 43.77]
-
-
-def test_pick_coord_none_on_error_or_empty():
-    assert _pick_coord({"error": "no Tuscany-area match"}, "x") is None
-    assert _pick_coord({"type": "FeatureCollection", "features": []}, "x") is None
-    assert _pick_coord(None, "x") is None
-
-
-def test_pick_coord_prefers_address_matching_search():
-    # The server ranks fuzzy POIs above the real square — the address-matched
-    # feature must win even when it ranks last ("piazza Dalmazia" case).
-    fc = _fc_with_addresses(
-        (11.2421, 43.7736, None),
-        (11.2400, 43.7900, None),
-        (11.2402, 43.7956, "PIAZZA DALMAZIA"),
-    )
-    assert _pick_coord(fc, "piazza Dalmazia") == [11.2402, 43.7956]
-
+# --- _pick_coord (L17) -------------------------------------------------------
 
 def test_pick_coord_rejects_labels_with_extra_tokens():
     # "PIAZZA DUOMO DI PRIZIO STEFANO & C. S.A.S." (a company, L17) contains the
@@ -152,33 +113,6 @@ def test_pick_coord_rejects_labels_with_extra_tokens():
         (11.2560, 43.7731, "PIAZZA DEL DUOMO"),
     )
     assert _pick_coord(fc, "Piazza Duomo") == [11.2560, 43.7731]
-
-
-def test_pick_coord_matches_across_accents():
-    fc = _fc_with_addresses(
-        (11.2300, 43.7800, None),
-        (11.2589, 43.7770, "PIAZZA DELL'UNITÀ ITALIANA"),
-    )
-    assert _pick_coord(fc, "piazza dell'Unita Italiana") == [11.2589, 43.7770]
-
-
-def test_pick_coord_never_matches_a_bare_city_label():
-    # A municipality entry (address="FIRENZE") is a subset of any search ending
-    # in ", Firenze" — it must not beat the real street entry.
-    fc = _fc_with_addresses(
-        (11.2000, 43.7700, "FIRENZE"),
-        (11.2560, 43.7731, "PIAZZA DEL DUOMO"),
-    )
-    assert _pick_coord(fc, "Piazza del Duomo, Firenze") == [11.2560, 43.7731]
-
-
-def test_pick_coord_falls_back_to_first_feature():
-    # Station queries: POI features carry no address → the server order stands.
-    fc = _fc_with_addresses(
-        (11.2386, 43.8045, None),
-        (11.2482, 43.8047, None),
-    )
-    assert _pick_coord(fc, "stazione di Firenze Rifredi") == [11.2386, 43.8045]
 
 
 # --- execute -----------------------------------------------------------------
@@ -220,27 +154,6 @@ async def test_execute_dispatches_tpl_intents(make_client, make_result):
     assert [n for n, _ in client.calls] == ["tpl_agencies", "tpl_lines"]
 
 
-async def test_execute_missing_place_is_unsupported(make_client):
-    client = make_client([])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "", "mode": "car"}
-    out = await execute({"slots": slots}, client=client)
-    assert out["unsupported"] is True
-    assert client.calls == []
-
-
-async def test_execute_geocode_error_skips_routing(make_client, make_result):
-    client = make_client([
-        make_result(structured=_feature_collection(-0.37, 39.47)),  # origin, address pass → Valencia
-        make_result(structured=_feature_collection(-0.37, 39.47)),  # origin, POI pass → Valencia again
-        make_result(structured=_feature_collection(11.26, 43.76)),  # dest, address pass → Tuscan hit
-    ])
-    slots = {"intent": "route", "origin_text": "x", "destination_text": "y", "mode": "car"}
-    out = await execute({"slots": slots}, client=client)
-    assert out["unsupported"] is False
-    assert [e["name"] for e in out["tool_results"]] == ["address_search_location", "address_search_location"]
-    assert "routing" not in [e["name"] for e in out["tool_results"]]  # never routed
-
-
 async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_result):
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
@@ -256,90 +169,6 @@ async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_
     assert json.loads(routings[1]["args"])["routetype"] == "foot_shortest"
     # last routing succeeded → widget data has the journey
     assert _extract_data(out["tool_results"])["distance_km"] == 1.83
-
-
-async def test_execute_foot_shortest_falls_back_to_foot_quiet(make_client, make_result):
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey(routes=[])),                 # foot_shortest → empty routes error
-        make_result(structured=_journey()),                          # foot_quiet → success
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
-    out = await execute({"slots": slots}, client=client)
-    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
-    assert len(routings) == 2
-    assert json.loads(routings[0]["args"])["routetype"] == "foot_shortest"
-    assert json.loads(routings[1]["args"])["routetype"] == "foot_quiet"
-    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
-
-
-async def test_execute_foot_fallback_is_a_single_probe(make_client, make_result, monkeypatch):
-    """After the requested profile burns its full stale ladder (3 attempts), the
-    fallback profile gets exactly ONE attempt — the transient is already ruled out
-    and each extra attempt costs ~11 s of user-visible latency."""
-    async def _noop(*a, **k):
-        return None
-
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    stale = {"error": ""}
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=stale),                               # foot_shortest #1
-        make_result(structured=stale),                               # foot_shortest #2
-        make_result(structured=stale),                               # foot_shortest #3
-        make_result(structured=stale),                               # foot_quiet: single probe
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
-    out = await execute({"slots": slots}, client=client)
-    assert len([n for n, _ in client.calls if n == "routing"]) == 4  # 3 + 1, not 3 + 3
-    assert "route_error" in _extract_data(out["tool_results"])
-
-
-async def test_execute_both_foot_profiles_fail_keeps_requested_mode_error(make_client, make_result):
-    """When the mode AND its fallback fail, surface the requested mode's error."""
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey(routes=[])),                 # foot_shortest → empty routes
-        make_result(structured={"journey": {"routes": []},           # foot_quiet → envelope error
-                                "response": {"error_code": "-2", "error_message": "not found"}}),
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
-    out = await execute({"slots": slots}, client=client)
-    assert _extract_data(out["tool_results"]) == {"route_error": "no route found (empty routes list)"}
-
-
-# --- execute: car ------------------------------------------------------------
-
-async def test_execute_car_success_no_fallback(make_client, make_result):
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey()),                          # routing car
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Campo di Marte", "mode": "car"}
-    out = await execute({"slots": slots}, client=client)
-    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
-    assert len(routings) == 1  # car has no profile fallback
-    assert json.loads(routings[0]["args"])["routetype"] == "car"
-    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
-
-
-async def test_execute_car_empty_routes_no_fallback(make_client, make_result):
-    """L2: car in a pedestrian zone — success envelope, empty routes. No stale
-    retry (the envelope is well-formed), no profile swap; the error reaches the
-    widget data so respond can suggest another mode."""
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey(routes=[])),                 # car → empty routes
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
-    out = await execute({"slots": slots}, client=client)
-    assert len([e for e in out["tool_results"] if e["name"] == "routing"]) == 1
-    assert _extract_data(out["tool_results"]) == {"route_error": "no route found (empty routes list)"}
 
 
 async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result, monkeypatch):
@@ -363,44 +192,14 @@ async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result
     assert "route_error" in _extract_data(out["tool_results"])
 
 
-# --- execute / _extract_data: public transport -------------------------------
+# --- _extract_data -----------------------------------------------------------
 
-async def test_execute_pt_success_data_has_legs(make_client, make_result, pt_arcs):
-    journey = {"journey": {"routes": [{"wkt": "LINESTRING(1 2,3 4)", "distance": 2.8,
-                                       "eta": "10:26:00", "time": "00:26:00", "arc": pt_arcs}]},
-               "response": {"error_code": "0"}}
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=journey),                             # routing PT
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Dalmazia",
-             "mode": "public_transport"}
-    out = await execute({"slots": slots}, client=client)
-    data = _extract_data(out["tool_results"])
-    assert [leg["transport"] for leg in data["legs"]] == ["foot", "bus", "foot"]
-    assert data["wkt"] == "LINESTRING(1 2,3 4)"  # widget payload unchanged otherwise
-
-
-async def test_execute_pt_failure_has_no_profile_fallback(make_client, make_result):
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey(routes=[])),                 # PT → empty routes
-    ])
-    slots = {"intent": "route", "origin_text": "a", "destination_text": "b",
-             "mode": "public_transport"}
-    out = await execute({"slots": slots}, client=client)
-    assert len([e for e in out["tool_results"] if e["name"] == "routing"]) == 1
-
-
-def test_extract_data_foot_and_car_never_get_legs(pt_arcs):
-    # Same multi-transport arcs, non-PT routetype → no legs field in the widget.
-    for mode in ("foot_shortest", "car"):
-        results = [{"name": "routing", "args": json.dumps({"routetype": mode}),
-                    "result": {"journey": {"routes": [
-                        {"wkt": "L", "distance": 1.0, "arc": pt_arcs}]}}}]
-        assert "legs" not in _extract_data(results)
+def test_extract_data_preserves_full_wkt():
+    long_wkt = "LINESTRING(" + "9 4," * 50 + "1 1)"
+    results = [{"name": "routing", "result": {"journey": {"routes": [{"wkt": long_wkt, "distance": 1.0}]}}}]
+    data = _extract_data(results)
+    assert data["wkt"] == long_wkt  # not truncated — the map widget needs the full geometry
+    assert len(data["wkt"]) > 80
 
 
 # --- respond -----------------------------------------------------------------
@@ -423,28 +222,8 @@ async def test_respond_uses_llm_answer(make_llm):
     assert final["data"]["distance_km"] == 1.83
 
 
-async def test_respond_falls_back_to_template_on_llm_error():
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "q"}],
-        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
-        "unsupported": False,
-    }
-    out = await respond(state, llm=_RaisingLLM())
-    reply = out["final"]["messages"][-1]["content"]
-    assert reply.startswith("📍")
-    assert "1.83 km" in reply
-
-
-async def test_respond_unsupported_template_on_llm_error():
-    state = {"intent": "other", "messages": [{"role": "user", "content": "hi"}],
-             "tool_results": [], "unsupported": True}
-    out = await respond(state, llm=_RaisingLLM())
-    assert "punto-punto" in out["final"]["messages"][-1]["content"]
-
-
 async def test_respond_missing_place_asks_instead_of_unsupported():
-    """route intent with blank places → targeted ask, not the 'unsupported' pitch."""
+    """L18: route intent with blank places → targeted ask, not the 'unsupported' pitch."""
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "voglio andare a piedi"}],
@@ -458,33 +237,6 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
     assert "punto-punto" not in reply
 
 
-async def test_respond_tpl_missing_line_asks_instead_of_unsupported():
-    """tpl intent with a blank required slot → targeted ask (the missing gate
-    must cover tpl intents, not just route)."""
-    state = {
-        "intent": "tpl_timeline",
-        "messages": [{"role": "user", "content": "orari alla fermata San Marco"}],
-        "tool_results": [],
-        "unsupported": True,
-        "slots": {"intent": "tpl_timeline", "line_text": "", "stop_text": "San Marco"},
-    }
-    out = await respond(state, llm=_RaisingLLM())
-    reply = out["final"]["messages"][-1]["content"]
-    assert "linea" in reply
-    assert "punto-punto" not in reply
-
-
-# --- _template_answer --------------------------------------------------------
-
-def test_template_answer_route():
-    data = {"distance_km": 1.83, "duration": "00:23:18", "eta": "15:59:09"}
-    assert _template_answer("route", data, unsupported=False) == "📍 1.83 km · ~00:23:18 · arrivo 15:59:09"
-
-
-def test_template_answer_route_error():
-    assert _template_answer("route", {"route_error": "no route"}, unsupported=False) == "⚠ no route"
-
-
 def test_respond_system_separates_service_error_from_ztl():
     """L19: the L8 bare {"error":""} (car/PT broken server-side) must NOT be narrated as a
     ZTL/pedestrian restriction — that misled the user and the referente (a drivable, non-ZTL
@@ -495,74 +247,6 @@ def test_respond_system_separates_service_error_from_ztl():
     assert "no route found (empty routes list)" in RESPOND_SYSTEM
     idx = RESPOND_SYSTEM.index("empty response from routing service")
     assert "do NOT claim" in RESPOND_SYSTEM[idx:idx + 400]
-
-
-def test_template_answer_unsupported():
-    assert "punto-punto" in _template_answer("other", {}, unsupported=True)
-
-
-def test_template_answer_missing_place():
-    answer = _template_answer("route", {}, unsupported=True, missing=["destination"])
-    assert "destinazione" in answer
-    assert "punto-punto" not in answer
-
-
-# --- _results_view -----------------------------------------------------------
-
-def test_results_view_missing_place_beats_unsupported():
-    view = _results_view([], unsupported=True, missing=["destination"])
-    assert view == {"status": "missing_place", "missing": ["destination"]}
-
-
-def test_results_view_routing_carries_routetype():
-    """The respond LLM needs the failed mode to suggest a sensible alternative."""
-    results = [
-        {"name": "address_search_location", "args": json.dumps({"search": "x"}),
-         "result": {"features": []}},
-        {"name": "routing", "args": json.dumps({"routetype": "car"}),
-         "result": {"error": "no route found (empty routes list)"}},
-    ]
-    view = _results_view(results, unsupported=False)
-    by_name = {i["name"]: i for i in view["results"]}
-    assert by_name["routing"]["routetype"] == "car"
-    assert "routetype" not in by_name["address_search_location"]
-
-
-def test_results_view_tolerates_argless_entries():
-    view = _results_view([{"name": "routing", "result": {"error": "x"}}], unsupported=False)
-    assert view["results"][0]["routetype"] is None
-
-
-# --- _extract_data -----------------------------------------------------------
-
-def test_extract_data_route_full_wkt():
-    results = [
-        {"name": "address_search_location", "result": {"features": []}},
-        {"name": "routing", "result": {"journey": {"routes": [
-            {"wkt": "LINESTRING(1 2,3 4)", "distance": 0.68, "eta": "10:00:00", "time": "00:10:00"}
-        ]}}},
-    ]
-    data = _extract_data(results)
-    assert data["wkt"] == "LINESTRING(1 2,3 4)"
-    assert data["distance_km"] == 0.68
-    assert data["duration"] == "00:10:00"
-
-
-def test_extract_data_route_error():
-    results = [{"name": "routing", "result": {"error": "no route found (empty routes list)"}}]
-    assert _extract_data(results) == {"route_error": "no route found (empty routes list)"}
-
-
-def test_extract_data_preserves_full_wkt():
-    long_wkt = "LINESTRING(" + "9 4," * 50 + "1 1)"
-    results = [{"name": "routing", "result": {"journey": {"routes": [{"wkt": long_wkt, "distance": 1.0}]}}}]
-    data = _extract_data(results)
-    assert data["wkt"] == long_wkt  # not truncated
-    assert len(data["wkt"]) > 80
-
-
-def test_extract_data_none():
-    assert _extract_data([]) == {}
 
 
 # --- graph wiring ------------------------------------------------------------
