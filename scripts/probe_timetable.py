@@ -44,6 +44,10 @@ from snap4city_mobility_mcp.tpl import (
 # Florence center — search here for real (likely realtime-capable) services in P3.
 FLO_LAT, FLO_LON = 43.7765, 11.2486
 
+# The backend ONLY accepts ISO datetime for fromtime/totime (relative 'n-day' 400s with
+# "failed access"; P4 proved ISO returns 200). A weekday morning peak window — buses run.
+ISO_FROM, ISO_TO = "2026-06-16T07:00:00", "2026-06-16T09:00:00"
+
 SCHEDULE_HINTS = (
     "time", "schedule", "timetable", "orari", "orario", "realtime", "real-time",
     "hour", "depart", "arriv", "passage", "passaggi", "avl", "gtfs", "frequency",
@@ -197,26 +201,36 @@ async def main() -> None:
         print(f"candidate sensor/service URIs: {len(sensor_uris)} -> {sensor_uris[:3]}", flush=True)
         for u in sensor_uris:
             res = await _call(client, "service_info_dev",
-                              {"serviceuri": u, "fromtime": "1-day", "totime": "0-minute"})
+                              {"serviceuri": u, "fromtime": ISO_FROM, "totime": ISO_TO})
             blob = _full(res)
             has_rt = any(k in blob for k in ('"realtime": {"', "valueDate", "measuredTime",
                                              "time_series", '"values"', "measured_time"))
             print(f"- {u}\n    time-varying? {has_rt}  head={blob[:300]}", flush=True)
 
-        # --- P4: is the bus-stop 400 a FORMAT problem or a data-access problem? ---
-        print("\n=== P4: fromtime/totime FORMAT variants on the AT Firenze stop ===", flush=True)
+        # --- P4: DECISIVE — service_info_dev + ISO datetime on the bus stop, FULL payload ---
+        # The ISO format returns 200 (relative format 400'd). The open question: does the
+        # response now carry real scheduled departures in timetable/realtime, or are they
+        # still empty dicts? This is the difference between "client just needs the right param"
+        # and "server has no schedule loaded".
+        print(f"\n=== P4: service_info_dev + ISO window {ISO_FROM}..{ISO_TO} on the AT stop ===",
+              flush=True)
         if flo_stop:
-            for ft, tt in (("1-hour", "0-minute"), ("1-day", "0-minute"),
-                           ("2026-06-16T08:00:00", "2026-06-16T10:00:00")):
-                res = await _call(client, "service_info_dev",
-                                  {"serviceuri": flo_stop, "fromtime": ft, "totime": tt})
-                print(f"- fromtime={ft!r} totime={tt!r} -> {_full(res)[:300]}", flush=True)
+            res = _unwrap_tpl(await _call(client, "service_info_dev",
+                              {"serviceuri": flo_stop, "fromtime": ISO_FROM, "totime": ISO_TO}))
+            print("signature:", _timetable_signature(res), flush=True)
+            print("FULL payload:", _full(res)[:6000], flush=True)
+            if isinstance(res, dict):
+                for key in ("timetable", "realtime"):
+                    print(f"  --> {key} = {_full(res.get(key))[:800]}", flush=True)
+            # Also try tpl_stop_timeline once more for side-by-side (it takes no datetime).
+            base = _unwrap_tpl(await _call(client, "tpl_stop_timeline", {"stop": flo_stop}))
+            print("tpl_stop_timeline (no datetime) signature:", _timetable_signature(base), flush=True)
         else:
             print("(no Florence stop resolved — skipped)", flush=True)
 
-    print("\n>>> DONE. Read: P2 (any agency with non-empty timetable?), P3 (does service_info_dev "
-          "EVER return time-varying data ⇒ tool/params OK), P4 (is the 400 format vs data-access). "
-          "Empty in P2 + P3 works on sensors + P4 is data-access ⇒ truly server-side for AT.",
+    print("\n>>> DONE. P4 is decisive: if service_info_dev + ISO populates timetable/realtime ⇒ "
+          "CLIENT-FIXABLE (pass ISO window). If still empty dicts on a 200 ⇒ server has no "
+          "schedule loaded. P3 = does the tool ever yield time-varying data on a real sensor.",
           flush=True)
 
 
