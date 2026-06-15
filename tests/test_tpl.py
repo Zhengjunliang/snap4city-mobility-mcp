@@ -1,6 +1,7 @@
 """Unit tests for the deterministic TPL discovery chains (tpl.py)."""
 
 from snap4city_mobility_mcp.tpl import (
+    _match_stop,
     _stop_entries,
     _unwrap_tpl,
     extract_tpl_data,
@@ -232,6 +233,17 @@ def test_stop_entries_buswrapper_shape():
     assert [(e["name"], e["uri"]) for e in entries] == [
         ("Novelli", "http://s/1"), ("San Marco", "http://s/2")
     ]
+
+
+def test_match_stop_user_words_subset_of_official_name():
+    # Live stop names are longer than what users type ("San Marco" -> "Museo Di San Marco").
+    entries = [{"name": "Museo Di San Marco", "uri": "u1"}, {"name": "Novelli", "uri": "u2"}]
+    assert _match_stop(entries, "San Marco")["uri"] == "u1"
+    assert _match_stop(entries, "Novelli")["uri"] == "u2"
+    assert _match_stop(entries, "Vattelapesca") is None
+    # exact token match preferred over a longer superset
+    entries2 = [{"name": "San Marco Vecchio", "uri": "v"}, {"name": "San Marco", "uri": "exact"}]
+    assert _match_stop(entries2, "San Marco")["uri"] == "exact"
 
 
 def test_slim_tpl_timeline_real_shape():

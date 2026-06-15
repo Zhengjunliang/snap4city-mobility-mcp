@@ -179,14 +179,20 @@ def _stop_entries(payload: Any) -> list[dict[str, Any]]:
 
 
 def _match_stop(entries: list[dict[str, Any]], stop_text: str) -> dict[str, Any] | None:
-    """First stop whose name tokens are all covered by the user's stop text —
-    same strict subset direction as orchestrator._pick_coord (L17)."""
+    """Best stop for the user's text. Unlike `_pick_coord` (geocode), a stop name is
+    usually LONGER than what the user types ("San Marco" → official stop "Museo Di San
+    Marco", live data), so the user's tokens being a SUBSET of the stop name is the useful
+    direction. Exact token match wins; then either-direction subset (covers a verbose user
+    phrase too); first hit in route order."""
     want = _label_tokens(stop_text)
     if not want:
         return None
-    for e in entries:
+    for e in entries:  # exact token set first
+        if _label_tokens(str(e.get("name") or "")) == want:
+            return e
+    for e in entries:  # then user-words ⊆ official name ("San Marco" ⊆ "Museo Di San Marco")
         toks = _label_tokens(str(e.get("name") or ""))
-        if toks and toks <= want:
+        if toks and (want <= toks or toks <= want):
             return e
     return None
 
