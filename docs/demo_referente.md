@@ -14,8 +14,9 @@ tool MCP **funzionano end-to-end** sul JupyterHub Snap4City.
    追加到 `outputs.txt` — 给 referente 看 payload 形状。
 5. 工具级诊断 (geocode 选点坐标、routing 原始空 payload) 在 `debug.log`。
 
-> 已知服务端待修 (client 无误, 已报 referente, 见 `docs/lessons.md` L19/L21/L22):
-> car/PT routing 返空、远程/非中心 foot 返空、stop 时刻表空。Group C 专门演示这些的**诚实降级**。
+> 状态 (2026-06-15 实测): **car routing 已修好** (出真车速路线); **PT 短途退化步行** (不再空,
+> 但短途无真公交段, 长途见 Group C-bis); 远程/非中心 foot 仍空、stop 时刻表仍空 (服务端待修,
+> client 无误, 见 `docs/lessons.md` L19/L21/L22)。Group C 演示已知限制的**诚实降级**。
 
 ---
 
@@ -79,11 +80,13 @@ In auto da Sesto Fiorentino a Scandicci
 ```
 > 预期: 不报距离, 说 routing 服务未返回结果、建议步行/公交; **不得**断言"目的地在 ZTL 步行区"。
 
-public_transport (服务端空):
+public_transport — **短途退化成步行** (2026-06-15 实测: PT 不再返空, 但短途 OD 返的 journey
+里 `legs` 只有一段 `transport: "foot"`, 无真公交段):
 ```
 Con i mezzi pubblici da Piazza del Duomo a Campo di Marte
 ```
-> 预期: 诚实说该模式服务端未返回, 建议步行。
+> 预期: 出 journey 但内容是步行 (`data.legs[0].transport == "foot"`)。短途 PT 引擎退化步行 — 用下面
+> Group C-bis 的长途 OD 才可能出真 bus/tram 段。
 
 远程/非中心 foot (覆盖外):
 ```
@@ -97,6 +100,30 @@ A che ora passa la linea 6 alla fermata San Marco?
 ```
 > 预期: 列出服务该站的线路 + 明说"当前没有发车时刻", **绝不编造时间**。
 > (`San Marco` 占位; 不中就换成 Group B tpl_stops 输出里的真实站名。)
+
+---
+
+## Group C-bis — 长途 PT 复测 🔬 (确认是否出真 bus/tram 段)
+
+短途 PT 退化成步行, 长途选**有轨电车 T1/T2 + 城际**走廊, 看 `data.legs` 里有没有
+`transport` 非 `foot` 的段 (真公交/电车)。每条连续贴, 看 `outputs.txt` 的 `data.legs`:
+
+T2 电车走廊 (SMN ↔ 机场):
+```
+Con i mezzi pubblici da Santa Maria Novella all'aeroporto di Firenze
+```
+T1 电车走廊 (SMN ↔ Scandicci):
+```
+Con i mezzi pubblici da Santa Maria Novella a Scandicci
+```
+城际 (Firenze ↔ Sesto Fiorentino):
+```
+Con i mezzi pubblici da Piazza del Duomo a Sesto Fiorentino
+```
+
+> **判定**: `outputs.txt` 里该轮 `data.legs` 若出现 `"transport": "bus"` / `"tram"` (非 `foot`)
+> → PT **真修好了**, 能出公交段。若仍全是 `foot` 段 → PT 引擎对所有 OD 都退化步行, 仍需报 referente。
+> (`group_arc_legs` 见 `mcp_tools.py`; leg 的 `transport`/`provider` 字段直接来自服务端 arc。)
 
 ---
 

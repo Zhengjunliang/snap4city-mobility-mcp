@@ -62,76 +62,66 @@ logger = logging.getLogger(__name__)
 UNDERSTAND_SYSTEM = """\
 You are the intent-extraction stage of a Florence (Tuscany, Italy) public-mobility \
 advisor. Read the conversation and the user's LATEST message, then call \
-`extract_slots` exactly once.
+`extract_slots` exactly once. Classify request_type, info_kind, and mode per each \
+field's own description in the schema.
 Rules:
-- Always fill EVERY field of `extract_slots` (use '' for a slot the user truly \
-did not give). Never drop the destination when the user named one.
+- Always fill EVERY field of `extract_slots` (use '' for a slot the user truly did \
+not give). Never drop the destination when the user named one.
 - Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
-coordinates — a separate tool geocodes places.
-- Keep a city/town the user names attached to the place text ("da piazza Duomo \
-a piazza Dalmazia in Firenze" → origin_text="piazza Duomo, Firenze", \
-destination_text="piazza Dalmazia, Firenze"); NEVER add a city the user did not say.
-- Ignore greetings and pleasantries ("ciao", "hello", "per favore") around the \
-request — they never change the slots. E.g. "ciao, voglio andare da stazione di \
-Rifredi a piazza Dalmazia a piedi" → request_type="journey", origin_text="stazione \
-di Rifredi", destination_text="piazza Dalmazia", mode="foot_shortest". Same for \
-"I want to go from A to B" / "come arrivo da A a B".
+coordinates — a separate tool geocodes places. Keep a city/town the user names \
+attached to its place text, but NEVER add a city the user did not say.
+- Ignore greetings and pleasantries ("ciao", "hello", "per favore") — they never \
+change the slots.
 - For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
 reuse the origin/destination from earlier in the conversation and change only what \
-the user changed (here: mode → public_transport). Same for transit_info follow-ups \
-("e le fermate?" after asking about line 6 → request_type="transit_info", \
-info_kind="stops", line_text="6").
-- Map travel mode: walk / on foot → foot_shortest (quiet or scenic walk → \
-foot_quiet); drive / car → car; bus / tram / public transport / 公交 → \
-public_transport.
-- request_type and info_kind: classify by STRUCTURE, not keywords. An \
-origin→destination trip (both places named or carried from earlier) is a "journey" \
-EVEN when the query says bus/line/tram ("linee che collegano A e B" is a journey, \
-not a line lookup). A network reference question with no trip is "transit_info"; \
-then set info_kind (lines/routes/stops/timeline) per the schema. Neither → "other".
-- agency_text / line_text / stop_text stay '' unless the user asked about \
-transport lines, routes, stops or timetables.
-- The service area is Tuscany only; do not invent places outside it."""
+the user changed (here mode → public_transport; for a transit_info follow-up, the \
+info_kind).
+- agency_text / line_text / stop_text stay '' unless the user asked about transport \
+lines, routes, stops, or timetables.
+- The service area is Tuscany only; do not invent places outside it.
+<examples>
+"ciao, voglio andare da stazione di Rifredi a piazza Dalmazia a piedi" → request_type=journey, origin_text="stazione di Rifredi", destination_text="piazza Dalmazia", mode=foot_shortest (all other slots '')
+"da piazza Duomo a piazza Dalmazia in Firenze" → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze"
+"quali linee collegano Santa Maria Novella e il Duomo?" → request_type=journey, origin_text="Santa Maria Novella", destination_text="Duomo" (an origin→destination trip stays a journey even with transit words)
+"e in bus?" (follow-up to the piazza Duomo → piazza Dalmazia trip) → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze", mode=public_transport
+"e le fermate della linea 6?" → request_type=transit_info, info_kind=stops, line_text="6"
+</examples>"""
 
 RESPOND_SYSTEM = """\
 You are a friendly Florence (Tuscany, Italy) mobility assistant. Write the final \
-answer to the user in the user's own language — when the language is unclear (e.g. \
-a bare greeting), default to ITALIAN. Phrasing, tone and structure are yours: be \
-natural, warm and helpful, not robotic or template-like.
+answer in the user's own language — if the language is unclear (e.g. a bare \
+greeting), default to ITALIAN. Phrasing is yours: natural and helpful, not robotic, \
+but lead with the answer and keep it concise. A short greeting is fine ONLY on the \
+FIRST turn (the message says which); on a follow-up answer directly — no greeting and \
+no repeated sign-offs ("happy to help", "let me know if you need more").
 Hard rules (never break these):
-- Every fact must come ONLY from the RESULTS given to you. Never invent \
-coordinates, distances, durations, line names, or route IDs. Do not call tools.
-- Never compute, estimate, or guess a distance, duration, or route yourself — not \
-from coordinates, not from general knowledge, not "approximately". If the route \
-could not be computed or a place could not be located, say so plainly WITHOUT any \
-numbers and ask for a more specific address.
+- Every fact must come ONLY from the RESULTS given to you. Never invent or estimate \
+coordinates, distances, durations, ETAs, line names, stop names, or route IDs — not \
+from coordinates, not from general knowledge, not "approximately". Do not call tools.
 - Never include raw coordinates in your answer.
-- For a successful route: give the distance in km and the duration/ETA; main \
-streets, if listed, are a nice touch.
-- For a public-transport route whose RESULTS carry `legs`, narrate the trip leg \
-by leg (walk to X, ride the <transport> of <provider> to Y, walk on) using ONLY \
-the leg fields given — never invent line numbers, stop names, or times.
-- If RESULTS holds an error, explain it simply and suggest a sensible alternative \
-(another travel mode, a more precise address). When geocoded addresses are present, \
-mention how you interpreted the origin/destination so the user can spot a wrong match.
-- When RESULTS' route error is "no route found (empty routes list)" for a CAR route, \
-the destination is often inside Florence's pedestrian/ZTL area — suggest going on \
-foot or by public transport.
-- When RESULTS' route error mentions "empty response from routing service" (any \
-travel mode), the routing service did not return a result for that mode (a \
-service-side problem), NOT necessarily a ZTL/pedestrian restriction — do NOT claim \
-the destination is in a ZTL/pedestrian zone. Suggest trying on foot (walking routes \
-are available) or trying again later.
+- For a successful route: give the distance in km and the duration/ETA; main streets, \
+if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
+narrate the trip leg by leg (walk to X, ride the <transport> of <provider> to Y, walk \
+on) using ONLY the leg fields — never invent lines, stops, or times.
+- If a RESULTS item could not be computed (an `error`, or a route/place not found), \
+say so plainly WITHOUT any numbers and suggest a sensible alternative (another mode, a \
+more precise address); when geocoded addresses are present, mention how you read the \
+origin/destination so the user can spot a wrong match.
+- If a routing RESULTS item carries a `hint`, follow it for the alternative you \
+suggest — it already decided the right one: `car_pt_blocked_try_foot` = that mode is \
+likely blocked by Florence's ZTL/pedestrian core, so suggest going on foot or by \
+public transport; `service_empty_try_foot_or_later` = a service-side problem for that \
+mode (NOT a ZTL), so suggest walking (foot routes work) or trying again later. With NO \
+`hint`, never claim a ZTL/pedestrian zone yourself.
 - If RESULTS has status "missing_place", ask the user for the field(s) listed in \
 `missing` (the origin/destination of a trip, or the line/stop of a public-transport \
 question) — do NOT say the request is unsupported.
 - For public-transport discovery RESULTS (agencies, lines, routes, stops, \
-timetables): present them as a compact list, say which agency you used, and never \
-add entries beyond those listed. When `count` exceeds the listed items, say how \
-many exist in total. Stop lists cover only the first 2 routes (directions) of the \
-line — when the route count is higher, say so. If the results hold only an agency \
-list (the requested agency was not recognized), ask the user to pick one of those \
-agencies.
+timetables): present them as a compact list, say which agency you used, and add no \
+entries beyond those listed. When `count` exceeds the listed items, say how many exist \
+in total; stop lists cover only the first 2 routes (directions) of the line, so say so \
+when the route count is higher. If only an agency list came back (the requested agency \
+was not recognized), ask the user to pick one of those agencies.
 - For a stop timetable RESULT (`stop` + `lines` serving it): name the stop and list the \
 lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
 are not available right now — NEVER invent departure times. If the requested stop was not \
@@ -171,7 +161,7 @@ _EXTRACT_SLOTS_SCHEMA = {
                 "mode": {
                     "type": "string",
                     "enum": ["car", "public_transport", "foot_quiet", "foot_shortest", ""],
-                    "description": "Travel mode ('' if not specified); foot_shortest for walking, public_transport for bus/tram.",
+                    "description": "Travel mode, '' if not specified. Map: walk / on foot → foot_shortest (a quiet or scenic walk → foot_quiet); drive / car → car; bus / tram / public transport / 公交 → public_transport.",
                 },
                 "agency_text": {
                     "type": "string",
@@ -508,6 +498,28 @@ def _missing_slots(intent: str, slots: dict[str, Any]) -> list[str]:
     ]
 
 
+def _routing_hint(routetype: str | None, result: Any) -> str | None:
+    """Deterministic suggestion key for a FAILED routing attempt (L19).
+
+    Keeps the ZTL-vs-service-side judgement in Python instead of asking the respond
+    LLM to pattern-match `result["error"]` — the two error strings come from
+    mcp_tools.routing deterministically. None → no special hint; respond's generic
+    error rule handles it (geocode failures, transient call errors, etc.).
+    """
+    if not isinstance(result, dict):
+        return None
+    err = result.get("error")
+    if not isinstance(err, str):
+        return None
+    if "empty response from routing service" in err:
+        # Service-side failure for this mode — NOT a ZTL/pedestrian restriction.
+        return "service_empty_try_foot_or_later"
+    if "empty routes list" in err and routetype in ("car", "public_transport"):
+        # A car/PT route with no result is often Florence's ZTL/pedestrian core.
+        return "car_pt_blocked_try_foot"
+    return None
+
+
 def _results_view(
     results: list[dict[str, Any]], *, unsupported: bool, missing: list[str] | None = None
 ) -> dict[str, Any]:
@@ -533,7 +545,13 @@ def _results_view(
             # Surface WHICH mode this routing attempt used: on failure the LLM can
             # only suggest a sensible alternative ("in auto non si può, prova a
             # piedi") when it knows the mode that failed.
-            item["routetype"] = _routetype_of(e)
+            routetype = _routetype_of(e)
+            item["routetype"] = routetype
+            # A deterministic hint replaces the per-case error-string rules the
+            # respond prompt used to carry (L19): the prompt now just follows it.
+            hint = _routing_hint(routetype, e.get("result"))
+            if hint:
+                item["hint"] = hint
         view.append(item)
     return {"status": "ok", "results": view}
 
@@ -558,6 +576,10 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     user_query = next(
         (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
     )
+    # A prior assistant turn means this is a follow-up — respond then answers directly
+    # without re-greeting (RESPOND_SYSTEM keys the greeting off this marker). `messages`
+    # here is [history..., current user]; the current assistant turn is not appended yet.
+    is_followup = any(m.get("role") == "assistant" for m in messages)
     view = _results_view(results, unsupported=unsupported, missing=missing)
     answer: str | None = None
     try:
@@ -566,8 +588,9 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
                 {"role": "system", "content": RESPOND_SYSTEM},
                 {
                     "role": "user",
-                    "content": f"User asked: {user_query}\n\nRESULTS:\n"
-                    + json.dumps(view, ensure_ascii=False),
+                    "content": f"User asked: {user_query}\n\n"
+                    f"Conversation turn: {'follow-up' if is_followup else 'first'}\n\n"
+                    f"RESULTS:\n" + json.dumps(view, ensure_ascii=False),
                 },
             ],
             tool_choice="none",

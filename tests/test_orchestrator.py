@@ -9,11 +9,11 @@ from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
-    RESPOND_SYSTEM,
     _build_graph,
     _extract_data,
     _pick_coord,
     _request_to_intent,
+    _results_view,
     execute,
     respond,
     understand,
@@ -249,16 +249,33 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
     assert "punto-punto" not in reply
 
 
-def test_respond_system_separates_service_error_from_ztl():
-    """L19: the L8 bare {"error":""} (car/PT broken server-side) must NOT be narrated as a
-    ZTL/pedestrian restriction — that misled the user and the referente (a drivable, non-ZTL
-    destination got blamed on a ZTL). ZTL phrasing is reserved for the genuine L2 empty-routes
-    error string. Both error strings appear in the prompt, and the service-side one is tied to
-    an explicit 'do NOT claim ZTL' instruction."""
-    assert "empty response from routing service" in RESPOND_SYSTEM
-    assert "no route found (empty routes list)" in RESPOND_SYSTEM
-    idx = RESPOND_SYSTEM.index("empty response from routing service")
-    assert "do NOT claim" in RESPOND_SYSTEM[idx:idx + 400]
+def test_results_view_hint_separates_service_error_from_ztl():
+    """L19: a server-side empty (car/PT broken) must NOT be narrated as a ZTL/pedestrian
+    restriction — that misled the user and the referente (a drivable, non-ZTL destination got
+    blamed on a ZTL). The judgement now lives in _results_view as a deterministic `hint`
+    (not a respond-prompt error-string match): ZTL phrasing is reserved for the genuine
+    empty-routes error on a car/PT mode; the service-side empty gets a neutral hint."""
+    car_ztl = _results_view(
+        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
+          "result": {"error": "no route found (empty routes list)"}}],
+        unsupported=False,
+    )
+    assert car_ztl["results"][0]["hint"] == "car_pt_blocked_try_foot"
+
+    service = _results_view(
+        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
+          "result": {"error": "routing failed: empty response from routing service (mode=car)"}}],
+        unsupported=False,
+    )
+    assert service["results"][0]["hint"] == "service_empty_try_foot_or_later"
+
+    # An unclassified routing error carries no hint — respond's generic error rule handles it.
+    other = _results_view(
+        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
+          "result": {"error": "routing call failed: TimeoutError: x"}}],
+        unsupported=False,
+    )
+    assert "hint" not in other["results"][0]
 
 
 # --- graph wiring ------------------------------------------------------------
