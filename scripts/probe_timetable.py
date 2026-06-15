@@ -1,27 +1,27 @@
-"""Direct tpl_stop_timeline probe — find out WHY the stop timetable comes back empty.
+"""Direct probe — WHY the bus timetable comes back empty, and whether ANY tool can yield
+real departure times at all.
 
 Run on JupyterHub (s4c env): python scripts/probe_timetable.py
 Public km4city backend (auth dropped from schema) → no LLM creds needed.
 
-Why this exists (lesson L21): `tpl_stop_timeline` returns `{stop, lines}` but its
-`timetable`/`realtime` keys were EMPTY in earlier probes. Two competing causes to separate
-BEFORE touching client code (don't presume — dump the real payload first):
-  (a) the tool now takes a date/time param we are NOT passing → empty because no departure
-      window was given → FIXABLE client-side (pass a startdatetime, like routing).
-  (b) the server simply has no schedule loaded for that stop → empty no matter what →
-      server-side, stays a referente item.
+Background (lesson L21): `tpl_stop_timeline` returns `{stop, lines}` but its `timetable` /
+`realtime` keys came back EMPTY. An earlier, narrower probe established that the tool's schema
+has ONLY a `stop` param (5 datetime param names all rejected) → empty is NOT a missing-param
+problem. This deeper version answers the two questions still open:
 
-This probe: prints the LIVE tpl_stop_timeline inputSchema (does it have a datetime param
-now? the server has been silently adding params/tools — L22), resolves a REAL stop URI on
-line 6 (Florence urban), then calls tpl_stop_timeline (1) plain and (2) with a weekday
-datetime under every plausible param name, dumping each raw payload so the timetable/realtime
-keys can be compared. The schema print is authoritative; the datetime calls are best-effort
-(wrapped — an unknown param just 400s, harmless).
+  Q1  What EXACTLY is in timetable/realtime? (full payload, never truncated — earlier probe
+      cut at 3000 chars so the keys' real value/type/length were never seen.)
+  Q2  Is there ANY OTHER tool that can return departure times? The earlier probe only
+      keyword-matched tool NAMES; the server has been silently adding tools (L22), and a
+      schedule capability could hide in a tool DESCRIPTION or a sibling line-level endpoint.
+      So: dump every tool's full description + inputSchema, flag the schedule-ish ones, and
+      generically try each flagged tool against the resolved stop/line URIs.
 
 Decision after running:
-  - timetable/realtime POPULATED only in the datetime call → fix = pass that param from
-    orchestrator/tpl (add to the tpl_stop_timeline call in run_tpl_flow + extend the slot).
-  - empty in ALL calls → server-side, no client fix; keep the honest "times unavailable".
+  - timetable/realtime POPULATED in tpl_stop_timeline → client just needs to surface them.
+  - some OTHER flagged tool returns real times → wire THAT into the tpl_timeline flow.
+  - empty everywhere → server-side, no client fix; keep the honest "times unavailable" and
+    keep it a referente item. (Re-confirms L21 with full evidence.)
 """
 
 import asyncio
@@ -38,24 +38,40 @@ from snap4city_mobility_mcp.tpl import (
 )
 
 LINE = "6"  # proven live: line "6" + Florence urban agency 888-48 → routes/stops (L21)
-
-# Weekday daytime when buses actually run — edit if the default window has no service.
-# Tried under several param names since the live schema may name it differently.
-WEEKDAY_DATETIME = "16/06/2026, 09:00"  # Tue morning
-DATETIME_PARAM_CANDIDATES = ["startdatetime", "datetime", "date", "fromTime", "time"]
-
-# Stop name to target on the line (token-loose). Falls back to a mid-list stop, then first.
 PREFERRED_STOP_HINT = "marco"  # "Museo Di San Marco" was a live line-6 stop
 
+# A tool is "schedule-ish" if any of these appear in its name OR description.
+SCHEDULE_HINTS = (
+    "time", "schedule", "timetable", "orari", "orario", "realtime", "real-time",
+    "hour", "depart", "arriv", "passage", "passaggi", "avl", "gtfs", "frequency",
+    "next bus", "waiting", "attesa", "corse", "corsa",
+)
 
-async def _dump(client: Client, label: str, args: dict) -> None:
-    print(f"\n### {label} ###  args={args}", flush=True)
+
+def _flag(text: str) -> list[str]:
+    low = (text or "").lower()
+    return [h for h in SCHEDULE_HINTS if h in low]
+
+
+def _full(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _describe_value(label: str, val) -> None:
+    """Print a key's exact emptiness signature — this is the Q1 evidence."""
+    kind = type(val).__name__
+    size = len(val) if isinstance(val, (list, dict, str)) else "n/a"
+    print(f"  {label}: type={kind} len={size} value={_full(val)[:600]}", flush=True)
+
+
+async def _try_tool(client: Client, name: str, args: dict) -> None:
+    print(f"\n### TRY {name}  args={args}", flush=True)
     try:
-        res = await asyncio.wait_for(client.call_tool("tpl_stop_timeline", args), timeout=30)
-        print(json.dumps(_unwrap(res), ensure_ascii=False, default=str)[:3000], flush=True)
+        res = await asyncio.wait_for(client.call_tool(name, args), timeout=30)
+        print(_full(_unwrap(res))[:2500], flush=True)
     except asyncio.TimeoutError:
         print("[TIMEOUT >30s]", flush=True)
-    except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
+    except Exception as e:  # noqa: BLE001 — diagnostic, surface anything
         print(f"[EXC] {type(e).__name__}: {e}", flush=True)
 
 
@@ -64,18 +80,21 @@ async def main() -> None:
     cfg = await _build_config()
     async with Client(cfg) as client:
         tools = {t.name: t for t in await client.list_tools()}
-        print("TOOLS:", list(tools), flush=True)
-        # Any schedule-ish tool the server may have added (L22: tools appear silently).
-        hits = [n for n in tools if any(k in n.lower()
-                for k in ("time", "schedule", "realtime", "hour", "depart", "orari"))]
-        print("schedule-ish tools:", hits, flush=True)
-        if "tpl_stop_timeline" in tools:
-            print("tpl_stop_timeline schema:",
-                  json.dumps(tools["tpl_stop_timeline"].inputSchema, ensure_ascii=False),
-                  flush=True)
+        print(f"\n=== {len(tools)} TOOLS — full description + schema ===", flush=True)
+        flagged: list[str] = []
+        for name, t in tools.items():
+            desc = getattr(t, "description", "") or ""
+            hits = sorted(set(_flag(name) + _flag(desc)))
+            mark = f"  <<< SCHEDULE-ISH: {hits}" if hits else ""
+            if hits:
+                flagged.append(name)
+            print(f"\n- {name}{mark}", flush=True)
+            print(f"    desc: {desc[:300]}", flush=True)
+            print(f"    schema: {_full(t.inputSchema)[:500]}", flush=True)
+        print(f"\n=== FLAGGED (schedule-ish) tools: {flagged} ===", flush=True)
 
-        # --- resolve a real stop URI on line 6 (Florence urban default agency) ---
-        print("\n>>> resolving a real line-%s stop URI ..." % LINE, flush=True)
+        # --- resolve a real line-6 stop URI + capture its serving line URIs ---
+        print(f"\n>>> resolving a real line-{LINE} stop URI ...", flush=True)
         agencies = _agency_entries(_unwrap(await client.call_tool("tpl_agencies", {})))
         agency_uri = _resolve_agency(agencies, "")  # "" → Florence urban default
         print("agency_uri:", agency_uri, flush=True)
@@ -100,17 +119,49 @@ async def main() -> None:
             (s for s in stops if PREFERRED_STOP_HINT in str(s.get("name") or "").lower()),
             stops[len(stops) // 2],
         )
-        print("picked stop:", pick.get("name"), "->", pick["uri"], flush=True)
+        stop_uri = pick["uri"]
+        print("picked stop:", pick.get("name"), "->", stop_uri, flush=True)
 
-        # --- (1) plain call, then (2) one call per candidate datetime param ---
-        await _dump(client, "tpl_stop_timeline PLAIN (no datetime)", {"stop": pick["uri"]})
-        for param in DATETIME_PARAM_CANDIDATES:
-            await _dump(
-                client,
-                f"tpl_stop_timeline + {param}={WEEKDAY_DATETIME!r}",
-                {"stop": pick["uri"], param: WEEKDAY_DATETIME},
-            )
-    print("\n>>> DONE — compare timetable/realtime keys across the calls above.", flush=True)
+        # --- Q1: full tpl_stop_timeline payload + EXACT timetable/realtime signature ---
+        print("\n=== Q1: tpl_stop_timeline FULL payload ===", flush=True)
+        tl = _unwrap(await client.call_tool("tpl_stop_timeline", {"stop": stop_uri}))
+        print("top-level keys:", list(tl) if isinstance(tl, dict) else f"(not a dict: {type(tl).__name__})",
+              flush=True)
+        print("full payload:", _full(tl)[:6000], flush=True)
+        line_uris: list[str] = []
+        if isinstance(tl, dict):
+            for key in ("timetable", "realtime", "departures", "passages", "orari"):
+                if key in tl:
+                    _describe_value(key, tl[key])
+            # collect serving-line URIs — a line-level schedule tool may need these
+            bindings = (((tl.get("busLines") or {}).get("results") or {}).get("bindings")) or []
+            line_uris = [
+                (b.get("lineUri") or {}).get("value")
+                for b in bindings if isinstance(b, dict) and (b.get("lineUri") or {}).get("value")
+            ]
+        print("serving line URIs:", line_uris[:5], flush=True)
+
+        # --- Q2: generically try every flagged alternative tool ---
+        # Best-effort: feed the stop URI / line URI / route URI under common param names.
+        # Unknown params just error (harmless) — we only care which tool returns real times.
+        print("\n=== Q2: trying flagged alternative tools ===", flush=True)
+        candidate_args = []
+        for pk in ("stop", "busStop", "stopUri", "serviceUri", "uri"):
+            candidate_args.append({pk: stop_uri})
+        if line_uris:
+            for pk in ("line", "lineUri", "busLine", "route"):
+                candidate_args.append({pk: line_uris[0]})
+        if route_uris:
+            candidate_args.append({"route": route_uris[0]})
+        for name in flagged:
+            if name in ("tpl_stop_timeline",):  # already dumped above
+                continue
+            for args in candidate_args:
+                await _try_tool(client, name, args)
+
+    print("\n>>> DONE — read Q1 (is timetable/realtime ever non-empty?) + Q2 (did any flagged "
+          "tool return real departure times?). Empty everywhere ⇒ server-side, confirms L21.",
+          flush=True)
 
 
 if __name__ == "__main__":
