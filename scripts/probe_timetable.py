@@ -35,6 +35,7 @@ from snap4city_mobility_mcp.tpl import (
     _resolve_agency,
     _route_uris,
     _stop_entries,
+    _unwrap_tpl,
 )
 
 LINE = "6"  # proven live: line "6" + Florence urban agency 888-48 → routes/stops (L21)
@@ -124,7 +125,7 @@ async def main() -> None:
 
         # --- Q1: full tpl_stop_timeline payload + EXACT timetable/realtime signature ---
         print("\n=== Q1: tpl_stop_timeline FULL payload ===", flush=True)
-        tl = _unwrap(await client.call_tool("tpl_stop_timeline", {"stop": stop_uri}))
+        tl = _unwrap_tpl(_unwrap(await client.call_tool("tpl_stop_timeline", {"stop": stop_uri})))
         print("top-level keys:", list(tl) if isinstance(tl, dict) else f"(not a dict: {type(tl).__name__})",
               flush=True)
         print("full payload:", _full(tl)[:6000], flush=True)
@@ -133,7 +134,7 @@ async def main() -> None:
             for key in ("timetable", "realtime", "departures", "passages", "orari"):
                 if key in tl:
                     _describe_value(key, tl[key])
-            # collect serving-line URIs — a line-level schedule tool may need these
+            # collect serving-line Route URIs — service_info(_dev) may carry their realtime data
             bindings = (((tl.get("busLines") or {}).get("results") or {}).get("bindings")) or []
             line_uris = [
                 (b.get("lineUri") or {}).get("value")
@@ -141,27 +142,26 @@ async def main() -> None:
             ]
         print("serving line URIs:", line_uris[:5], flush=True)
 
-        # --- Q2: generically try every flagged alternative tool ---
-        # Best-effort: feed the stop URI / line URI / route URI under common param names.
-        # Unknown params just error (harmless) — we only care which tool returns real times.
-        print("\n=== Q2: trying flagged alternative tools ===", flush=True)
-        candidate_args = []
-        for pk in ("stop", "busStop", "stopUri", "serviceUri", "uri"):
-            candidate_args.append({pk: stop_uri})
-        if line_uris:
-            for pk in ("line", "lineUri", "busLine", "route"):
-                candidate_args.append({pk: line_uris[0]})
-        if route_uris:
-            candidate_args.append({"route": route_uris[0]})
-        for name in flagged:
-            if name in ("tpl_stop_timeline",):  # already dumped above
-                continue
-            for args in candidate_args:
-                await _try_tool(client, name, args)
+        # --- Q2: the realtime/time-varying tools, called CORRECTLY ---
+        # service_info / service_info_dev take `serviceuri` (lowercase) — earlier probe guessed
+        # wrong names. The stop URI IS a serviceUri; line Route URIs are services too. dev variant
+        # adds fromtime/totime ('n-hour'/'n-minute'/ISO) for the time-varying window. If real
+        # departures exist anywhere, they surface here, NOT in tpl_stop_timeline's empty keys.
+        print("\n=== Q2: service_info / service_info_dev on the stop + serving lines ===", flush=True)
+        targets = [("stop", stop_uri)] + [("line", u) for u in line_uris[:2]]
+        for label, uri in targets:
+            await _try_tool(client, "service_info", {"serviceuri": uri})
+            await _try_tool(client, "service_info_dev", {"serviceuri": uri})
+            await _try_tool(
+                client, "service_info_dev",
+                {"serviceuri": uri, "fromtime": "0-minute", "totime": "120-minute"},
+            )
+            print(f"    ^ ({label}) {uri}", flush=True)
 
-    print("\n>>> DONE — read Q1 (is timetable/realtime ever non-empty?) + Q2 (did any flagged "
-          "tool return real departure times?). Empty everywhere ⇒ server-side, confirms L21.",
-          flush=True)
+    print("\n>>> DONE — Q1: are tpl_stop_timeline timetable/realtime empty dicts? "
+          "Q2: does service_info(_dev) expose real departure/realtime data the timeline tool "
+          "omits? If service_info_dev returns time-varying data ⇒ wire it in; if empty too "
+          "⇒ server-side, confirms L21.", flush=True)
 
 
 if __name__ == "__main__":
