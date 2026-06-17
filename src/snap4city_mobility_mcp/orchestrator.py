@@ -401,7 +401,7 @@ def _routetype_of(entry: dict[str, Any]) -> str | None:
     None when args is absent or malformed (entries built by tests may carry no args)."""
     try:
         return json.loads(entry.get("args") or "{}").get("routetype")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return None
 
 
@@ -441,9 +441,6 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             # asked for — is the one worth surfacing, not the fallback's.
             if is_err:
                 route_error = result["error"]
-            continue
-        if is_err:
-            continue
     return {"route_error": route_error} if route_error else {}
 
 
@@ -594,7 +591,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
                     "role": "user",
                     "content": f"User asked: {user_query}\n\n"
                     f"Conversation turn: {'follow-up' if is_followup else 'first'}\n\n"
-                    f"RESULTS:\n" + json.dumps(view, ensure_ascii=False),
+                    "RESULTS:\n" + json.dumps(view, ensure_ascii=False),
                 },
             ],
             tool_choice="none",

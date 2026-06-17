@@ -61,7 +61,7 @@ class TokenManager:
         }
         header = {'Content-Type': 'application/x-www-form-urlencoded'}
         url_token = "https://www.snap4city.org/auth/realms/master/protocol/openid-connect/token"
-        response = requests.post(url_token, data=payload, headers=header)
+        response = requests.post(url_token, data=payload, headers=header, timeout=30)
         _log(f"[GET_TOKEN_VIA_USER_CREDENTIALS] - Response status code: {response.status_code}")
         return response.json()
 
@@ -74,9 +74,8 @@ class TokenManager:
             'refresh_token': refresh_token
         }
         header = {'Content-Type': 'application/x-www-form-urlencoded'}
-        url_token = ("https://www.snap4city.org/auth/realms/master/protocol/openid-connect/token"
-                     "")
-        response = requests.post(url_token, data=payload, headers=header)
+        url_token = "https://www.snap4city.org/auth/realms/master/protocol/openid-connect/token"
+        response = requests.post(url_token, data=payload, headers=header, timeout=30)
         _log(f"[GET_TOKEN_VIA_REFRESH_TOKEN] - Status code response: {response.status_code}")
         return response.json()
 

@@ -42,8 +42,8 @@ def client(monkeypatch):
     return c
 
 
-def _queue_posts(monkeypatch, responses):
-    """Patch httpx.post to pop canned responses/exceptions in order; record each call."""
+def _queue_posts(monkeypatch, client, responses):
+    """Patch the client's HTTP post to pop canned responses/exceptions in order."""
     calls = []
 
     def fake_post(url, **kw):
@@ -53,7 +53,7 @@ def _queue_posts(monkeypatch, responses):
             raise r
         return r
 
-    monkeypatch.setattr(llm_mod.httpx, "post", fake_post)
+    monkeypatch.setattr(client._client, "post", fake_post)
     return calls
 
 
@@ -78,7 +78,7 @@ def test_load_credentials_missing_raises(monkeypatch):
 
 def test_chat_retries_then_succeeds(client, monkeypatch):
     ok = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-    calls = _queue_posts(monkeypatch, [
+    calls = _queue_posts(monkeypatch, client, [
         _Resp({"message": "The upstream server is timing out"}),
         _Resp(ok),
     ])
@@ -89,7 +89,7 @@ def test_chat_retries_then_succeeds(client, monkeypatch):
 
 def test_chat_hard_error_not_retried(client, monkeypatch):
     # L10: "Rule not found" is an auth/authorization failure, not transient — no retry.
-    calls = _queue_posts(monkeypatch, [
+    calls = _queue_posts(monkeypatch, client, [
         _Resp({"message": "Rule not found for this user/path"}),
     ])
     with pytest.raises(Llama4Error, match="Rule not found"):

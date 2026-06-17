@@ -132,6 +132,19 @@ class Llama4Client:
         if not (username and password):
             username, password = _load_credentials()
         self._tm = TokenManager(username, password)
+        # Persistent client keeps the TCP+TLS connection warm across a chat
+        # session's many turns (vs. a fresh handshake per httpx.post call).
+        self._client = httpx.Client(timeout=LLM_TIMEOUT_S)
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        self._client.close()
+
+    def __enter__(self) -> "Llama4Client":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def chat(
         self,
@@ -159,20 +172,19 @@ class Llama4Client:
         if temperature is not None:
             params["temperature"] = temperature
 
-        token = self._tm.get_token()
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        }
-        body = {"access_token": token, "endpoint": LLAMA4_ENDPOINT, "params": params}
-
         last_exc: Llama4Error | None = None
         for attempt in range(LLM_RETRIES + 1):
+            # Re-fetch the token each attempt: TokenManager caches a valid one
+            # (cheap), but a long retried turn can outlive a near-expiry token.
+            token = self._tm.get_token()
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            }
+            body = {"access_token": token, "endpoint": LLAMA4_ENDPOINT, "params": params}
             try:
-                resp = httpx.post(
-                    LLAMA4_API_URL, json=body, headers=headers, timeout=LLM_TIMEOUT_S
-                )
+                resp = self._client.post(LLAMA4_API_URL, json=body, headers=headers)
             except httpx.HTTPError as e:
                 # Network-level failure (read timeout, connection reset) — transient.
                 last_exc = Llama4Error(f"inference request failed: {e}")
