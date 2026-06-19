@@ -1,19 +1,19 @@
-"""Deterministic TPL (trasporto pubblico locale) discovery chains.
+"""TPL (trasporto pubblico locale) discovery chains.
 
-`execute` (orchestrator.py) delegates the tpl_* intents here; like the route
-flow, every step is plain Python driving remote MCP tools — the LLM never picks
-a tool (lesson L13). Chains per intent:
+execute (orchestrator.py) delegates the tpl_* intents here. Like the route flow,
+every step is plain Python driving remote MCP tools; the LLM never picks a tool.
+Chains per intent:
 
-  tpl_lines    agencies → resolve agency → tpl_lines(agency)
-  tpl_routes   agencies → resolve agency → tpl_routes_by_line(line, agency)
-  tpl_stops    … → tpl_stops_by_route(route) for the first 2 routes (directions)
-  tpl_timeline … → token-match the stop name → tpl_stop_timeline(stop)
+  tpl_lines    agencies -> resolve agency -> tpl_lines(agency)
+  tpl_routes   agencies -> resolve agency -> tpl_routes_by_line(line, agency)
+  tpl_stops    ... -> tpl_stops_by_route(route) for the first 2 routes (directions)
+  tpl_timeline ... -> token-match the stop name -> tpl_stop_timeline(stop)
 
-The tpl payload shapes have never been observed live (tool descriptions only —
-api-notes §3): every extractor here is defensive, and `run_tpl_flow` logs raw
-payload heads to debug.log (gitignored) so the first JupyterHub run can
-calibrate them. This module also owns the tpl slim views (L12) and the tpl
-widget-data extraction, keeping orchestrator.py to dispatch + prompts.
+The tpl payload shapes were originally documented only by the tool descriptions
+(api-notes §3), so every extractor here is defensive and run_tpl_flow logs raw
+payload heads to debug.log (gitignored) for calibration on the first real run. This
+module also owns the tpl slim views and widget-data extraction, leaving
+orchestrator.py to dispatch and prompts.
 """
 import json
 import logging
@@ -32,15 +32,15 @@ TPL_INTENTS = ("tpl_lines", "tpl_routes", "tpl_stops", "tpl_timeline")
 REQUIRED_SLOTS = {
     "tpl_routes": (("line", "line_text"),),
     "tpl_stops": (("line", "line_text"),),
-    # No stops-near-GPS tool is exposed: resolving a stop NAME to its service URI
-    # deterministically needs the line's stop list, so the line is required too.
+    # No stops-near-GPS tool is exposed, so resolving a stop name to its service URI
+    # needs the line's stop list. That makes the line required here too.
     "tpl_timeline": (("line", "line_text"), ("stop", "stop_text")),
 }
 
-# First N routes of a line probed for stops — usually the two directions.
+# First N routes of a line probed for stops, usually the two directions.
 STOPS_ROUTES_PROBED = 2
 
-# LLM-view caps (L12: lines can be 100+, a stop list carries a full GeoJSON).
+# LLM-view caps (lines can be 100+, a stop list carries a full GeoJSON).
 TPL_LLM_KEEPS = {
     "tpl_agencies": 20,
     "tpl_lines": 30,
@@ -55,12 +55,12 @@ TPL_TOOL_NAMES = frozenset(TPL_LLM_KEEPS)
 TPL_DATA_KEEP = 50
 ROUTES_DATA_KEEP = 10
 
-# Florence default network. km4city has NO single "Autolinee Toscane"/"AtF"/"ATAF" entry
-# (the URI in the server's own tpl_lines example, '.../resource/AtF', does NOT exist live —
-# probe_tpl STEP 1): the brand is split into ~40 sub-networks (ExtraUrbano <provincia> /
+# Florence default network. km4city has no single "Autolinee Toscane"/"AtF"/"ATAF"
+# entry (the URI in the server's own tpl_lines example, '.../resource/AtF', doesn't
+# exist live): the brand is split into ~40 sub-networks (ExtraUrbano <provincia> /
 # Urbano <città> / Linee Regionali). Florence city lines (incl. line 6) live under
-# "Autolinee Toscane - Urbano Area Metropolitana Fiorentina" (…_Agency_888-48), so a bare or
-# brand-only agency request resolves there. Token-based so it survives minor name variants.
+# "Autolinee Toscane - Urbano Area Metropolitana Fiorentina" (..._Agency_888-48), so a
+# bare or brand-only agency request resolves there. Token-based to survive name variants.
 _FLORENCE_URBAN_TOKENS = frozenset({"firenze", "fiorentina", "metropolitana"})
 
 
@@ -71,8 +71,8 @@ def _is_florence_urban(name: str | None) -> bool:
 
 def _unwrap_tpl(payload: Any) -> Any:
     """Strip the FastMCP non-object wrapper. Servers deliver non-dict structured
-    output as {"result": [...]} (which `_unwrap` returns verbatim), while the
-    documented tpl shapes are bare arrays — accept both."""
+    output as {"result": [...]} (which _unwrap returns verbatim), while the documented
+    tpl shapes are bare arrays. Accept both."""
     if (
         isinstance(payload, dict)
         and len(payload) == 1
@@ -103,7 +103,7 @@ def _first_str(item: dict[str, Any], keys: tuple[str, ...]) -> str | None:
 
 
 def _agency_entries(payload: Any) -> list[dict[str, Any]]:
-    """[{name, uri}] from a tpl_agencies payload (key names unverified — probe)."""
+    """[{name, uri}] from a tpl_agencies payload (key names defensive)."""
     out = []
     for item in _generic_list(payload):
         if not isinstance(item, dict):
@@ -128,10 +128,10 @@ def _route_uris(payload: Any) -> list[str]:
 
 def _features(obj: Any) -> list[Any]:
     """Features list from a (possibly wrapped) FeatureCollection-ish dict. The live tpl
-    shapes nest it under a wrapper key (probe STEP 6/7): `{"BusStops": {"features": [...]}}`
-    (tpl_stops_by_route) and `{"BusStop": {"features": [...]}}` (tpl_stop_timeline) — the
-    GeoJSON has no top-level `type`. Falls back to a direct `features` list (the documented
-    plain FeatureCollection) so both shapes parse."""
+    shapes nest it under a wrapper key: {"BusStops": {"features": [...]}}
+    (tpl_stops_by_route) and {"BusStop": {"features": [...]}} (tpl_stop_timeline), where
+    the GeoJSON has no top-level `type`. Falls back to a direct `features` list (the
+    documented plain FeatureCollection) so both shapes parse."""
     if not isinstance(obj, dict):
         return []
     feats = obj.get("features")
@@ -146,10 +146,10 @@ def _features(obj: Any) -> list[Any]:
 def _stop_entries(payload: Any) -> list[dict[str, Any]]:
     """[{name, uri}] from a tpl_stops_by_route payload.
 
-    Live shape (probe STEP 6): `[service-URI array, {"BusStops": {"features": [...]}}]` — the
-    GeoJSON is nested under `BusStops` and each feature's `properties` carry `name` +
-    `serviceUri` (and coordinates). Name from properties.name (fallback .address); URI from
-    properties.serviceUri, else POSITIONAL alignment with the URI array. `_features` also
+    Live shape: [service-URI array, {"BusStops": {"features": [...]}}]. The GeoJSON is
+    nested under `BusStops` and each feature's `properties` carry `name`, `serviceUri`
+    and coordinates. Name from properties.name (fallback .address); URI from
+    properties.serviceUri, else positional alignment with the URI array. _features also
     accepts the plain documented FeatureCollection.
     """
     payload = _unwrap_tpl(payload)
@@ -173,24 +173,24 @@ def _stop_entries(payload: Any) -> list[dict[str, Any]]:
             uri = uris[i]
         if uri:
             entries.append({"name": _first_str(props, ("name", "address")), "uri": uri})
-    if not entries and isinstance(uris, list):  # no usable features — URIs only
+    if not entries and isinstance(uris, list):  # no usable features, URIs only
         entries = [{"name": None, "uri": u} for u in uris if isinstance(u, str)]
     return entries
 
 
 def _match_stop(entries: list[dict[str, Any]], stop_text: str) -> dict[str, Any] | None:
-    """Best stop for the user's text. Unlike `_pick_coord` (geocode), a stop name is
-    usually LONGER than what the user types ("San Marco" → official stop "Museo Di San
-    Marco", live data), so the user's tokens being a SUBSET of the stop name is the useful
-    direction. Exact token match wins; then either-direction subset (covers a verbose user
-    phrase too); first hit in route order."""
+    """Best stop for the user's text. Unlike _pick_coord (geocode), a stop name is
+    usually longer than what the user types ("San Marco" vs the official "Museo Di San
+    Marco"), so the user's tokens being a subset of the stop name is the useful
+    direction. Exact token match wins, then either-direction subset (also covers a
+    verbose user phrase), then the first hit in route order."""
     want = _label_tokens(stop_text)
     if not want:
         return None
     for e in entries:  # exact token set first
         if _label_tokens(str(e.get("name") or "")) == want:
             return e
-    for e in entries:  # then user-words ⊆ official name ("San Marco" ⊆ "Museo Di San Marco")
+    for e in entries:  # then user words are a subset of the official name
         toks = _label_tokens(str(e.get("name") or ""))
         if toks and (want <= toks or toks <= want):
             return e
@@ -201,11 +201,12 @@ def _resolve_agency(agencies: list[dict[str, Any]], agency_text: str) -> str | N
     """Agency URI for the user's text, or the Florence-urban default; None = unknown
     (the agencies audit entry reaches respond, which asks the user to pick).
 
-    Brand match is bidirectional: a generic brand ("Autolinee Toscane") is a SUBSET of the
-    specific sub-network names, while a verbose user phrase can be a SUPERSET — accept either
-    direction. When a brand matches many sub-networks, the Florence-centric advisor prefers
-    the Florence urban one (proven live: 888-48 + line "6" → 22 routes; ExtraUrbano Arezzo
-    → []). Empty text resolves to that same Florence-urban default. See lesson L21.
+    Brand match is bidirectional: a generic brand ("Autolinee Toscane") is a subset of
+    the specific sub-network names, while a verbose user phrase can be a superset, so we
+    accept either direction. When a brand matches many sub-networks, the Florence-centric
+    advisor prefers the Florence urban one (proven live: 888-48 + line "6" gave 22
+    routes, ExtraUrbano Arezzo gave none). Empty text resolves to that same
+    Florence-urban default.
     """
     if agency_text.strip():
         want = _label_tokens(agency_text)
@@ -225,9 +226,9 @@ def _resolve_agency(agencies: list[dict[str, Any]], agency_text: str) -> str | N
 async def run_tpl_flow(client: Client, slots: dict[str, Any]) -> dict[str, Any]:
     """Deterministically run the discovery chain for a tpl_* intent (NO LLM).
 
-    Returns {"tool_results", "unsupported"} like execute's route flow — never a
-    `missing` key (AdvisorState has no such channel; respond re-derives missing
-    slots from `slots` via REQUIRED_SLOTS).
+    Returns {"tool_results", "unsupported"} like execute's route flow, never a
+    `missing` key (AdvisorState has no such channel; respond re-derives missing slots
+    from `slots` via REQUIRED_SLOTS).
     """
     intent = slots.get("intent") or ""
     results: list[dict[str, Any]] = []
@@ -239,7 +240,7 @@ async def run_tpl_flow(client: Client, slots: dict[str, Any]) -> dict[str, Any]:
         result = await exec_tool(client, name, args)
         results.append({"name": name, "args": json.dumps(args), "result": result})
         if logger.isEnabledFor(logging.DEBUG):
-            # Raw head incl. the outermost shape (bare list vs {"result": ...}) —
+            # Raw head including the outermost shape (bare list vs {"result": ...}):
             # the calibration data for every assumption in this module.
             logger.debug(
                 "tool %s %s -> raw head: %s",
@@ -277,15 +278,16 @@ async def run_tpl_flow(client: Client, slots: dict[str, Any]) -> dict[str, Any]:
 
 
 def _timeline_view(payload: Any) -> dict[str, Any]:
-    """Structured view of a tpl_stop_timeline payload (live shape, probe STEP 7):
-    `{"BusStop": {"features": [{"properties": {"name": ...}}]},
-      "busLines": {"results": {"bindings": [{"busLine": {"value"}, "lineDesc": {"value"},
-                  "lineUri": {"value"}}]}}, "realtime": {}, "timetable": {}}`.
+    """Structured view of a tpl_stop_timeline payload. Live shape:
+    {"BusStop": {"features": [{"properties": {"name": ...}}]},
+     "busLines": {"results": {"bindings": [{"busLine": {"value"}, "lineDesc": {"value"},
+                 "lineUri": {"value"}}]}}, "realtime": {}, "timetable": {}}.
 
-    Returns `{stop, lines, [timetable], [realtime]}` (only the keys present), or `{}` when
-    nothing is usable. NOTE: `timetable`/`realtime` came back EMPTY in the live probe — the
-    stop's scheduled times appear unavailable server-side; they are surfaced only when present
-    so respond can report the serving lines and say times aren't available, never invent them.
+    Returns {stop, lines, [timetable], [realtime]} (only the keys present), or {} when
+    nothing is usable. timetable/realtime came back empty in the live probe, so the
+    stop's scheduled times appear unavailable server-side. They are surfaced only when
+    present, so respond can report the serving lines and say times aren't available
+    rather than invent them.
     """
     payload = _unwrap_tpl(payload)
     if not isinstance(payload, dict):
@@ -307,15 +309,15 @@ def _timeline_view(payload: Any) -> dict[str, Any]:
         })
     if lines:
         out["lines"] = lines
-    for key in ("timetable", "realtime"):  # the actual schedule — empty in the live probe
+    for key in ("timetable", "realtime"):  # the actual schedule, empty in the live probe
         if payload.get(key):
             out[key] = payload[key]
     return out
 
 
 def slim_tpl_result(name: str, result: Any) -> Any:
-    """Compact LLM view of a tpl payload (L12) — counts + capped items, never a
-    full GeoJSON or route WKT. Full fidelity stays in the tool_results audit."""
+    """Compact LLM view of a tpl payload: counts and capped items, never a full GeoJSON
+    or route WKT. Full fidelity stays in the tool_results audit."""
     if isinstance(result, dict) and "error" in result:
         return result
     keep = TPL_LLM_KEEPS.get(name, 20)
@@ -352,9 +354,9 @@ def _last_ok_result(results: list[dict[str, Any]], name: str) -> Any:
 
 
 def extract_tpl_data(intent: str, results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Widget payload for a tpl intent. NEW data keys (lines/routes/stops/
-    timeline) — pending referente confirmation, same status as data.legs/arcs.
-    Route entries keep their WKT so the map widget can draw the line."""
+    """Widget payload for a tpl intent. The data keys (lines/routes/stops/timeline) are
+    pending referente confirmation, same status as data.legs/arcs. Route entries keep
+    their WKT so the map widget can draw the line."""
     if intent == "tpl_lines":
         items = _generic_list(_last_ok_result(results, "tpl_lines"))
         return {"lines": items[:TPL_DATA_KEEP]} if items else {}
@@ -389,8 +391,8 @@ def _names(items: list[Any], keys: tuple[str, ...]) -> list[str]:
 
 
 def tpl_template_answer(intent: str, data: dict[str, Any]) -> str | None:
-    """Deterministic Italian fallback when the respond LLM is unavailable
-    (mirror of orchestrator._template_answer for the route intent)."""
+    """Italian fallback when the respond LLM is unavailable (mirror of
+    orchestrator._template_answer for the route intent)."""
     if intent == "tpl_lines" and data.get("lines"):
         names = _names(data["lines"], ("shortName", "short_name", "lineNumber", "name", "uri"))
         return f"Linee disponibili: {', '.join(names[:15])} ({len(data['lines'])} mostrate)."

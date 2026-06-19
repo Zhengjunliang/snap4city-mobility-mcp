@@ -1,27 +1,24 @@
-"""Llama4 inference client — Snap4City ClearML on-demand agentic API.
+"""Llama4 inference client for the Snap4City ClearML on-demand API.
 
-Wraps the auth + inference flow from referente's reference example. Auth and
-inference live behind https://www.snap4city.org, but the API rule is bound to a
-function account and only authorizes requests from the Snap4City JupyterHub — so
-this client returns real answers only when run there.
+Wraps the auth + inference flow from referente's reference example. The API rule is
+bound to a function account and only authorizes requests from the Snap4City JupyterHub,
+so this client returns real answers only when run there.
 
-Endpoint `llama4-agentic-inference` is OpenAI/MCP-compatible (vLLM):
-  - Send OpenAI `messages` (chat, multimodal text + image_url) via `chat()`.
-  - Pass `tools` (OpenAI function schema) + `tool_choice="auto"` to let the model
-    emit `tool_calls` — the basis for an agentic loop over the MCP tools. Feed
-    each tool result back as a `{"role": "tool", ...}` message in the next turn.
-  - Response is always an OpenAI object: `choices[0].message.{content, tool_calls}`.
-    We default `tool_choice="none"`, which forces the OpenAI format even when no
-    tools are passed (otherwise the endpoint would fall back to a legacy shape).
+The llama4-agentic-inference endpoint is OpenAI-compatible (vLLM):
+  - Send OpenAI `messages` (chat, multimodal text + image_url) via chat().
+  - Pass `tools` (OpenAI function schema) + tool_choice="auto" to let the model emit
+    tool_calls; feed each result back as a {"role": "tool", ...} message next turn.
+  - The response is always an OpenAI object: choices[0].message.{content, tool_calls}.
+    We default tool_choice="none" to force the OpenAI format even with no tools passed
+    (otherwise the endpoint falls back to a legacy shape).
 
 Request envelope: {access_token, endpoint, params:{messages, tools?, tool_choice, temperature?}}.
 
-Credentials are read from a user_credentials.json file (same {"username",
-"password"} shape as referente's example) — nothing sensitive lands in git (the
-file is .gitignored). Search order:
+Credentials are read from a user_credentials.json file ({"username", "password"}, the
+same shape as referente's example); the file is gitignored. Search order:
     S4C_CREDENTIALS_FILE -> ./user_credentials.json -> <repo>/user_credentials.json
 Optional endpoint overrides: S4C_LLM_API_URL, S4C_LLM_ENDPOINT.
-TokenManager caches/refreshes the access token in token_stored.json.
+TokenManager caches and refreshes the access token in token_stored.json.
 """
 import asyncio
 import json
@@ -40,17 +37,17 @@ LLAMA4_API_URL = os.environ.get(
 LLAMA4_ENDPOINT = os.environ.get("S4C_LLM_ENDPOINT", "llama4-agentic-inference")
 # Reference example showed tens of seconds round-trip; allow generous headroom.
 LLM_TIMEOUT_S = 120.0
-# The Snap4City gateway returns a transient error envelope (e.g. "The upstream
-# server is timing out") when the vLLM backend is slow to warm up or busy — a heavy
-# agent turn (long system prompt + 7 tool schemas, tool_choice=auto) is the usual
-# trigger. The backend is typically warm by the next attempt, so retry a few times.
+# The gateway returns a transient error envelope (e.g. "The upstream server is timing
+# out") when the vLLM backend is slow to warm up or busy; a heavy agent turn (long
+# system prompt + 7 tool schemas, tool_choice=auto) is the usual trigger. The backend
+# is typically warm by the next attempt, so retry a few times.
 LLM_RETRIES = 2
 LLM_RETRY_BACKOFF_S = 4.0
-# Substrings (case-insensitive) that mark a gateway/backend error worth retrying.
-# The gateway can answer HTTP 200 while wrapping an upstream failure in the body, e.g.
+# Substrings (case-insensitive) that mark a gateway/backend error worth retrying. The
+# gateway can answer HTTP 200 while wrapping an upstream failure in the body, e.g.
 # "Failed to make POST request to .../llama4-agentic-inference. Error: 500 Server Error:
-# Internal Server Error" — the vLLM backend choked (often a too-large request). Treat
-# those as transient: a slimmer / retried turn usually clears it.
+# Internal Server Error", where the vLLM backend choked (often a too-large request). A
+# slimmer or retried turn usually clears it.
 _TRANSIENT_HINTS = (
     "timing out", "timeout", "timed out", "upstream", "temporarily unavailable",
     "overloaded", "try again", "bad gateway", "503", "502", "504",
@@ -93,7 +90,7 @@ def _load_credentials() -> tuple[str, str]:
     path = _credentials_file()
     if path is None:
         raise Llama4Error(
-            "no user_credentials.json found — set S4C_CREDENTIALS_FILE to its path, "
+            "no user_credentials.json found: set S4C_CREDENTIALS_FILE to its path, "
             "or place it in the working dir or llmagentic/"
         )
     try:
@@ -125,7 +122,7 @@ class Llama4Client:
 
     TokenManager (sync, requests-based) handles auth; the inference POST uses
     httpx to stay consistent with the rest of the package. Use `achat` from
-    async code (Langgraph nodes) — it offloads the blocking call to a thread.
+    async code (Langgraph nodes); it offloads the blocking call to a thread.
     """
 
     def __init__(self, username: str | None = None, password: str | None = None) -> None:
@@ -186,7 +183,7 @@ class Llama4Client:
             try:
                 resp = self._client.post(LLAMA4_API_URL, json=body, headers=headers)
             except httpx.HTTPError as e:
-                # Network-level failure (read timeout, connection reset) — transient.
+                # Network-level failure (read timeout, connection reset): transient.
                 last_exc = Llama4Error(f"inference request failed: {e}")
                 if attempt < LLM_RETRIES:
                     time.sleep(LLM_RETRY_BACKOFF_S * (attempt + 1))
@@ -226,7 +223,7 @@ class Llama4Client:
         tool_choice: Any = "none",
         temperature: float | None = None,
     ) -> dict[str, Any]:
-        """Async `chat` — runs the blocking call in a worker thread."""
+        """Async chat: runs the blocking call in a worker thread."""
         return await asyncio.to_thread(
             lambda: self.chat(
                 messages, tools=tools, tool_choice=tool_choice, temperature=temperature

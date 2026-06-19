@@ -1,30 +1,23 @@
-"""Langgraph mobility advisor — deterministic orchestration layer.
+"""Langgraph mobility advisor: the orchestration graph.
 
-A natural-language query drives a single linear graph:
+A natural-language query runs through a linear graph: understand -> execute ->
+respond -> END.
 
-  understand → execute → respond → END
+- understand (LLM, forced tool call): extracts the request slots (intent, origin,
+  destination, mode) from the latest user turn, place text only. Follow-ups like
+  "那坐公交呢?" resolve against the conversation history.
+- execute (plain Python, no LLM): for a route intent, geocodes both endpoints then
+  calls routing with the requested mode. tpl_* intents go to the discovery chains
+  in tpl.py; "other" falls through to an "unsupported" reply.
+- respond (LLM, no tools): phrases a multilingual answer from the results and
+  assembles the widget JSON (with the full route WKT and the updated messages).
 
-- `understand` (LLM, forced tool call): extracts {intent, origin_text,
-  destination_text, mode} from the latest user turn (place TEXT only — coordinates
-  come from a tool). Resolves follow-ups ("那坐公交呢?") against the conversation.
-  A forced `tool_choice` guarantees structured output, so this stage is reliable.
-- `execute` (pure Python, NO LLM): for a `route` intent it deterministically runs
-  the fixed tool flow — geocode origin, geocode destination, then `routing` with
-  the requested mode — instead of letting the model free-call tools. tpl_* intents
-  dispatch to the deterministic discovery chains in tpl.py (`run_tpl_flow`); only
-  "other" falls through to a friendly "unsupported" reply.
-- `respond` (LLM, tool_choice="none" — NO tools): phrases a concise, multilingual
-  answer from the structured results, then assembles the widget JSON (incl. the
-  FULL route WKT and the updated `messages` for multi-turn).
+The model never picks tools itself: in agentic mode Llama4 tends to emit tool calls
+as pythonic text instead of structured tool_calls, which then leaks into the answer.
+Letting it pick only slots and prose, with Python driving the tools, avoids that.
 
-Why deterministic: Llama4 with `tool_choice="auto"` is unreliable — when it wants
-to narrate ("retrying with a different profile…") it emits tool calls as pythonic
-TEXT instead of structured `tool_calls`, which leak into the final answer (see
-lesson L13). Letting the model pick *slots* (forced) and *prose* (none), while
-Python drives the tools, removes that failure mode entirely.
-
-Deterministic MCP execution + km4city quirk handling live in mcp_tools.py; the
-Llama4 client in llm.py. Runs end-to-end only on the Snap4City JupyterHub.
+MCP execution and km4city quirk handling live in mcp_tools.py, the Llama4 client in
+llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 """
 import json
 import logging
@@ -135,7 +128,8 @@ answer point-to-point trip questions (on foot, by car, or by public transport) a
 public-transport discovery questions (lines, routes, stops, timetables) and invite \
 the user to rephrase."""
 
-# Synthetic function (not an MCP tool) — forces structured output from `understand`.
+# Not a real MCP tool: a function schema used only to force structured output
+# from the understand node.
 _EXTRACT_SLOTS_SCHEMA = {
     "type": "function",
     "function": {
@@ -180,9 +174,9 @@ _EXTRACT_SLOTS_SCHEMA = {
                     "description": "Public transport stop name, '' if none.",
                 },
             },
-            # All fields required: Llama4 only fills required params, silently dropping
-            # optional ones (a real run extracted origin but no destination). '' marks
-            # a genuinely absent slot.
+            # Mark every field required: Llama4 only fills required params and
+            # silently drops optional ones (one run extracted the origin but lost
+            # the destination). An empty string '' marks a slot the user didn't give.
             "required": [
                 "request_type", "info_kind", "origin_text", "destination_text",
                 "mode", "agency_text", "line_text", "stop_text",
@@ -193,16 +187,16 @@ _EXTRACT_SLOTS_SCHEMA = {
 
 
 class AdvisorState(TypedDict, total=False):
-    messages: list[dict[str, Any]]  # chat history (system + user + assistant) for multi-turn
-    intent: str  # from understand: route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
-    slots: dict[str, Any]  # understand output: {request_type, info_kind, intent (mapped), origin_text, destination_text, mode, agency_text, line_text, stop_text}
-    tool_results: list[dict[str, Any]]  # structured audit: [{name, args, result}] per call
-    unsupported: bool  # True when execute could not run a deterministic flow ("other" intent / missing required slots)
-    final: dict[str, Any]  # widget JSON assembled by respond node
+    messages: list[dict[str, Any]]  # chat history (system/user/assistant) for multi-turn
+    intent: str  # route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
+    slots: dict[str, Any]  # understand output (request_type, info_kind, intent, origin_text, ...)
+    tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
+    unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
+    final: dict[str, Any]  # widget JSON assembled by respond
 
 
-# Two-axis classification (request_type + info_kind) folds into the internal `intent`
-# vocabulary the deterministic flow dispatches on, so execute/tpl/respond stay unchanged.
+# The LLM classifies on two axes (request_type + info_kind); we fold that into the
+# single `intent` string the rest of the graph dispatches on.
 _INFO_KIND_TO_INTENT = {
     "lines": "tpl_lines",
     "routes": "tpl_routes",
@@ -212,10 +206,10 @@ _INFO_KIND_TO_INTENT = {
 
 
 def _request_to_intent(slots: dict[str, Any]) -> str:
-    """Map the LLM's two-axis classification to one internal `intent` string.
+    """Map the two-axis classification to one internal `intent` string.
 
-    journey → route; transit_info → tpl_<info_kind> (unknown/blank info_kind → other,
-    handled downstream as unsupported); anything else → other."""
+    journey -> route; transit_info -> tpl_<info_kind> (blank info_kind -> other);
+    anything else -> other."""
     rt = slots.get("request_type")
     if rt == "journey":
         return "route"
@@ -227,10 +221,8 @@ def _request_to_intent(slots: dict[str, Any]) -> str:
 async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     """LLM extracts slots from the latest user turn via a forced tool call.
 
-    A forced `tool_choice` makes the gateway return structured `tool_calls`, so this
-    stage never falls back to the pythonic-text shape that plagues free tool use.
-    The model classifies on two axes (request_type + info_kind); `_request_to_intent`
-    folds that into the internal `intent` the rest of the graph dispatches on.
+    The forced tool_choice makes the gateway return structured tool_calls, so this
+    stage avoids the pythonic-text shape that breaks free tool use.
     """
     history = state["messages"]
     convo = [m for m in history if m.get("role") in ("user", "assistant")]
@@ -250,7 +242,7 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
                 slots = parsed
                 slots["intent"] = _request_to_intent(parsed)
     except (json.JSONDecodeError, Llama4Error) as e:
-        # Fall back to {"intent": "other"} — execute treats it as unsupported; the
+        # Fall back to {"intent": "other"}: execute treats it as unsupported, and the
         # debug log keeps the cause visible (LLM error vs. genuinely empty slots).
         logger.debug("understand slot extraction failed: %s", e)
     logger.debug("understand slots: %s", slots)
@@ -258,17 +250,14 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
 
 
 def _pick_coord(geocode: Any, search: str) -> list[float] | None:
-    """Best feature's `[lng, lat]` for `search` from an `address_search_location`
-    result, or None.
+    """Best feature's [lng, lat] for `search` from a geocode result, or None.
 
-    The server ranks fuzzy POI hits above the real place (L17: "Piazza Duomo"'s
-    first feature was a company 1.1 km west of the square), so prefer the first
-    feature whose address/name tokens are all covered by the search text — strict
-    on extra tokens, so that company hit never matches. When no label matches
-    (e.g. stations, whose POI features carry no address) the server's first hit
-    stands. `exec_tool` already pins the result to Tuscany and returns
-    `{"error": ...}` when nothing matches, so a non-FeatureCollection / empty
-    payload yields None here.
+    The server sometimes ranks a fuzzy POI hit above the real place (once a company
+    1.1 km west of "Piazza Duomo"), so we prefer the first feature whose address/name
+    tokens are all covered by the search text, and reject features with extra tokens.
+    When no label matches (e.g. stations, whose features carry no address) we keep the
+    server's first hit. exec_tool already pins results to Tuscany, so an empty or
+    non-FeatureCollection payload gives None here.
     """
     if not isinstance(geocode, dict) or "error" in geocode:
         return None
@@ -282,8 +271,8 @@ def _pick_coord(geocode: Any, search: str) -> list[float] | None:
             props = f.get("properties") or {}
             label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
             toks = _label_tokens(label)
-            # A label that is just the municipality ("FIRENZE") would match any
-            # search ending in ", Firenze" — never a useful pick target.
+            # Skip a label that is just the municipality ("FIRENZE"): it matches any
+            # search ending in ", Firenze" but is never a useful pick.
             if toks and toks <= want and not toks <= _label_tokens(str(props.get("city") or "")):
                 idx, best = i, f
                 break
@@ -299,22 +288,20 @@ def _pick_coord(geocode: Any, search: str) -> list[float] | None:
     return None
 
 
-# Walking modes share a deterministic fallback: a walking route that fails is retried
-# once with the other foot profile (the profiles hit different graph paths, so one can
-# succeed where the other returns an empty body) — the same recovery the model used to
-# attempt by hand, now driven by Python so it always runs. Applied once, never across
-# semantics (car / public_transport failures get alternatives suggested by `respond`).
+# A failed walking route is retried once with the other foot profile: the two
+# profiles take different graph paths, so one can succeed where the other returns an
+# empty body. Only for walking; car/public_transport failures instead get an
+# alternative suggested by respond.
 _FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 
 
 async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
-    """Deterministically run the tool flow for the extracted intent (NO LLM).
+    """Run the tool flow for the extracted intent (no LLM).
 
-    `route`: geocode both endpoints, then `routing` with the requested mode (+ a
-    foot profile retry). tpl_* intents delegate to tpl.run_tpl_flow (discovery
-    chains). Every call is recorded in `tool_results` so the widget data can be
-    mined from the audit. "other" / missing required slots set `unsupported` for
-    the respond node.
+    route: geocode both endpoints, then routing with the requested mode (plus a foot
+    profile retry). tpl_* intents go to tpl.run_tpl_flow. Every call is recorded in
+    tool_results so respond can mine the widget data. "other" or missing slots set
+    unsupported.
     """
     slots = state.get("slots") or {}
     results: list[dict[str, Any]] = []
@@ -334,8 +321,8 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         result = await exec_tool(client, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
         coord = _pick_coord(result, search)
-        if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
-            # The slim view no longer carries coordinates — log the picked one here.
+        if logger.isEnabledFor(logging.DEBUG):
+            # The slim view drops coordinates, so log the picked one here.
             logger.debug(
                 "tool address_search_location %s -> %s (picked %s)",
                 args,
@@ -347,7 +334,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
     origin = await _geocode(origin_text)
     dest = await _geocode(dest_text)
     if origin is None or dest is None:
-        return {"tool_results": results, "unsupported": False}  # geocode error → respond explains
+        return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
     mode = slots.get("mode") or "foot_shortest"
 
@@ -362,7 +349,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         }
         result = await exec_tool(client, "routing", args, routing_attempts=attempts)
         results.append({"name": "routing", "args": json.dumps(args), "result": result})
-        if logger.isEnabledFor(logging.DEBUG):  # json.dumps is not free on the hot path
+        if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "tool routing %s -> %s",
                 args,
@@ -377,9 +364,9 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
         and isinstance(routed.get("journey"), dict)
         and logger.isEnabledFor(logging.DEBUG)
     ):
-        # Live probe: the real PT arc shape has never been observed — dump the
-        # first raw arcs so group_arc_legs' provisional grouping key can be
-        # calibrated offline from debug.log (gitignored).
+        # The real public-transport arc shape hasn't been observed live yet: dump
+        # the first raw arcs so group_arc_legs' grouping key can be calibrated
+        # offline from debug.log (gitignored).
         first = (routed["journey"].get("routes") or [{}])[0]
         arcs = first.get("arc") or []
         logger.debug(
@@ -388,17 +375,17 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
             json.dumps(arcs[:5], ensure_ascii=False)[:2000],
         )
     if isinstance(routed, dict) and "error" in routed and mode in _FOOT_FALLBACK:
-        # Deterministic walking-profile fallback, single shot: the requested profile
-        # already burned the full L3 stale ladder (~27 s), so the transient is ruled
-        # out — this only probes the other foot graph path.
+        # Single-shot fallback to the other foot profile. The requested profile
+        # already exhausted the stale-retry ladder (~27 s), so this only probes the
+        # other graph path, not the transient.
         await _route(_FOOT_FALLBACK[mode], attempts=1)
 
     return {"tool_results": results, "unsupported": False}
 
 
 def _routetype_of(entry: dict[str, Any]) -> str | None:
-    """The `routetype` of a routing audit entry, read back from its json `args`.
-    None when args is absent or malformed (entries built by tests may carry no args)."""
+    """The routetype of a routing audit entry, read back from its json args.
+    None when args is absent or malformed (test entries may carry no args)."""
     try:
         return json.loads(entry.get("args") or "{}").get("routetype")
     except (json.JSONDecodeError, TypeError):
@@ -420,25 +407,25 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 journey = result["journey"]
                 first = (journey.get("routes") or [{}])[0]
                 data = {
-                    "wkt": first.get("wkt"),  # FULL LINESTRING — not truncated
+                    "wkt": first.get("wkt"),  # full LINESTRING, not truncated
                     "distance_km": first.get("distance"),
                     "eta": first.get("eta"),
                     "duration": first.get("time"),
-                    # "arcs": first.get("arc"),  # per-segment detail hidden — bloats payload
-                    # ~90%; re-enable once referente confirms the dashboard widget needs it.
+                    # "arcs": first.get("arc"),  # per-segment detail: bloats the payload
+                    # ~90%, re-enable once referente confirms the widget needs it.
                     "source_node": journey.get("source_node"),
                     "destination_node": journey.get("destination_node"),
                 }
                 if _routetype_of(entry) == "public_transport":
-                    # NEW field, pending referente confirmation (same status as
-                    # data.arcs): walk/ride legs grouped from the journey arcs.
+                    # Walk/ride legs grouped from the journey arcs. Pending referente
+                    # confirmation, same status as data.arcs above.
                     legs = group_arc_legs(first.get("arc") or [])
                     if legs:
                         data["legs"] = legs
                 return data
-            # Keep overwriting while scanning backwards: when every profile failed
-            # (mode + foot fallback), the EARLIEST error — the mode the user actually
-            # asked for — is the one worth surfacing, not the fallback's.
+            # Scanning backwards, keep overwriting: when every profile failed (mode +
+            # foot fallback), we want the earliest error, the mode the user actually
+            # asked for, not the fallback's.
             if is_err:
                 route_error = result["error"]
     return {"route_error": route_error} if route_error else {}
@@ -447,9 +434,8 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
 def _template_answer(
     intent: str, data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
 ) -> str:
-    """Deterministic fallback answer when the respond LLM is unavailable.
-
-    Italian — the advisor's default language (Florence service; see RESPOND_SYSTEM)."""
+    """Fallback answer in Italian (the advisor's default) when the respond LLM
+    is unavailable."""
     if missing:
         labels = {
             "origin": "il punto di partenza",
@@ -476,14 +462,14 @@ def _template_answer(
             bits.append(f"~{data['duration']}")
         if data.get("eta"):
             bits.append(f"arrivo {data['eta']}")
-        return "📍 " + " · ".join(bits)
+        return " · ".join(bits)
     if data.get("route_error"):
-        return f"⚠ {data['route_error']}"
+        return data["route_error"]
     return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
 
 
-# Required slots per intent: route needs both places; the tpl table comes from
-# tpl.py (single source — run_tpl_flow skips its chain on the same keys).
+# Required slots per intent: route needs both places. The tpl table lives in tpl.py
+# (single source: run_tpl_flow skips its chain on the same keys).
 _REQUIRED_SLOTS: dict[str, tuple[tuple[str, str], ...]] = {
     "route": (("origin", "origin_text"), ("destination", "destination_text")),
     **TPL_REQUIRED_SLOTS,
@@ -500,12 +486,11 @@ def _missing_slots(intent: str, slots: dict[str, Any]) -> list[str]:
 
 
 def _routing_hint(routetype: str | None, result: Any) -> str | None:
-    """Deterministic suggestion key for a FAILED routing attempt (L19).
+    """Suggestion key for a failed routing attempt.
 
-    Keeps the ZTL-vs-service-side judgement in Python instead of asking the respond
-    LLM to pattern-match `result["error"]` — the two error strings come from
-    mcp_tools.routing deterministically. None → no special hint; respond's generic
-    error rule handles it (geocode failures, transient call errors, etc.).
+    Keeps the ZTL-vs-service-side judgement in Python rather than asking the respond
+    LLM to pattern-match result["error"]. None means no special hint, and respond's
+    generic error rule handles it (geocode failures, transient call errors, etc.).
     """
     if not isinstance(result, dict):
         return None
@@ -513,7 +498,7 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
     if not isinstance(err, str):
         return None
     if "empty response from routing service" in err:
-        # Service-side failure for this mode — NOT a ZTL/pedestrian restriction.
+        # Service-side failure for this mode, not a ZTL/pedestrian restriction.
         return "service_empty_try_foot_or_later"
     if "empty routes list" in err and routetype in ("car", "public_transport"):
         # A car/PT route with no result is often Florence's ZTL/pedestrian core.
@@ -524,7 +509,7 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
 def _results_view(
     results: list[dict[str, Any]], *, unsupported: bool, missing: list[str] | None = None
 ) -> dict[str, Any]:
-    """Compact, LLM-facing summary of what execute produced (slim — no huge WKT)."""
+    """Compact, LLM-facing summary of what execute produced (no huge WKT)."""
     if missing:
         return {"status": "missing_place", "missing": missing}
     if unsupported:
@@ -543,13 +528,13 @@ def _results_view(
         )
         item = {"name": name, "result": slim}
         if name == "routing":
-            # Surface WHICH mode this routing attempt used: on failure the LLM can
-            # only suggest a sensible alternative ("in auto non si può, prova a
-            # piedi") when it knows the mode that failed.
+            # Surface which mode this attempt used: on failure the LLM can only
+            # suggest a sensible alternative ("in auto non si può, prova a piedi")
+            # when it knows which mode failed.
             routetype = _routetype_of(e)
             item["routetype"] = routetype
-            # A deterministic hint replaces the per-case error-string rules the
-            # respond prompt used to carry (L19): the prompt now just follows it.
+            # The hint carries the ZTL-vs-service judgement so the prompt just
+            # follows it instead of pattern-matching the error string.
             hint = _routing_hint(routetype, e.get("result"))
             if hint:
                 item["hint"] = hint
@@ -558,15 +543,15 @@ def _results_view(
 
 
 async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
-    """LLM phrases a multilingual answer from the structured results (NO tools),
-    then assembles the widget JSON. Falls back to a template if the LLM errors."""
+    """LLM phrases a multilingual answer from the results (no tools), then assembles
+    the widget JSON. Falls back to a template if the LLM errors."""
     messages = list(state.get("messages") or [])
     intent = state.get("intent", "other")
     results = state.get("tool_results") or []
     unsupported = bool(state.get("unsupported"))
     data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
-    # An intent that execute refused = slot extraction left a required slot blank
-    # (route: a place; tpl: line/stop); respond then asks for it instead of
+    # An intent execute refused means slot extraction left a required slot blank
+    # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.
     missing = (
         _missing_slots(intent, state.get("slots") or {})
@@ -577,9 +562,9 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     user_query = next(
         (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
     )
-    # A prior assistant turn means this is a follow-up — respond then answers directly
-    # without re-greeting (RESPOND_SYSTEM keys the greeting off this marker). `messages`
-    # here is [history..., current user]; the current assistant turn is not appended yet.
+    # A prior assistant turn means this is a follow-up, so respond answers directly
+    # without re-greeting (RESPOND_SYSTEM keys the greeting off this marker). messages
+    # here is [history..., current user]; the assistant turn isn't appended yet.
     is_followup = any(m.get("role") == "assistant" for m in messages)
     view = _results_view(results, unsupported=unsupported, missing=missing)
     answer: str | None = None
@@ -595,9 +580,9 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
                 },
             ],
             tool_choice="none",
-            # Low temperature to stay grounded: at 0.7 Llama4 "helpfully" invented line
-            # numbers / operators (ATAF) when RESULTS lacked them, and occasionally drifted
-            # to English. Phrasing room is secondary to never fabricating. (Slots use 0.)
+            # Low temperature to stay grounded: at 0.7 Llama4 invented line numbers and
+            # operators (ATAF) when RESULTS lacked them, and sometimes drifted to
+            # English. Phrasing room matters less than never fabricating. (Slots use 0.)
             temperature=0.2,
         )
         content = assistant_message(resp).get("content")
@@ -609,16 +594,16 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
         answer = _template_answer(intent, data, unsupported=unsupported, missing=missing)
 
     messages.append({"role": "assistant", "content": answer})
-    # Widget JSON: the reply lives in `messages[-1].content` (OpenAI-standard) — no
-    # custom top-level `answer` field. `status` is the JSend-style outcome
-    # ("success"/"error"); `request_type` names the served intent; `data` is the route
-    # payload; `messages` is the multi-turn history to pass back.
+    # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no
+    # custom top-level `answer` field. status is the JSend-style outcome, request_type
+    # names the served intent, data is the route payload, messages is the history to
+    # pass back for the next turn.
     return {
         "final": {
             "status": "success",
             "request_type": intent,
             "data": data,
-            "messages": messages,  # updated history for multi-turn (last turn = the reply)
+            "messages": messages,  # updated history (last turn = the reply)
         }
     }
 
@@ -635,16 +620,16 @@ def _build_graph(client: Client, llm: Llama4Client):
     return g.compile()
 
 
-# Process-wide session state, built lazily on the first turn. Rebuilding these per
-# turn re-fetched /apps.json and re-created the TokenManager (one [INIT]/[LOAD_TOKEN]
-# stderr block per question); a chat session reuses them. Token refresh stays correct:
-# TokenManager.get_token() re-checks expiry on every call.
-_CFG: dict[str, Any] | None = None  # dashboard /apps.json topology — static
+# Process-wide session state, built lazily on the first turn and reused after.
+# Rebuilding per turn would re-fetch /apps.json and re-create the TokenManager (a
+# stderr log block per question). Token refresh stays correct: TokenManager.get_token()
+# re-checks expiry on every call.
+_CFG: dict[str, Any] | None = None  # dashboard /apps.json topology (static)
 _LLM: Llama4Client | None = None  # owns the TokenManager
 
 
 async def _session_deps() -> tuple[dict[str, Any], Llama4Client]:
-    # Unlocked check-then-set: concurrent first turns may double-build (benign — last
+    # Unlocked check-then-set: concurrent first turns may double-build (harmless, last
     # write wins). An asyncio.Lock would bind to one event loop and break callers that
     # run each request in its own asyncio.run(); neither cached object is loop-bound.
     global _CFG, _LLM
@@ -656,12 +641,12 @@ async def _session_deps() -> tuple[dict[str, Any], Llama4Client]:
 
 
 async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Multi-turn mobility advisor. Returns widget JSON including updated `messages`.
+    """Multi-turn mobility advisor. Returns widget JSON including updated messages.
 
-    Pass the previous turn's `final["messages"]` back as `history` to continue the
+    Pass the previous turn's final["messages"] back as `history` to continue the
     conversation (the CLI REPL and the dashboard both carry state this way). The MCP
-    `Client` is deliberately reconnected per turn (clean lifecycle, cheap intranet
-    handshake); config and LLM client persist for the whole process.
+    Client is reconnected per turn (clean lifecycle, cheap intranet handshake); config
+    and LLM client persist for the whole process.
     """
     cfg, llm = await _session_deps()
     messages = list(history or [])
