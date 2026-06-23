@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<!--
+Snap4City mobility advisor - dashboard front-end (step 1: pure front-end).
+Paste this whole file into a widgetExternalContent (CKEditor, "Enable CKEditor" on).
+NOTE: no leading indentation / blank lines on purpose - CKEditor renders leading
+tabs/spaces as content, so this file is kept flat and paste-ready (see CLAUDE.md rule 9).
+It renders a routing panel (origin/destination/mode/datetime/weighting) and draws the
+route on a sibling widgetMap using Snap4City's own graphhopper engine via the
+`addCustomTrajectory` event (manual 6.7.9). No backend / MCP / bridge here: the map
+computes and draws the route from the two waypoints. Public transport is drawn as a
+graphhopper multimodal trajectory (vehicle = bus -> walk + ride legs).
+Configure MAP_WIDGET_ID below with the id of the widgetMap on the same dashboard.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+<style>
+.adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; }
+.adv h3 { margin: 0 0 8px; font-size: 15px; color: #f5c518; }
+.adv label { display: block; font-size: 12px; margin: 8px 0 2px; opacity: .85; }
+.adv input, .adv select {
+width: 100%; box-sizing: border-box; padding: 6px 8px; border: none;
+border-radius: 4px; font-size: 13px;
+}
+.adv .modes { display: flex; gap: 6px; margin-top: 4px; }
+.adv .modes button {
+flex: 1; padding: 8px 4px; border: 1px solid #3a4564; background: #28324d;
+color: #e8ecf4; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.adv .modes button.active { background: #1f2a44; border-color: #f5c518; color: #f5c518; }
+.adv .row { display: flex; gap: 6px; }
+.adv .row > * { flex: 1; }
+.adv .actions { display: flex; gap: 6px; margin-top: 10px; }
+.adv .actions button {
+flex: 1; padding: 9px; border: none; border-radius: 4px; cursor: pointer;
+font-size: 13px; font-weight: bold;
+}
+.adv #advCompute { background: #f5c518; color: #1f2a44; }
+.adv #advClear { background: #3a4564; color: #e8ecf4; }
+.adv .chk { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
+.adv .chk input { width: auto; }
+.adv #advStatus { margin-top: 10px; font-size: 12px; min-height: 16px; }
+.adv #advStatus.err { color: #ff8a8a; }
+.adv #advStatus.ok { color: #8ae08a; }
+</style>
+</head>
+<body>
+<div class="adv">
+<h3>Mobility Advisor - Routing</h3>
+<label>Origin (place name or "lat,lng")</label>
+<input id="advOrigin" type="text" placeholder="Piazza del Duomo, Firenze">
+<label>Destination (place name or "lat,lng")</label>
+<input id="advDest" type="text" placeholder="Santa Croce, Firenze">
+<label>Mode</label>
+<div class="modes">
+<button type="button" data-vehicle="foot" class="active">Pedestrian</button>
+<button type="button" data-vehicle="car">Car</button>
+<button type="button" data-vehicle="bus">Public Transport</button>
+</div>
+<div class="row">
+<div>
+<label>Start date and time</label>
+<input id="advDatetime" type="datetime-local">
+</div>
+<div>
+<label>Weighting</label>
+<select id="advWeighting">
+<option value="fastest">Fastest</option>
+<option value="shortest">Shortest</option>
+</select>
+</div>
+</div>
+<div class="chk">
+<input id="alternatives" type="checkbox">
+<label for="alternatives" style="margin:0;">Show alternatives?</label>
+</div>
+<div class="actions">
+<button id="advCompute" type="button">Compute</button>
+<button id="advClear" type="button">Clear</button>
+</div>
+<div id="advStatus"></div>
+</div>
+<script>
+$(function () {
+'use strict';
+// ---- Configuration (fill these on your dashboard) -----------------------
+var MAP_WIDGET_ID = "w_Map_5183_widgetMap46852";   // id of the widgetMap on this dashboard
+var TRAJ_ID = "advisorRoute";            // reused so a re-draw replaces the old line
+// Geocoding goes through the dashboard's same-origin servicemap proxy. The exact
+// text-search params should be confirmed on the JupyterHub; raw "lat,lng" input
+// always works as a fallback (see resolveWaypoint).
+var GEOCODE_BASE = "../controllers/superservicemapProxy.php/api/v1/";
+var ICON_BASE = "https://www.snap4city.org/snap4cityWebAppTuscany/img/mapicons/ita/";
+var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "LastStopOfRoute.png" };
+// Route leg palette - MUST be an array (the map draws color[legIndex]; a single
+// string makes the line invisible). Values match the native What-If dashboard.
+var COLORS = ["#32cd32", "#800080", "#ff7f0e", "#0000ff"];
+// Per-segment colors for the multimodal (public transport) case (manual 6.7.9).
+var MULTIMODAL = {
+lineColors: { pedestrian: "#32cd32", bus: "#3388ff", modal: "#800080" },
+icon: ICON_BASE + "TransferServiceAndRenting_Urban_bus.png"
+};
+// ---- State --------------------------------------------------------------
+var vehicle = "foot";  // foot | car | bus  (bus => multimodal)
+// ---- UI wiring ----------------------------------------------------------
+$(".adv .modes button").on("click", function () {
+$(".adv .modes button").removeClass("active");
+$(this).addClass("active");
+vehicle = $(this).data("vehicle");
+});
+function setStatus(msg, kind) {
+$("#advStatus").removeClass("err ok").addClass(kind || "").text(msg || "");
+}
+// graphhopper needs a parseable datetime; default the empty field to "now" (local).
+function nowLocalDatetime() {
+var d = new Date(), p = function (n) { return String(n).padStart(2, "0"); };
+return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+if (!$("#advDatetime").val()) $("#advDatetime").val(nowLocalDatetime());
+// ---- Geocoding / waypoint resolution ------------------------------------
+// Accepts "lat,lng" verbatim; otherwise asks the servicemap proxy for the place.
+function resolveWaypoint(text) {
+text = (text || "").trim();
+var m = text.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+if (m) {
+return $.Deferred().resolve({ lat: parseFloat(m[1]), lng: parseFloat(m[2]) }).promise();
+}
+if (!text) return $.Deferred().reject("empty location").promise();
+return $.ajax({
+url: GEOCODE_BASE + "?text=" + encodeURIComponent(text) + "&format=json",
+type: "GET", dataType: "json"
+}).then(function (data) {
+var f = data && data.features && data.features[0];
+var c = f && f.geometry && f.geometry.coordinates;  // GeoJSON [lng, lat]
+if (!c || c.length < 2) return $.Deferred().reject("no match for " + text).promise();
+return { lat: c[1], lng: c[0] };
+});
+}
+// ---- Trajectory drawing (Snap4City graphhopper, manual 6.7.9) -----------
+function trigger(payload) {
+// The widget runs in an iframe; the dashboard (and its widgets) live in parent.
+if (window.parent && window.parent.$) window.parent.$("body").trigger(payload);
+else throw new Error("dashboard host not reachable");
+}
+function clearTrajectory() {
+trigger({
+type: "removeCustomTrajectory",
+target: MAP_WIDGET_ID,
+passedData: [{ id: TRAJ_ID, eventType: "Trajectory" }]
+});
+}
+function drawTrajectory(originLL, destLL) {
+var startDatetime = $("#advDatetime").val() || nowLocalDatetime();
+var weighting = $("#advWeighting").val();
+var waypoints = [
+{ latLng: originLL, options: { id: "start-0" } },
+{ latLng: destLL, options: { id: "finish-0" } }
+];
+var points = waypoints.map(function (wp, i) {
+var iconKey = (wp.options && wp.options.id) ? wp.options.id.split("-")[0]
+: (i === 0 ? "start" : "finish");
+return {
+optionalhtmltrajpopup: "",
+mode: { routing: { graphhopper: {
+type: vehicle, startDatetime: startDatetime, weighting: weighting
+} } },
+color: COLORS,
+icon: ICONS[iconKey],
+position: { serviceUri: "", gps: wp.latLng }
+};
+});
+// Replace any previous line, then draw. PT (bus) is drawn multimodal.
+clearTrajectory();
+trigger({
+type: "addCustomTrajectory",
+target: MAP_WIDGET_ID,
+passedData: [{
+id: TRAJ_ID,
+eventType: "Trajectory",
+returnInstructionTrigger: "returnedTraj",
+multipleLines: $("#alternatives").is(":checked"),
+drawMethod: "custom",
+multimodal: vehicle === "bus" ? MULTIMODAL : undefined,
+points: points
+}]
+});
+}
+// ---- Actions ------------------------------------------------------------
+$("#advCompute").on("click", function () {
+setStatus("Resolving locations...");
+$.when(resolveWaypoint($("#advOrigin").val()), resolveWaypoint($("#advDest").val()))
+.done(function (originLL, destLL) {
+try {
+drawTrajectory(originLL, destLL);
+setStatus("Route requested (" + vehicle + ").", "ok");
+} catch (e) {
+setStatus("Map not reachable: set MAP_WIDGET_ID and add a widgetMap. (" + e.message + ")", "err");
+}
+})
+.fail(function (err) {
+setStatus("Geocode failed: " + err + ". Try a \"lat,lng\" pair.", "err");
+});
+});
+$("#advClear").on("click", function () {
+try { clearTrajectory(); setStatus(""); }
+catch (e) { setStatus("Map not reachable. (" + e.message + ")", "err"); }
+});
+});
+</script>
+</body>
+</html>

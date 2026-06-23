@@ -4,7 +4,7 @@
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server (UNIFI Sistemi Distribuiti elaborato Tipo A). 真实 MCP server 归 referente 部署在内网 (Snap4City JupyterHub 内网直连访问), 本项目只交付 **client + Langgraph orchestrator + 终端 chat REPL (chat.py) 测试胶水**。User asks a trip/transport question → Langgraph **deterministic graph** (understand → execute → respond) drives the flow: Llama4 只在 `understand` (forced slot 提取) 和 `respond` (措辞) 出场, **从不自由调工具**; `execute` 用 Python 确定性跑 MCP 工具流 (route: geocode×2 + routing(mode); tpl_*: `tpl.py` 的 `run_tpl_flow` 发现链) → returns widget JSON for the Snap4City dashboard to render. 见 lesson L13 (为何砍掉 `agent ⇄ tools` agentic 回路)。支持 point-to-point **route** (foot/car/public_transport) 和 **tpl_* 公交发现** (tpl_lines/routes/stops/timeline, 见 `tpl.py`); 只有 `other` intent 返友好 unsupported。已知服务端限制 (客户端无误, 已报 referente): car/PT routing 返空 (L19)、stop timetable/realtime 空 (L21)。
 - **Stack**: Python 3.10+ + FastMCP 2.x **Client** + Langgraph 1.x (StateGraph orchestrator)
 - **Transport**: HTTP Streamable → referente dashboard (JupyterHub 内网直连 `192.168.1.117:8000`, 见 §5)
-- **Frontend**: N/A (rendering by Snap4City dashboard widgets)
+- **Frontend**: `frontend/mobility_advisor_dashboard.html` (CSBL HTML+JS 贴进 Snap4City widgetExternalContent, 触发 widgetMap graphhopper 画线; 见规则 9 + `frontend/README.md`)
 - **Database**: N/A (stateless client)
 - **External**: Snap4City remote MCP server (referente-managed, 内网 / JupyterHub 直连), Snap4City Agentic LLM (Langgraph integration, referente-managed)
 
@@ -18,6 +18,7 @@
 6. **Git 归用户**: AI **永不** `git commit` / `git push`。可改文件 / `git add` / `git diff` / `git status` 给用户看, 但**提交 + 推送一律用户手动**。
 7. **单一正确实现, 删噪音**: 代码库只留**一份正确实现**。重构/重设计 **原地替换**, 禁建平行/备选版本 (`advisor_graph_v2`、`*_old`、注释掉的旧逻辑 之类), 禁为"留底/留历史"保留旧代码 (历史归 git)。死代码 / 废弃路径 / 备选实现 = 噪音, 一律删干净。
 8. **输出格式遵循官方, 禁自创字段**: 对外输出严格按 referente MCP server / OpenAI 标准形状, **不加自创便利字段**。LLM 回复读 `messages[-1].content` (OpenAI 标准), 禁加 `answer` 之类冗余字段。不确定某字段是否官方/widget 是否需要 → **问 referente**, 别自己塞 (例: `data.arcs` 待 referente 确认前注释掉)。
+9. **前端 CSBL 文件: 单份、去行首缩进**: `frontend/` 的 widgetExternalContent HTML (CSBL) 是直接贴进 Snap4City CKEditor 的源码。CKEditor **会把行首 tab/空格当内容渲染** → 文件**不留行首缩进、不留空行** (贴入即源码可跑)。只维护 **一份** paste-ready 文件 (规则 7), 禁另存 `*.min.html` 之类平行版本。
 
 ## 3. Autopilot Workflow
 

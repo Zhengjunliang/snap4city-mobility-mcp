@@ -4,6 +4,10 @@
 
 ---
 
+L25 **dashboard 路线渲染归 Snap4City 客户端 graphhopper, 不是切 MCP 的 WKT; PT 走 graphhopper multimodal 非 `routing` 工具** —— 设计 dashboard 前端 (widgetExternalContent + CSBL) 接入 MCP 时, 一度假设"前端拿 `final.data.wkt` (LINESTRING) 自己画线, PT 分段着色靠按 `arc.distance` 切 WKT 再按 `arc.transport` 上色"。**全错**: Snap4City 的 `widgetMap` 自带 graphhopper 路由引擎, 经 `addCustomTrajectory` 事件 (manual 6.7.9) 只喂**起终点 waypoints + `mode.routing.graphhopper{type:vehicle, startDatetime, weighting}`** 就由地图**客户端自算自画**整条路线; PT = 同机制传 `vehicle:'bus'` + `multimodal:{lineColors:{pedestrian,bus,modal}}` → graphhopper 出步行+乘车多段多色, **不经我们的 MCP `routing` 工具** (那个 `routetype=public_transport` 返空是对的, PT 本就不走它)。即前端职责收窄为: NL/表单 → **waypoints(坐标) + vehicle + datetime/weighting + 文字回复**, 几何/分段全归地图。修: 砍掉"WKT 切片多模态"方案 (违现实, 且 `data.arcs`/per-leg 几何根本无每段坐标, 只有整条 `routes[0].wkt`); 第一步前端 [frontend/mobility_advisor_dashboard.html](../frontend/mobility_advisor_dashboard.html) 纯按用户给的真实 What-If snippet 构 `addCustomTrajectory` graphhopper points, 不传 MCP WKT, 不接桥 (NL 聊天框 + FastAPI 桥留第二步, 桥经 jupyter-server-proxy 有 L15 式崩服务器风险故延后)。附服务端漂移: **car 已修好能出真路线** (L19 旧"car 全空"过时), PT 经 graphhopper multimodal 可用 → `docs/snap4city-api-notes.md` §3 / L19 口径待刷新。教训: 接第三方可视化平台前先确认"路由/渲染到底在平台客户端还是在我方后端做" — Snap4City widgetMap 自带 graphhopper, 我方 MCP 的 routing/WKT 只用于**文字回复的距离/ETA/线路接地**, 别拿去和平台的画线能力重复造轮子。
+
+---
+
 L24 **去 AI 感/简化注释时, LLM prompt 字符串是受保护的核心逻辑, 一字不能动** —— 给老师对接前做了一轮去 AI 感 (砍 essay docstring、删内联 lesson 标签、收 em-dash、去 emoji `📍/⚠`)。陷阱: `UNDERSTAND_SYSTEM`/`RESPOND_SYSTEM`/`_EXTRACT_SLOTS_SCHEMA` 的 description 读起来像"啰嗦的 AI 文本"(满是 em-dash、大写强调、否定式硬规则), 极易被当注释一起删, 但它们是**喂给 Llama4 的行为定义**, 措辞被 L19/L23 反复调过, 改一个词就可能让分类/接地退化。规则: 去 AI 感只动**注释 / docstring / 文档散文 / 面向人的输出文本**; prompt 串、schema description、控制流、签名、阈值常量 (`temperature`/`*_RETRIES`/`TUSCANY_BBOX`) 一律不碰。验证手段: `git diff` 里 grep prompt 内部短语 (如 `Classify by STRUCTURE`/`Ignore greetings`) 必须 0 命中 = prompt byte-identical。emoji 去除仅限**无 test 断言**的 fallback 输出 (`_template_answer`), CLI 标记 (`✦`/`✗`) 属正常终端 UX 保留。另: `lessons.md` 本身和 walkthrough 末尾的 lesson→code 索引表是合法方法论归档, 不算"内联 AI 标签", 保留; 只删散落在代码注释里的 `(L19)` 式小标。教训: 看起来最像 AI slop 的文本 (长 prompt) 往往是调得最细的核心逻辑, 清理前先标出受保护区。
 
 ---
