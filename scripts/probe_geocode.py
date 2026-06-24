@@ -36,27 +36,34 @@ REVERSE_PROBE = (43.781834, 11.25891)
 
 
 def _variants(term: str):
-    """The 4 format/param combos to compare for one term."""
-    city = f"{term}, Firenze"
+    """Compare the bare query against bigger maxresults — the last client-side lever: are
+    the Tuscan hits just buried below the top-100, or absent from the MCP index entirely?"""
     return [
-        ("bare (What-If style)", {"search": term}),
-        ("bare + excludePOI", {"search": term, "excludePOI": True}),
-        ("+city", {"search": city}),
-        ("ours (city+noPOI+it+or)", {"search": city, "excludePOI": True, "lang": "it", "logic": "or"}),
+        ("bare", {"search": term}),
+        ("maxresults=1000", {"search": term, "maxresults": 1000}),
+        ("maxresults=5000", {"search": term, "maxresults": 5000}),
     ]
 
 
 def _summarize(payload) -> str:
-    """count, #in-Tuscany, and top-5 city(score) for an address_search_location payload."""
+    """count, #in-Tuscany, the FIRST Tuscan hit's rank/city/score (if any), serviceType, and
+    the top-3 foreign city(score) for an address_search_location payload."""
     if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
         return f"NOT a FeatureCollection: {str(payload)[:120]}"
     feats = payload.get("features") or []
-    tusc = sum(1 for f in feats if _in_tuscany((f.get("geometry") or {}).get("coordinates")))
-    top = []
-    for f in feats[:5]:
-        p = f.get("properties") or {}
-        top.append(f"{p.get('city')}({p.get('score')})")
-    return f"count={payload.get('count')} inTuscany={tusc}/{len(feats)} | top5: {', '.join(top)}"
+    stype = ((feats[0].get("properties") or {}).get("serviceType") if feats else None)
+    tusc_i = next((i for i, f in enumerate(feats)
+                   if _in_tuscany((f.get("geometry") or {}).get("coordinates"))), None)
+    tusc_n = sum(1 for f in feats if _in_tuscany((f.get("geometry") or {}).get("coordinates")))
+    top = ", ".join(f"{(f.get('properties') or {}).get('city')}({(f.get('properties') or {}).get('score')})"
+                    for f in feats[:3])
+    if tusc_i is not None:
+        p = feats[tusc_i].get("properties") or {}
+        tusc = f"FIRST Tuscan @#{tusc_i}: {p.get('city')} {p.get('address')}({p.get('score')})"
+    else:
+        tusc = "NO Tuscan hit"
+    return (f"count={payload.get('count')} returned={len(feats)} inTuscany={tusc_n} "
+            f"serviceType={stype!r}\n      {tusc} | top3: {top}")
 
 
 async def main() -> None:
