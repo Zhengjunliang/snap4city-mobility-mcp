@@ -12,6 +12,8 @@ dependencies = [
     "httpx>=0.28.1",
     "langgraph>=1.2.1",
     "requests>=2.31",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
 ]
 
 [tool.ruff.lint.per-file-ignores]

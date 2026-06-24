@@ -1,12 +1,25 @@
 # Front-end (Snap4City dashboard)
 
-Step 1 deliverable: a self-contained `widgetExternalContent` that draws routes on a
-native `widgetMap` using Snap4City's own **graphhopper** engine. No backend / MCP /
-bridge involved yet — the map computes and draws the route from two waypoints. Public
-transport is drawn as a graphhopper **multimodal** trajectory (walk + ride legs).
+A natural-language **chat box** `widgetExternalContent` that asks the FastAPI bridge
+(`api.py`, which wraps `run_advisor` on the JupyterHub) and draws the returned route on a
+sibling `widgetMap`. The backend is the brain: it understands the question, geocodes, and
+computes the route (WKT + distance/ETA); the front-end renders the reply and the line.
 
-The natural-language chat box and the FastAPI bridge to the MCP `run_advisor` come in a
-later step (NL needs Llama4, which is only reachable through the bridge).
+## How the map draws the route (Step-0 finding)
+
+The widgetMap's `addCustomTrajectory` does **not** paint a raw polyline — it routes through
+waypoints with Snap4City's own **graphhopper**. So the backend route WKT is parsed,
+downsampled to ~12 vertices, and fed as waypoints with a graphhopper `mode`; the map traces
+our route through them (same engine, so the line matches the backend route).
+
+Two traps that cost a debugging round (now encoded in the code + `docs/lessons.md`):
+
+- Each point's `mode.routing.graphhopper.type` **must** be the front-end vehicle name
+  `foot` / `car` / `bus` — **not** the MCP routetype `foot_shortest`. A wrong value makes
+  graphhopper return nothing and the map crashes in `addCustomTrajectoryToMap` (`Cannot
+  read properties of undefined (reading 'length')`).
+- Each point needs a `mode` (omitting it crashes the same way). Icons go on the first/last
+  point only.
 
 ## File
 
@@ -14,28 +27,41 @@ later step (NL needs Llama4, which is only reachable through the bridge).
 
 ## Put it on your dashboard
 
-1. On your Snap4City dashboard, add a **widgetMap** and note its widget id
-   (Dashboard Management / the widget's id, e.g. `w_Map_xxxx_widgetMapyyyyy`).
+1. Add a **widgetMap** and note its widget id (e.g. `w_Map_xxxx_widgetMapyyyyy`).
 2. Add a **widgetExternalContent**. In "More options", enable **Enable CKEditor**, and
    paste the whole content of `mobility_advisor_dashboard.html` into the CKEditor box.
-3. In the pasted script, set `MAP_WIDGET_ID` to the widgetMap id from step 1.
+3. In the pasted script, set `MAP_WIDGET_ID` to the widgetMap id, and `BRIDGE_BASE` to the
+   URL where the FastAPI bridge (`api.py`) is reachable **from the browser** (decided per
+   deployment — see below).
 
-## Test
+## Run the bridge (JupyterHub)
 
-- **Fallback (raw coords, always works):** Origin `43.7734,11.2559`,
-  Destination `43.7766,11.2480`, mode **Pedestrian** → **Compute** → the widgetMap draws
-  the walking line. Proves the graphhopper draw path works.
-- **Car:** same two points, mode **Car** → a driving line.
-- **Public Transport (multimodal):** mode **Public Transport** → a multi-color line
-  (walking green + ride blue) with start/finish icons.
-- **Clear:** removes the trajectory.
-- **Place names (depends on geocode endpoint):** Origin `Piazza del Duomo, Firenze`,
-  Destination `Santa Croce` → works if the servicemap text-search proxy is reachable;
-  otherwise the status line says geocode failed — use a `lat,lng` pair instead.
+The bridge needs Llama4 + the MCP server, both reachable only on the JupyterHub:
+
+```
+uvicorn api:app --host 0.0.0.0 --port 8010
+```
+
+Sanity-check without the dashboard:
+
+```
+curl -s localhost:8010/health
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+```
+
+The POST returns the widget JSON `{status, request_type, data, messages}`; check that
+`data.wkt` (the LINESTRING), `data.distance_km`, `data.eta`, and `data.mode` are present
+and `messages[-1].content` is the Italian reply.
+
+> **Browser → bridge reachability is still open.** `jupyter-server-proxy` is not installed
+> (and crashed the server once), so this round is curl-only. Decide between installing
+> server-proxy or a same-origin proxy before wiring the dashboard end-to-end, minding HTTPS
+> mixed-content / CORS. CORS in `api.py` is dev-permissive (`*`) and must be tightened.
 
 ## Notes
 
-- `GEOCODE_BASE` uses the dashboard's same-origin `superservicemapProxy.php`. The exact
-  text-search parameters should be confirmed on the JupyterHub; raw `lat,lng` input is
-  the guaranteed path meanwhile.
-- Coordinates from geocoding are GeoJSON `[lng, lat]`; the code maps them to `{lat,lng}`.
+- The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).
+- Multi-turn: the front-end keeps `final.messages` and sends it back as `history`.
+- Public transport (`bus`) is not wired yet — backend PT routing returns empty server-side;
+  foot works, car is supported next.

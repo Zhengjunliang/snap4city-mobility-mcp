@@ -550,6 +550,14 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     results = state.get("tool_results") or []
     unsupported = bool(state.get("unsupported"))
     data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
+    # The dashboard widget needs the travel mode to render the route (foot/car/bus icon
+    # + leg colors), so surface it as widget data. Guarded to a successful route (wkt
+    # present): never pollute a tpl payload, a route error ({route_error}), or an
+    # unsupported/missing reply ({}) with a mode field. Mirror execute's default for the
+    # mode the route was actually computed with. Pending referente confirmation of the
+    # widget data shape, same status as the commented-out data.arcs above.
+    if intent == "route" and isinstance(data, dict) and data.get("wkt"):
+        data["mode"] = (state.get("slots") or {}).get("mode") or "foot_shortest"
     # An intent execute refused means slot extraction left a required slot blank
     # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.

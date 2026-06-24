@@ -234,6 +234,49 @@ async def test_respond_uses_llm_answer(make_llm):
     assert final["data"]["distance_km"] == 1.83
 
 
+async def test_respond_route_surfaces_mode_for_widget(make_llm):
+    """A drawable route (wkt present) carries data.mode so the dashboard widget knows
+    the vehicle to render; the value comes from the extracted slot."""
+    llm = make_llm([_text_response("Percorso in auto, 1.83 km.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da Duomo a Santa Croce in auto"}],
+        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "car"},
+    }
+    out = await respond(state, llm=llm)
+    assert out["final"]["data"]["mode"] == "car"
+
+
+async def test_respond_no_mode_on_route_error(make_llm):
+    """A route that failed (route_error, no wkt) is not drawable → no mode field added."""
+    llm = make_llm([_text_response("Non sono riuscito a calcolare il percorso in auto.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B in auto"}],
+        "tool_results": [{"name": "routing", "args": json.dumps({"routetype": "car"}),
+                          "result": {"error": "empty routes list"}}],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "car"},
+    }
+    out = await respond(state, llm=llm)
+    data = out["final"]["data"]
+    assert "route_error" in data and "mode" not in data
+
+
+async def test_respond_no_mode_outside_route():
+    """Non-route intents (unsupported/tpl) must never get a mode field (rule 8)."""
+    state = {
+        "intent": "other",
+        "messages": [{"role": "user", "content": "ciao"}],
+        "tool_results": [],
+        "unsupported": True,
+    }
+    out = await respond(state, llm=_RaisingLLM())
+    assert "mode" not in out["final"]["data"]
+
+
 async def test_respond_missing_place_asks_instead_of_unsupported():
     """L18: route intent with blank places → targeted ask, not the 'unsupported' pitch."""
     state = {
