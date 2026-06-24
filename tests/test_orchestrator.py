@@ -225,13 +225,13 @@ async def test_respond_uses_llm_answer(make_llm):
         "unsupported": False,
     }
     out = await respond(state, llm=llm)
-    final = out["final"]
-    assert final["status"] == "success"
-    assert "answer" not in final  # reply lives in messages[-1], not a custom field
-    reply = final["messages"][-1]
+    response = out["response"]
+    assert response["status"] == "success"
+    assert "answer" not in response  # reply lives in messages[-1], not a custom field
+    reply = response["messages"][-1]
     assert reply["role"] == "assistant"
     assert "1.83 km" in reply["content"]
-    assert final["data"]["distance_km"] == 1.83
+    assert response["data"]["distance_km"] == 1.83
 
 
 async def test_respond_route_surfaces_mode_for_widget(make_llm):
@@ -246,7 +246,7 @@ async def test_respond_route_surfaces_mode_for_widget(make_llm):
         "slots": {"intent": "route", "mode": "car"},
     }
     out = await respond(state, llm=llm)
-    assert out["final"]["data"]["mode"] == "car"
+    assert out["response"]["data"]["mode"] == "car"
 
 
 async def test_respond_no_mode_on_route_error(make_llm):
@@ -261,7 +261,7 @@ async def test_respond_no_mode_on_route_error(make_llm):
         "slots": {"intent": "route", "mode": "car"},
     }
     out = await respond(state, llm=llm)
-    data = out["final"]["data"]
+    data = out["response"]["data"]
     assert "route_error" in data and "mode" not in data
 
 
@@ -274,7 +274,7 @@ async def test_respond_no_mode_outside_route():
         "unsupported": True,
     }
     out = await respond(state, llm=_RaisingLLM())
-    assert "mode" not in out["final"]["data"]
+    assert "mode" not in out["response"]["data"]
 
 
 async def test_respond_missing_place_asks_instead_of_unsupported():
@@ -287,7 +287,7 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
         "slots": {"intent": "route", "origin_text": "", "destination_text": ""},
     }
     out = await respond(state, llm=_RaisingLLM())
-    reply = out["final"]["messages"][-1]["content"]
+    reply = out["response"]["messages"][-1]["content"]
     assert "partenza" in reply and "destinazione" in reply
     assert "punto-punto" not in reply
 

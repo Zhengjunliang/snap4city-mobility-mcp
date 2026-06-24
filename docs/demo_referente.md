@@ -8,11 +8,14 @@ tool MCP **funzionano end-to-end** sul JupyterHub Snap4City.
 
 ## 运行步骤 (JupyterHub, s4c env)
 
-1. `python chat.py`
-2. 逐条贴下方 query (一行一条), 回车看 `✦` 回复。
-3. **同组多轮 (follow-up) 之间不要空行退出**: 连续贴才复用对话历史。
-4. 空行退出。每轮全量 widget JSON (`status` / `request_type` / `data` 含 WKT / `messages`)
-   追加到 `outputs.txt`, 给 referente 看 payload 形状。
+1. 起桥: `uvicorn api:app --host 0.0.0.0 --port 8010` (浏览器经 jupyter-server-proxy 同源访问, 见 lessons L27)。
+2. 在 dashboard 的 Mobility Advisor 聊天框逐条贴下方 query, 看气泡回复 + widgetMap 画线。
+3. **同组多轮 (follow-up) 连续贴**: 聊天框复用对话历史 (上轮 `messages` 回传当 `history`)。
+4. 每轮全量 widget JSON (`status` / `request_type` / `data` 含 WKT / `messages`)
+   由桥追加到 `outputs.txt`, 给 referente 看 payload 形状 (诊断在 `debug.log`)。
+
+> 也可不开 dashboard, 直接 curl 桥自测:
+> `curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" -d '{"query":"<query>","history":[]}'`
 5. 工具级诊断 (geocode 选点坐标、routing 原始 payload) 在 `debug.log`。
 
 > 状态 (2026-06-15 实测 + 探针):
@@ -126,11 +129,11 @@ Vorrei andare a Santa Croce
 
 ## 自验清单
 
-1. `python chat.py`, 按 Group A → E 逐条贴。
-2. A/B/C/E: `✦` 有实质内容、非 `✗`; follow-up 轮不以 `Ciao` 开头、不以客套收尾; car 回复是**意大利语**。
+1. 起桥 (`uvicorn api:app …`), 在聊天框按 Group A → E 逐条贴。
+2. A/B/C/E: 气泡有实质内容、非错误; follow-up 轮不以 `Ciao` 开头、不以客套收尾; car 回复是**意大利语**。
 3. `cat outputs.txt`: A/B 有 `data.wkt` (B 距离≈19km); C 有 `data.lines/routes/stops`。
 4. D: PT 短途 `data.legs[0].transport == "foot"`; foot 远程是 `data.route_error` 无数字; 时刻表列线路无时刻、**无编造**。
-5. 终端回复截图 + `outputs.txt` 给 referente。
+5. dashboard 聊天框 + widgetMap 截图 + `outputs.txt` 给 referente。
 
 ---
 

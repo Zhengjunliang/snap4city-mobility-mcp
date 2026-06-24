@@ -32,7 +32,8 @@
 | `src/snap4city_mobility_mcp/mcp_tools.py` | 客户端 MCP 层：连服务端、执行工具调用、抹平 km4city 怪癖（geocode/routing） |
 | `src/snap4city_mobility_mcp/llm.py` | Llama4 推理客户端（OpenAI 兼容 endpoint） |
 | `src/snap4city_mobility_mcp/token_manager.py` | OAuth token 获取/缓存/刷新 |
-| `chat.py` | 终端 REPL，多轮测试胶水 |
+| `api.py` | FastAPI 桥：`POST /advise` 包 `run_advisor`，给 dashboard 聊天框；写 `outputs.txt`/`debug.log` |
+| `frontend/mobility_advisor_dashboard.html` | dashboard 前端：NL 聊天框 (widgetExternalContent) + widgetMap 画线 |
 
 > **重要边界**：本项目只交付 **client + Langgraph orchestrator + 测试胶水**。真正的 MCP server（实现 `routing`/`address_search_location`/`tpl_*` 等工具）归 referente，部署在 Snap4City 内网（JupyterHub 直连 `192.168.1.117:8000`）。`mcp_tools.py` 里**没有任何工具实现**，只有"怎么调远程工具"。
 
@@ -54,8 +55,8 @@
    - `_extract_data` 从审计里挖出 `{wkt, distance_km, eta, duration}`。
    - `_results_view` 造一份给 LLM 看的"瘦身版" RESULTS。
    - LLM（`temperature=0.2`，不带工具）用用户的语言写出 "Da Piazza del Duomo a Santa Croce a piedi sono circa 0,68 km, ~9 minuti…"。
-   - 组装 `final = {status, request_type, data, messages}`。
-4. 返回。`chat.py` 只打印 `messages[-1].content`（LLM 原话）；完整 JSON（含 WKT）写进 `outputs.txt`。
+   - 组装 `response = {status, request_type, data, messages}`。
+4. 返回。dashboard 聊天框只显 `messages[-1].content`（LLM 原话）；完整 JSON（含 WKT）由 `api.py` 写进 `outputs.txt`。
 
 ---
 
@@ -80,7 +81,7 @@ class AdvisorState(TypedDict, total=False):
     slots: dict               # understand 的输出（含映射后的 intent）
     tool_results: list[dict]  # 审计：[{name, args, result}] 每次工具调用
     unsupported: bool         # execute 跑不了确定性流程时为 True
-    final: dict               # respond 组装的 widget JSON
+    response: dict            # respond 组装的 widget JSON
 ```
 
 - **用途**：Langgraph 节点之间传递的唯一通道。
@@ -191,12 +192,12 @@ class AdvisorState(TypedDict, total=False):
 - **做了什么**：missing/unsupported 各走专门 status；否则逐条把结果用 `slim_tpl_result`（tpl 工具）或 `slim_result_for_llm`（其它）瘦身；routing 条目额外带上 `routetype` 和 `_routing_hint` 算出的 `hint`。
 - **为什么瘦身**：Llama4 context 一大就崩/幻觉；喂它的只需要摘要。**完整数据仍在 `tool_results` 审计里**，widget 不受影响。
 - **为什么带 routetype/hint**：失败时 LLM 只有知道"哪个 mode 失败 + 该往哪建议"才能给出"开车不行试步行"。
-- **注意规则 #8**：`hint` 只在这份给 LLM 的中间数据里；对外 `final.data` 走独立的 `_extract_data`，不含 hint，不违反"不加自创字段"。
+- **注意规则 #8**：`hint` 只在这份给 LLM 的中间数据里；对外 `response.data` 走独立的 `_extract_data`，不含 hint，不违反"不加自创字段"。
 
 ### 2.12 `respond(state, *, llm) -> dict`  ★LLM 节点
 
 - **输入**：`state`（messages/intent/tool_results/unsupported/slots）、`llm`。
-- **输出**：`{"final": widget JSON}`。
+- **输出**：`{"response": widget JSON}`。
 - **用途**：把结构化结果措辞成自然语言，并组装对外 JSON。
 - **做了什么**：
   1. 挖 data：tpl → `extract_tpl_data`；否则 `_extract_data`。
@@ -205,7 +206,7 @@ class AdvisorState(TypedDict, total=False):
   4. `view = _results_view(...)`。
   5. 调 `llm.achat`：`RESPOND_SYSTEM` + 一条 user 消息（含 `User asked` / 是否 follow-up / `RESULTS: <json>`），`tool_choice="none"`，`temperature=0.2`。
   6. 取 `assistant_message(resp).content` 当答案；LLM 报错 → fallback `_template_answer`。
-  7. 把答案 append 进 `messages`，组装 `final = {status:"success", request_type:intent, data, messages}`。
+  7. 把答案 append 进 `messages`，组装 `response = {status:"success", request_type:intent, data, messages}`。
 - **为什么 `temperature=0.2`（不是 0、也不是 0.7）？** 在 0.7 时 Llama4 会在 RESULTS 缺数据时"热心地"编造线号、捏造运营商（ATAF）、偶尔还飘到英文。接地（绝不编造）是第一位、措辞自然是第二位，所以压到 0.2，留一点点遣词空间，又不放飞。（对比：槽位提取用 0，完全不要随机。）
 - **为什么 `tool_choice="none"` 且不传 tools？** 措辞节点根本不该调工具，物理上断掉"自由调工具"的可能。同时这个参数还顺带强制 OpenAI 响应格式。
 - **为什么 follow-up 标记？** RESPOND_SYSTEM 据此决定要不要打招呼，首轮可以问好，跟进轮直接答、不再寒暄。`messages` 此刻是 `[历史…, 当前user]`，当前 assistant 轮还没 append，所以"有 assistant 轮"恰好等价于"这是跟进"。
@@ -231,9 +232,9 @@ class AdvisorState(TypedDict, total=False):
 - **输入**：`query`（本轮问话）、`history`（上轮返回的 `messages`）。
 - **输出**：widget JSON（含更新后的 `messages`）。
 - **用途**：多轮出行顾问的唯一入口。
-- **做了什么**：取 `cfg, llm = _session_deps()`；`messages = history + [{"role":"user","content":query}]`；`async with Client(cfg) as client` 建图并 `ainvoke`；返 `out["final"]`（无 final 则返 error 形状）。
+- **做了什么**：取 `cfg, llm = _session_deps()`；`messages = history + [{"role":"user","content":query}]`；`async with Client(cfg) as client` 建图并 `ainvoke`；返 `out["response"]`（无 response 则返 error 形状）。
 - **为什么 Client 每轮重连、cfg/llm 不重建？** Client 生命周期干净、内网握手便宜，每轮 `async with` 重连无所谓；而 cfg/llm 重建才是真浪费，所以它俩进程级持有。
-- **多轮怎么续？** 把上轮 `final["messages"]` 当 `history` 传回来即可。chat REPL 和 dashboard 都这么带状态。
+- **多轮怎么续？** 把上轮 `response["messages"]` 当 `history` 传回来即可。dashboard 聊天框 (经 `api.py` 桥) 这么带状态。
 
 ---
 
@@ -488,18 +489,16 @@ tpl_timeline …→ 按站名 token 匹配 → tpl_stop_timeline(stop)
 
 ---
 
-## 7. `chat.py`: 终端 REPL 测试胶水
+## 7. `api.py`: FastAPI 桥 + dashboard 前端
 
-`python chat.py` 开一个交互聊天：输入问题 → 看回复 → 接着问（跟进句如 "那坐公交呢?" 会对历史解析）→ 空行退出。
+dashboard 聊天框 (浏览器) 够不到 JupyterHub-only 的 Llama4 + MCP server，所以 `api.py` 这层薄 HTTP 包 `run_advisor`：`POST /advise {query, history}` → 原样返回 widget JSON (`status`/`request_type`/`data`/`messages`，不加自创字段，规则 8)；`GET /health` 探活。
 
-- **`_setup_debug_log()`**：把本包 DEBUG 诊断路由到 `debug.log`（`mode="w"` 每次会话刷新；只动本包 logger，httpx 等保持安静；幂等，不重复挂 handler；`propagate=False` 不回显到 notebook handler）。
-- **`_reply(final) -> str`**：取要显示的回复。`status != success` → `✗ 错误`；否则倒序找最后一个非空 assistant content。**为什么不硬编码距离/ETA？** `respond` 已经把距离/ETA 措辞成自然语言（LLM 挂了也用模板兜底进同一槽），这里只显 LLM 原话，零硬编码。
-- **`_log_turn(final)`**：把每轮完整输出 JSON 追加到 `outputs.txt`（**原样写 dashboard payload**，不加 query/final 包装，当前 query 已在 `messages[-2].content`）。
-- **`main()`** ★：
-  - 初始化日志、清空 `outputs.txt`。
-  - 给 stdin/stdout `reconfigure(errors="replace")`，**为什么？** JupyterHub 终端带重音的输入/粘贴会让 `input()` 崩 `UnicodeDecodeError`，旧 cp1252 控制台编码不了 emoji 提示符；两端都用替换而非抛错。
-  - `while` 循环：读输入（空行退出）；`run_advisor(query, history)`（infra 失败也保 REPL 活着）；`_log_turn`；`history = final["messages"]`（带多轮状态）；打印 `✦ 回复`。
-- **为什么终端 REPL 而不是 web 前端？** 唯一运行环境是锁死的 JupyterHub，暴露 web 端口要 `jupyter-server-proxy` + 子路径 + server 重启，极脆（还直接触发过灾难，base env `pip install` 升级依赖把整个 singleuser server 搞崩）。终端 REPL 一跑就通。
+- **`_setup_debug_log()`**：把本包 DEBUG 诊断路由到 `debug.log`（`mode="w"` 每次起桥刷新；只动本包 logger，httpx 等保持安静；幂等，不重复挂 handler；`propagate=False` 不回显到 uvicorn handler）。
+- **`_log_turn(response)`**：把每轮完整输出 JSON 追加到 `outputs.txt`（**原样写 dashboard payload**，不加 query/response 包装，当前 query 已在 `messages[-2].content`）。
+- **`advise(req)`** ★：`run_advisor(query, history)`（infra 失败也不抛 500，包成 `run_advisor` 同款 JSend error 给前端渲染）；`_log_turn`；返回 `response`。
+- **CORS**：dev 期 `allow_origins=["*"]`；实际经 jupyter-server-proxy **同源**访问 (浏览器→桥无预检)，真上线前收紧。
+- **前端** (`frontend/mobility_advisor_dashboard.html`)：NL 聊天框 widget，气泡显 `messages[-1].content`，`data.wkt` 喂 widgetMap 的 graphhopper (`addCustomTrajectory`) 画线；多轮把上轮 `messages` 回传当 `history`。见 `frontend/README.md` + 规则 9 (CSBL 无行首缩进)。
+- **为什么经 jupyter-server-proxy 而不是别的？** 唯一运行环境是锁死的 JupyterHub，浏览器 (dashboard 在 snap4city.org) 进不来容器内部端口；proxy 是开发期唯一自助入站路 (安全装法见 lessons L27)。同源 (都 `www.snap4city.org`) → 无 CORS 预检。
 
 ---
 
@@ -517,8 +516,8 @@ tpl_timeline …→ 按站名 token 匹配 → tpl_stop_timeline(stop)
 | L11 | `_filter_geocode_to_tuscany` bbox 过滤 |
 | L12 | `slim_result_for_llm` / `slim_tpl_result` 瘦身 |
 | L13 | **确定性图**：understand forced / respond none / execute 纯 Python |
-| L14 | 多轮 `messages` 复用；`chat.py` 只显 LLM 原话 |
-| L15 | 终端 REPL（不碰 base env / web proxy） |
+| L14 | 多轮 `messages` 复用；dashboard 聊天框 + `api.py` 桥 (单一入口，删过渡 chat.py) |
+| L15 | `pip install` 绝不进 base env（否则崩 singleuser server） |
 | L16 | `_session_deps` 懒缓存；Client 每轮重连；token 热路径静默 |
 | L17 | `_geocode_address_first` 两段式 + `_pick_coord` label 匹配 + `_narrow_by_city` 城市阶梯 |
 | L18 | 派生数据不进 state（`_missing_slots` 从 slots 现算） |

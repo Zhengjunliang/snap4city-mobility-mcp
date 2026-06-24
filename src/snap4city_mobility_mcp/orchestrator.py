@@ -192,7 +192,7 @@ class AdvisorState(TypedDict, total=False):
     slots: dict[str, Any]  # understand output (request_type, info_kind, intent, origin_text, ...)
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
-    final: dict[str, Any]  # widget JSON assembled by respond
+    response: dict[str, Any]  # widget JSON assembled by respond
 
 
 # The LLM classifies on two axes (request_type + info_kind); we fold that into the
@@ -607,7 +607,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     # names the served intent, data is the route payload, messages is the history to
     # pass back for the next turn.
     return {
-        "final": {
+        "response": {
             "status": "success",
             "request_type": intent,
             "data": data,
@@ -651,8 +651,8 @@ async def _session_deps() -> tuple[dict[str, Any], Llama4Client]:
 async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Multi-turn mobility advisor. Returns widget JSON including updated messages.
 
-    Pass the previous turn's final["messages"] back as `history` to continue the
-    conversation (the CLI REPL and the dashboard both carry state this way). The MCP
+    Pass the previous turn's response["messages"] back as `history` to continue the
+    conversation (the dashboard front-end carries state this way). The MCP
     Client is reconnected per turn (clean lifecycle, cheap intranet handshake); config
     and LLM client persist for the whole process.
     """
@@ -662,4 +662,4 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     async with Client(cfg) as client:
         graph = _build_graph(client, llm)
         out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
-    return out.get("final", {"status": "error", "error": "no final state produced", "messages": messages})
+    return out.get("response", {"status": "error", "error": "no response produced", "messages": messages})

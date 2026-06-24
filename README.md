@@ -2,7 +2,7 @@
 
 **Langgraph MCP client** for referente's remote Snap4City mobility advisor server. UNIFI — *Sistemi Distribuiti, elaborato Tipo A*.
 
-User asks a trip question → a Langgraph **deterministic** graph (`understand → execute → respond`) resolves it: the Snap4City **Llama4** LLM only extracts the request slots (origin/destination/mode) and phrases the final answer, while Python deterministically drives the remote MCP server's tools (geocoding, routing) — the LLM never free-calls tools. Returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + a terminal chat REPL (`chat.py`) for testing**.
+User asks a trip question → a Langgraph **deterministic** graph (`understand → execute → respond`) resolves it: the Snap4City **Llama4** LLM only extracts the request slots (origin/destination/mode) and phrases the final answer, while Python deterministically drives the remote MCP server's tools (geocoding, routing) — the LLM never free-calls tools. Returns widget JSON to be rendered by a Snap4City dashboard widget. The MCP server itself is referente-managed and deployed on the intranet (reached directly from the Snap4City JupyterHub); this project ships only the **client + Langgraph orchestrator + a FastAPI bridge (`api.py`) and dashboard chat-box front-end (`frontend/`) for testing**.
 
 ---
 
@@ -84,7 +84,7 @@ uv sync
 ### Option A — Don't activate (recommended for newcomers to `uv`)
 
 ```powershell
-PS D:\...\snap4city-mobility-mcp> uv run python chat.py
+PS D:\...\snap4city-mobility-mcp> uv run pytest -q
 PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
 ```
 
@@ -95,13 +95,13 @@ Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
 ```powershell
 # PowerShell
 PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> python chat.py
+(.venv) PS D:\...\snap4city-mobility-mcp> pytest -q
 ```
 
 ```cmd
 :: Windows cmd.exe
 D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> python chat.py
+(.venv) D:\...\snap4city-mobility-mcp> pytest -q
 ```
 
 The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
@@ -130,26 +130,25 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
    ```
    Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
 
-### Mobility advisor terminal chat (`chat.py`)
+### Mobility advisor (dashboard chat box + bridge `api.py`)
 
-`chat.py` is the project's testing front end — an interactive multi-turn terminal chat over the advisor. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
+The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
 
-Run it on the JupyterHub (a plain terminal program — no web server, no proxy; see `docs/lessons.md` L14 for why a terminal REPL over a web UI here):
+Run the bridge on the JupyterHub (where Llama4 + the MCP server are reachable); the browser reaches it same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L27, wiring in `frontend/README.md`):
 
 ```bash
-python chat.py
+uvicorn api:app --host 0.0.0.0 --port 8010
 ```
 
-Then chat — type a question, get the reply, keep going (empty line quits):
+Sanity-check the bridge without the dashboard:
 
-```
-🧑 > how do I get from Piazza Duomo to Santa Croce on foot?
-🤖 ...
-🧑 > e per una passeggiata tranquilla?            # follow-up: reuses the same origin/destination
-🧑 > quali linee servono la fermata San Marco?    # public-transport discovery (tpl)
+```bash
+curl -s localhost:8010/health
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
 ```
 
-The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every `chat.py` start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
+The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, nothing hardcoded); the route (`data.wkt`) is drawn on a sibling `widgetMap`. Follow-ups reuse history (e.g. *"e per una passeggiata tranquilla?"*), and public-transport discovery (tpl_*) queries are supported too (e.g. *"quali linee servono la fermata San Marco?"*). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every bridge start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
 
 ```json
 {
@@ -163,7 +162,7 @@ The chat shows **only the LLM's own reply** (nothing hardcoded). Every turn also
 }
 ```
 
-The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (`chat.py` keeps it in memory across turns). Public-transport discovery (tpl_*) queries are also supported — `execute` runs the matching deterministic chain in `tpl.py` (e.g. *"quali linee servono la fermata San Marco?"*, *"orari della linea 6 alla fermata San Marco"*); only out-of-scope questions return an "unsupported" reply.
+The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (the dashboard front-end keeps it and sends it back as `history` each turn). Public-transport discovery (tpl_*) queries are also supported — `execute` runs the matching deterministic chain in `tpl.py` (e.g. *"quali linee servono la fermata San Marco?"*, *"orari della linea 6 alla fermata San Marco"*); only out-of-scope questions return an "unsupported" reply.
 
 > **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
 
@@ -177,7 +176,8 @@ snap4city-mobility-mcp/
 ├── uv.lock                     # exact-version lockfile (committed)
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
-├── chat.py                     # terminal multi-turn chat REPL for testing (writes full JSON to outputs.txt)
+├── api.py                      # FastAPI bridge for the dashboard chat box (POST /advise; writes full JSON to outputs.txt)
+├── frontend/                   # Snap4City dashboard front-end (widgetExternalContent chat box + widgetMap)
 ├── docs/
 │   ├── lessons.md              # architectural traps (km4city / runtime)
 │   └── snap4city-api-notes.md  # field-by-field observations of the real API
@@ -227,12 +227,13 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
   curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
   ```
   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
-- [ ] End-to-end advisor check via the chat UI (JupyterHub — drives the LLM + remote MCP server):
+- [ ] End-to-end advisor check via the bridge (JupyterHub — drives the LLM + remote MCP server):
   ```bash
-  python chat.py
-  # then ask "from Piazza Duomo to Santa Croce on foot"
+  uvicorn api:app --host 0.0.0.0 --port 8010      # in one terminal
+  curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+    -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
   ```
-  Expected (see `outputs.txt`): `ok=true`, `intent="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `ok=true` but `data.route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
+  Expected (also appended to `outputs.txt`): `status="success"`, `request_type="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`. If `data` comes back empty / `route_error` mentions `"no route found (empty routes list)"` on the very first call, retry after ≥ 5 s — known transient km4city behavior (`docs/lessons.md` L3).
 
 ---
 
@@ -241,10 +242,10 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 | Symptom | Cause / Fix |
 |---|---|
 | `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
-| `python chat.py` → `ModuleNotFoundError: snap4city_mobility_mcp` | The package isn't installed in the active env. Run `pip install -e .` (inside the `s4c` conda env on the JupyterHub) or `uv run python chat.py` locally. |
-| `python chat.py` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
+| `uvicorn api:app` → `ModuleNotFoundError: snap4city_mobility_mcp` | The package isn't installed in the active env. Run `pip install -e .` (inside the `s4c` conda env on the JupyterHub) or `uv run uvicorn api:app …` locally. |
+| `POST /advise` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
 | `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | Not running inside the JupyterHub (the intranet IP is reachable only from there), or the dashboard is down. Run from a JupyterHub terminal/notebook and make sure `S4C_DASHBOARD_URL` is not overridden. |
-| `routing failed: empty response from routing service (3 attempts) — …` | Still empty after 3 attempts (6 s apart) ≈ a **stable server-side bug** (lesson L8 class — e.g. car into a ZTL, where km4city's `-2` is swallowed into an empty body; also seen on foot, and on every `car` / `public_transport` request, see L19). A transient (L3) self-heals within 3 tries, so reaching this means retries did not clear it. Walking modes already auto-swap profile (`foot_shortest` ⇄ `foot_quiet`); for car, try foot or public transport. `chat.py` logs each raw payload to `debug.log` — use it to report the issue to the referente. |
+| `routing failed: empty response from routing service (3 attempts) — …` | Still empty after 3 attempts (6 s apart) ≈ a **stable server-side bug** (lesson L8 class — e.g. car into a ZTL, where km4city's `-2` is swallowed into an empty body; also seen on foot, and on every `car` / `public_transport` request, see L19). A transient (L3) self-heals within 3 tries, so reaching this means retries did not clear it. Walking modes already auto-swap profile (`foot_shortest` ⇄ `foot_quiet`); for car, try foot or public transport. The bridge logs each raw payload to `debug.log` — use it to report the issue to the referente. |
 | `routing failed: successful (code=0)` | A historical bug (hit during an earlier retest), now fixed; see lesson L7. If it reappears, the code has regressed. |
 | VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
 

@@ -80,8 +80,9 @@ geometria del percorso in formato WKT) che la dashboard può visualizzare.
 server MCP del referente, distribuito sulla rete interna di Snap4City
 (accesso diretto da JupyterHub all'indirizzo \texttt{192.168.1.117:8000}). Il
 presente elaborato consegna esclusivamente: (i) il \emph{client} MCP, (ii)
-l'orchestratore Langgraph, (iii) una REPL da terminale (\texttt{chat.py}) come
-collante di test. Nessuno strumento è implementato lato client.
+l'orchestratore Langgraph, (iii) un bridge FastAPI (\texttt{api.py}) con il
+front-end della dashboard (una chat box, \texttt{frontend/}) come collante di
+test. Nessuno strumento è implementato lato client.
 
 \paragraph{Stack tecnologico.} La Tabella~\ref{tab:stack} riassume le tecnologie
 impiegate.
@@ -174,7 +175,7 @@ I nodi comunicano attraverso un unico oggetto di stato, un \texttt{TypedDict}
 \texttt{slots}        & output di \texttt{understand} (interpretazione strutturata) \\
 \texttt{tool\_results} & audit \texttt{[\{name, args, result\}]} di ogni chiamata \\
 \texttt{unsupported}  & vero quando \texttt{execute} non può eseguire un flusso deterministico \\
-\texttt{final}        & il widget JSON assemblato da \texttt{respond} \\
+\texttt{response}     & il widget JSON assemblato da \texttt{respond} \\
 \bottomrule
 \end{tabular}
 \caption{Campi di \texttt{AdvisorState}.}
@@ -342,9 +343,9 @@ cache) non emette alcun log, per non inondare di rumore una sessione di chat.
 Il terzo nodo estrae i dati del widget dall'audit, costruisce una vista
 compatta dei risultati per l'LLM e produce la risposta. L'output finale segue lo
 schema OpenAI: la risposta vive in \texttt{messages[-1].content}, senza alcun
-campo proprietario aggiuntivo (Listato~\ref{lst:final}).
+campo proprietario aggiuntivo (Listato~\ref{lst:response}).
 
-\begin{lstlisting}[caption={Forma del widget JSON restituito.}, label={lst:final}]
+\begin{lstlisting}[caption={Forma del widget JSON restituito.}, label={lst:response}]
 {
   "status": "success",          # esito in stile JSend
   "request_type": "route",      # l'intento servito
@@ -376,20 +377,30 @@ In caso di errore dell'LLM, una risposta di ripiego deterministica in italiano
 viene comunque prodotta.
 
 % =============================================================================
-\section{Interfaccia di test (\texttt{chat.py})}
+\section{Interfaccia di test (dashboard + bridge \texttt{api.py})}
 % =============================================================================
-Una REPL da terminale consente il test multi-turno: si digita una domanda, si
-ottiene la risposta, si prosegue (le domande di follow-up come ``\textit{e in
-bus?}'' sono risolte rispetto alla storia). Vengono mostrate solo le parole
-dell'LLM (\texttt{messages[-1].content}), mentre l'intero JSON del widget viene
-accodato a \texttt{outputs.txt} per l'ispezione offline; i log di diagnostica
-vanno in \texttt{debug.log}.
+Il front-end è una chat box in linguaggio naturale sulla dashboard Snap4City (un
+\texttt{widgetExternalContent}) che dialoga con un bridge FastAPI
+(\texttt{api.py}): \texttt{POST /advise} incapsula \texttt{run\_advisor} e
+restituisce verbatim il JSON del widget. Consente il test multi-turno: si digita
+una domanda, si ottiene la risposta, si prosegue (le domande di follow-up come
+``\textit{e in bus?}'' sono risolte rispetto alla storia, rispedita come
+\texttt{history} a ogni turno). Nella bolla di chat vengono mostrate solo le
+parole dell'LLM (\texttt{messages[-1].content}), mentre il percorso
+(\texttt{data.wkt}) è disegnato su un \texttt{widgetMap} affiancato; l'intero
+JSON del widget viene accodato a \texttt{outputs.txt} per l'ispezione offline e
+i log di diagnostica vanno in \texttt{debug.log}.
 
-\paragraph{Motivazione progettuale.} Si è scelta una REPL da terminale e non
-un'interfaccia web perché l'unico ambiente di esecuzione è JupyterHub, dove
-esporre una porta web richiede un proxy fragile e il riavvio del server (con il
-rischio concreto di rendere inutilizzabile l'intero singleuser server). Una REPL
-da terminale, invece, funziona senza alcuna infrastruttura aggiuntiva.
+\paragraph{Motivazione progettuale.} Inizialmente, dato che l'unico ambiente di
+esecuzione è JupyterHub --- dove esporre una porta web richiedeva un proxy
+fragile e il riavvio del server, con il rischio concreto di rendere
+inutilizzabile l'intero singleuser server --- si era usata una REPL da terminale
+come forma di transizione. Individuata una procedura sicura per installare
+\texttt{jupyter-server-proxy} (senza aggiornare i pacchetti Jupyter di base), la
+via web è diventata percorribile: il browser raggiunge il bridge \emph{stessa
+origine} attraverso il proxy, senza preflight CORS. Si è quindi adottata la chat
+box sulla dashboard come interfaccia finale e, per il principio di unica
+implementazione, la REPL di transizione è stata rimossa.
 
 % =============================================================================
 \section{Limitazioni note lato server}

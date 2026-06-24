@@ -33,8 +33,8 @@ clearml_config.json
 .omc/
 .claude/
 
-# Full-output audit dumps (chat.py writes outputs.txt per turn)
+# Full-output audit dumps (api.py writes outputs.txt per turn)
 outputs*.txt
 
-# Tool-level diagnostics (chat.py routes package DEBUG logs here)
+# Tool-level diagnostics (api.py routes package DEBUG logs here)
 debug.log

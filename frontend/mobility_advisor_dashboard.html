@@ -52,7 +52,7 @@ var MAP_WIDGET_ID = "w_Map_5183_widgetMap46852";  // id of the widgetMap on this
 // FastAPI bridge (api.py) base URL, as reachable FROM THE BROWSER. On a dashboard this is
 // whatever the deployment exposes (jupyter-server-proxy path or a same-origin proxy);
 // TODO set this once the browser->bridge reachability is decided. Local dev: localhost.
-var BRIDGE_BASE = "http://localhost:8010";
+var BRIDGE_BASE = "https://www.snap4city.org/jupyterhub/user/mobilityadvisor/proxy/8010";
 var TRAJ_ID = "advisorRoute";          // reused so a re-draw replaces the old line
 var ICON_BASE = "https://www.snap4city.org/snap4cityWebAppTuscany/img/mapicons/ita/";
 var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "LastStopOfRoute.png" };
@@ -70,8 +70,8 @@ return $m;
 }
 // The advisor's own reply: the last assistant turn's content (OpenAI standard); no
 // hardcoded route formatting - respond already phrased distance/ETA into the text.
-function replyOf(final) {
-var msgs = final.messages || [];
+function replyOf(response) {
+var msgs = response.messages || [];
 for (var i = msgs.length - 1; i >= 0; i--) {
 if (msgs[i].role === "assistant" && typeof msgs[i].content === "string" && msgs[i].content.trim()) {
 return msgs[i].content.trim();
@@ -166,13 +166,13 @@ type: "POST",
 contentType: "application/json",
 data: JSON.stringify({ query: query, history: history }),
 dataType: "json"
-}).done(function (final) {
-if (final && final.status === "error") {
-addMsg("✗ " + (final.error || "richiesta fallita"), "err");
+}).done(function (response) {
+if (response && response.status === "error") {
+addMsg("✗ " + (response.error || "richiesta fallita"), "err");
 } else {
-history = (final && final.messages) || history;  // carry multi-turn state
-addMsg(replyOf(final), "bot");
-var data = (final && final.data) || {};
+history = (response && response.messages) || history;  // carry multi-turn state
+addMsg(replyOf(response), "bot");
+var data = (response && response.data) || {};
 if (data.wkt) {
 try { drawRoute(data.wkt, data.mode); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }

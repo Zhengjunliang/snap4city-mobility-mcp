@@ -62,6 +62,6 @@ and `messages[-1].content` is the Italian reply.
 ## Notes
 
 - The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).
-- Multi-turn: the front-end keeps `final.messages` and sends it back as `history`.
+- Multi-turn: the front-end keeps `response.messages` and sends it back as `history`.
 - Public transport (`bus`) is not wired yet — backend PT routing returns empty server-side;
   foot works, car is supported next.
