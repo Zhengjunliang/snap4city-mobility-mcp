@@ -122,11 +122,12 @@ async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkey
 
 async def test_reverse_geocode_passthrough(make_client, make_result):
     """coordinates_to_address is allowlisted; reverse_geocode forwards lat/lng as separate
-    floats and returns the server's address dict verbatim."""
-    addr = {"number": "3", "address": "VIA ZARA", "municipality": "FIRENZE"}
-    client = make_client([make_result(structured=addr)])
+    floats and returns the server's payload verbatim. The real shape wraps the address
+    candidates in a `result` list (first = km4city street-number match)."""
+    payload = {"result": [{"number": "3", "address": "VIA ZARA", "municipality": "FIRENZE"}]}
+    client = make_client([make_result(structured=payload)])
     out = await reverse_geocode(client, 43.781834, 11.25891)
-    assert out["address"] == "VIA ZARA"
+    assert out["result"][0]["address"] == "VIA ZARA"
     name, sent = client.calls[0]
     assert name == "coordinates_to_address"
     assert sent == {"latitude": 43.781834, "longitude": 11.25891}

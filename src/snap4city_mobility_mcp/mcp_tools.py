@@ -485,6 +485,8 @@ async def reverse_geocode(client: Client, lat: float, lng: float) -> Any:
     street/POI there): the user's exact point is unambiguous, so this avoids the weak
     forward-geocoding of a typed name (the native What-If widget is accurate for the same
     reason). NOT wired into the route flow yet (no GPS capture, intent classification
-    unchanged). Returns the server's address dict (number/address/municipality/...) or
-    {"error": ...}. coordinates_to_address takes latitude/longitude as separate floats."""
+    unchanged). coordinates_to_address takes latitude/longitude as separate floats and
+    returns {"result": [{number, address, municipality, province, roadUri, ...}, ...]}
+    (the address candidates at that point; the first is the km4city street-number match),
+    or {"error": ...}."""
     return await exec_tool(client, "coordinates_to_address", {"latitude": lat, "longitude": lng})
