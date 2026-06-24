@@ -54,6 +54,7 @@ NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 # instead of hitting the network.
 EXPOSED_TOOLS = (
     "address_search_location",
+    "coordinates_to_address",  # reverse geocode (GPS point -> address); foundation for near-me
     "routing",
     "tpl_agencies",
     "tpl_lines",
@@ -259,6 +260,14 @@ def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
     return {**payload, "features": kept, "count": len(kept)}
 
 
+# The geocoder defaults to lang="en"/logic="or". This project is Italy/Florence-only, so
+# bias it to Italian: better ranking and labels that match the Italian search text in
+# _pick_coord/_narrow_by_city. logic stays "or" (broad) by default; flip GEOCODE_LOGIC to
+# "and" (stricter) and A/B it via scripts/probe_geocode.py before committing the change.
+GEOCODE_LANG = "it"
+GEOCODE_LOGIC = "or"
+
+
 async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
     """Two-pass geocode: addresses first, POIs as fallback, city-confident hits first.
 
@@ -277,7 +286,10 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
     addresses = None  # rung 3: in-bbox address hits without city confidence
     try:
         first = _filter_geocode_to_tuscany(
-            _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": True})),
+            _unwrap(await client.call_tool(
+                "address_search_location",
+                {**args, "excludePOI": True, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
+            )),
             search,
         )
         if isinstance(first, dict) and first.get("type") == "FeatureCollection":
@@ -291,7 +303,10 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
         logger.debug("geocode %r: address pass failed (%s), trying the POI pass", search, e)
     try:
         pois = _filter_geocode_to_tuscany(
-            _unwrap(await client.call_tool("address_search_location", {**args, "excludePOI": False})),
+            _unwrap(await client.call_tool(
+                "address_search_location",
+                {**args, "excludePOI": False, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
+            )),
             search,
         )
     except Exception:
@@ -461,3 +476,15 @@ async def exec_tool(
         return _unwrap(await client.call_tool(name, clean))
     except Exception as e:
         return {"error": f"{name} call failed: {type(e).__name__}: {e}"}
+
+
+async def reverse_geocode(client: Client, lat: float, lng: float) -> Any:
+    """Reverse geocode a GPS point to an address via the `coordinates_to_address` tool.
+
+    Foundation for a future near-me flow (browser GPS / map click -> coordinates -> the
+    street/POI there): the user's exact point is unambiguous, so this avoids the weak
+    forward-geocoding of a typed name (the native What-If widget is accurate for the same
+    reason). NOT wired into the route flow yet (no GPS capture, intent classification
+    unchanged). Returns the server's address dict (number/address/municipality/...) or
+    {"error": ...}. coordinates_to_address takes latitude/longitude as separate floats."""
+    return await exec_tool(client, "coordinates_to_address", {"latitude": lat, "longitude": lng})

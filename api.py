@@ -7,15 +7,15 @@ run_advisor: POST /advise {query, history} -> the same widget JSON run_advisor r
 rule 8). The reply is messages[-1].content (OpenAI standard); multi-turn state is the
 returned messages, sent back as `history` on the next turn.
 
-Run on the JupyterHub (where Llama4/MCP are reachable), reached from the browser through
-jupyter-server-proxy (same origin as the dashboard, see frontend/README.md):
+Run on the JupyterHub (where Llama4 + the MCP server are reachable), reached from the
+browser same-origin through jupyter-server-proxy (see frontend/README.md):
     uvicorn api:app --host 0.0.0.0 --port 8010
 Needs user_credentials.json in the repo root and the intranet MCP server reachable.
 CORS below is permissive for development and must be tightened before any real exposure.
 
-Diagnostics (inspect on the JupyterHub when a turn draws no route): tool-level DEBUG goes
-to debug.log and each turn's full output JSON is appended to outputs.txt (both in the cwd,
-fresh per bridge start).
+Diagnostics: each /advise turn OVERWRITES both files so they hold only the latest turn
+(easy to inspect "why this query did X"): tool-level DEBUG -> debug.log, full output JSON
+-> outputs.txt (both in the cwd). Inspect them on the JupyterHub when a turn draws no route.
 """
 import json
 import logging
@@ -30,15 +30,22 @@ from snap4city_mobility_mcp.orchestrator import run_advisor
 logger = logging.getLogger(__name__)
 
 OUTPUTS = pathlib.Path("outputs.txt")  # full-output audit log, written in the cwd
+_PKG_LOGGER = "snap4city_mobility_mcp"
 
 
-def _setup_debug_log() -> None:
-    """Route the package's DEBUG diagnostics to debug.log (file only, so stdout stays
-    clean). Only this package's logger is touched, so httpx etc. stay quiet. mode="w"
-    gives a fresh log per bridge start (no unbounded accumulation across restarts)."""
-    pkg_logger = logging.getLogger("snap4city_mobility_mcp")
-    if pkg_logger.handlers:
-        return
+def _reset_debug_log() -> None:
+    """Open a FRESH debug.log for the current turn (truncate via mode="w").
+
+    Called at the start of each /advise so debug.log holds only this turn's diagnostics.
+    Re-creating the handler (instead of truncating the file underneath an append handler,
+    which would leave null bytes at the old offset) is the clean way to truncate. Only this
+    package's logger is touched, so httpx etc. stay quiet. Not concurrency-safe (a second
+    overlapping request would swap the handler mid-turn); acceptable for single-user testing.
+    """
+    pkg_logger = logging.getLogger(_PKG_LOGGER)
+    for h in list(pkg_logger.handlers):
+        pkg_logger.removeHandler(h)
+        h.close()
     handler = logging.FileHandler("debug.log", mode="w", encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
     pkg_logger.setLevel(logging.DEBUG)
@@ -47,17 +54,12 @@ def _setup_debug_log() -> None:
 
 
 def _log_turn(response: dict) -> None:
-    """Append one advisor turn's full output JSON to outputs.txt for offline inspection.
+    """Overwrite outputs.txt with this turn's full output JSON (latest turn only).
 
     Writes the payload as-is, with no query/response wrapper: the current turn's query
     already lives in response.messages[-2].content (the last user turn)."""
-    block = json.dumps(response, ensure_ascii=False, indent=2)
-    with OUTPUTS.open("a", encoding="utf-8") as f:
-        f.write(block + "\n" + "=" * 80 + "\n")
+    OUTPUTS.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
-_setup_debug_log()
-OUTPUTS.write_text("", encoding="utf-8")  # fresh audit log per bridge start
 
 app = FastAPI(title="Snap4City Mobility Advisor bridge")
 
@@ -89,10 +91,11 @@ async def advise(req: AdviseRequest) -> dict:
 
     Never raises to the client: an infra failure (MCP/LLM unreachable) comes back as the
     JSend-style error shape run_advisor itself uses, so the front-end can render it."""
+    _reset_debug_log()  # fresh debug.log for this turn (before run_advisor emits any DEBUG)
     try:
         response = await run_advisor(req.query, req.history or [])
     except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
         logger.exception("advise failed")
         response = {"status": "error", "error": f"{type(e).__name__}: {e}", "messages": req.history or []}
-    _log_turn(response)  # full JSON → outputs.txt for offline inspection
+    _log_turn(response)  # overwrite outputs.txt with this turn's full JSON
     return response

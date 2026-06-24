@@ -14,6 +14,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     TOOL_NAMES,
     _unwrap,
     exec_tool,
+    reverse_geocode,
     routing_with_retry,
     slim_result_for_llm,
 )
@@ -85,6 +86,7 @@ async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
     assert len(client.calls) == 1
     _, sent = client.calls[0]
     assert sent["excludePOI"] is True  # addresses first — POIs only as fallback (L17)
+    assert sent["lang"] == "it" and sent["logic"] == "or"  # Italy/Florence bias on every pass
 
 
 async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result):
@@ -114,6 +116,20 @@ async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkey
     assert out["count"] == 1
     assert out["features"][0]["properties"]["address"] == "Duomo"
     assert len(client.calls) == 3  # failed attempt (2 passes) + recovered address pass (1)
+
+
+# --- reverse_geocode (coordinates_to_address; near-me foundation) ------------
+
+async def test_reverse_geocode_passthrough(make_client, make_result):
+    """coordinates_to_address is allowlisted; reverse_geocode forwards lat/lng as separate
+    floats and returns the server's address dict verbatim."""
+    addr = {"number": "3", "address": "VIA ZARA", "municipality": "FIRENZE"}
+    client = make_client([make_result(structured=addr)])
+    out = await reverse_geocode(client, 43.781834, 11.25891)
+    assert out["address"] == "VIA ZARA"
+    name, sent = client.calls[0]
+    assert name == "coordinates_to_address"
+    assert sent == {"latitude": 43.781834, "longitude": 11.25891}
 
 
 # --- slim_result_for_llm (L12: shrink the model's context) -------------------

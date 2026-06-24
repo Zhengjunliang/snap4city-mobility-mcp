@@ -402,6 +402,8 @@ tpl_timeline …→ 按站名 token 匹配 → tpl_stop_timeline(stop)
   3. 全托斯卡纳地址命中；
   4. 全托斯卡纳 POI 命中 / `{"error":…}`。
   - **为什么地址优先？** 含 POI 时服务端把模糊目录命中排在真地点前（"Piazza Duomo" → 西边 1.1km 的公司）；纯地址条目坐在可路由街图上。但精确地址跨城同名（"PIAZZA DUOMO" 在多个托斯卡纳镇都有），所以一个 pass 只有在"用户点名的城市（或默认 Firenze）里有命中"时才算赢。
+  - **`lang`/`logic` 偏置**：两次 `call_tool` 都带 `lang=GEOCODE_LANG("it")` + `logic=GEOCODE_LOGIC("or")`（不传时服务端默认 `en`/`or`）。项目只在意大利/Firenze → `lang="it"` 让返回标签是意语，更贴合用户的意语查询文本，`_pick_coord`/`_narrow_by_city` 的 token 匹配更准。`logic` 默认 `"or"`（宽），要试 `"and"`（严）先用 `scripts/probe_geocode.py` A/B。
+- **`reverse_geocode(client, lat, lng)`**：包 `coordinates_to_address`（已入 `EXPOSED_TOOLS`），坐标→地址。**为什么有这个？** forward（名字→坐标）对模糊 POI 名弱（原生 What-If 部件准，正是因为它从地图点击的精确坐标或街道+门牌出发，不猜名字）。这是未来 near-me 流程（浏览器 GPS / 点地图 → 坐标 → 确认地址）的地基；**本轮只提供函数 + 测试，不接 GPS、不动 intent/路由主流程**。
 - **`geocode_with_retry(client, args)`**：`_geocode_address_first` 外面包**仅针对"零托斯卡纳"瞬态**的有界重试（2 次，1.5s）。**为什么？** referente 地理编码器**时间维度非确定性**，同一查询此刻 100 条区内、下一刻 100% 国外。两段式+框过滤只要后端返**任意一条**托斯卡纳就能捞回；唯一真失败是"返 0 条托斯卡纳"的瞬态窗口，有界重试通常能清。
 
 ### 4.5 `group_arc_legs(arcs) -> [leg]`
@@ -493,9 +495,11 @@ tpl_timeline …→ 按站名 token 匹配 → tpl_stop_timeline(stop)
 
 dashboard 聊天框 (浏览器) 够不到 JupyterHub-only 的 Llama4 + MCP server，所以 `api.py` 这层薄 HTTP 包 `run_advisor`：`POST /advise {query, history}` → 原样返回 widget JSON (`status`/`request_type`/`data`/`messages`，不加自创字段，规则 8)；`GET /health` 探活。
 
-- **`_setup_debug_log()`**：把本包 DEBUG 诊断路由到 `debug.log`（`mode="w"` 每次起桥刷新；只动本包 logger，httpx 等保持安静；幂等，不重复挂 handler；`propagate=False` 不回显到 uvicorn handler）。
-- **`_log_turn(response)`**：把每轮完整输出 JSON 追加到 `outputs.txt`（**原样写 dashboard payload**，不加 query/response 包装，当前 query 已在 `messages[-2].content`）。
-- **`advise(req)`** ★：`run_advisor(query, history)`（infra 失败也不抛 500，包成 `run_advisor` 同款 JSend error 给前端渲染）；`_log_turn`；返回 `response`。
+- **日志按轮覆盖（只留最后一条 query，方便排查）**：
+  - **`_reset_debug_log()`**：每轮 `advise()` **开头**调，移除+关闭旧 handler 再新建
+    `FileHandler("debug.log", mode="w")` → `debug.log` 只含本轮诊断。**为什么重建 handler 而不直接截断文件？** 在 append handler 下截断会因旧 offset 残留空字节。只动本包 logger，`propagate=False`。（并发请求时 handler swap 有 race，单用户 demo 可接受。）
+  - **`_log_turn(response)`**：每轮**结尾**用 `OUTPUTS.write_text(...)`（`mode="w"` 覆盖）写完整输出 JSON → `outputs.txt` 只含本轮（**原样写 dashboard payload**，不加 query/response 包装，当前 query 已在 `messages[-2].content`）。
+- **`advise(req)`** ★：`_reset_debug_log()`（run_advisor 前，让本轮 DEBUG 从空文件起）；`run_advisor(query, history)`（infra 失败也不抛 500，包成 `run_advisor` 同款 JSend error 给前端渲染）；`_log_turn(response)`；返回 `response`。
 - **CORS**：dev 期 `allow_origins=["*"]`；实际经 jupyter-server-proxy **同源**访问 (浏览器→桥无预检)，真上线前收紧。
 - **前端** (`frontend/mobility_advisor_dashboard.html`)：NL 聊天框 widget，气泡显 `messages[-1].content`，`data.wkt` 喂 widgetMap 的 graphhopper (`addCustomTrajectory`) 画线；多轮把上轮 `messages` 回传当 `history`。见 `frontend/README.md` + 规则 9 (CSBL 无行首缩进)。
 - **为什么经 jupyter-server-proxy 而不是别的？** 唯一运行环境是锁死的 JupyterHub，浏览器 (dashboard 在 snap4city.org) 进不来容器内部端口；proxy 是开发期唯一自助入站路 (安全装法见 lessons L27)。同源 (都 `www.snap4city.org`) → 无 CORS 预检。
