@@ -19,6 +19,7 @@ Letting it pick only slots and prose, with Python driving the tools, avoids that
 MCP execution and km4city quirk handling live in mcp_tools.py, the Llama4 client in
 llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 """
+import asyncio
 import json
 import logging
 from functools import partial
@@ -112,8 +113,12 @@ origin/destination so the user can spot a wrong match.
 suggest — it already decided the right one: `car_pt_blocked_try_foot` = that mode is \
 likely blocked by Florence's ZTL/pedestrian core, so suggest going on foot or by \
 public transport; `service_empty_try_foot_or_later` = a service-side problem for that \
-mode (NOT a ZTL), so suggest walking (foot routes work) or trying again later. With NO \
-`hint`, never claim a ZTL/pedestrian zone yourself.
+mode (NOT a ZTL), so suggest walking (foot routes work) or trying again later; \
+`pt_degraded_to_foot` = the public-transport request returned a walking-only journey \
+(no real transit), so if other modes are present do NOT list it as a public-transport \
+option, and if it is the only result say there is no direct public transport for this \
+trip and give the walking distance/time instead. With NO `hint`, never claim a \
+ZTL/pedestrian zone yourself.
 - If RESULTS has status "missing_place", ask the user for the field(s) listed in \
 `missing` (the origin/destination of a trip, or the line/stop of a public-transport \
 question) — do NOT say the request is unsupported.
@@ -354,7 +359,8 @@ async def execute(
     modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car", "public_transport"]
 
     async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
-        # GeoJSON coordinate order is [longitude, latitude].
+        # GeoJSON coordinate order is [longitude, latitude]. Returns the audit entry; the
+        # caller appends it, so concurrent calls don't race on the shared results list.
         args = {
             "startlatitude": origin[1],
             "startlongitude": origin[0],
@@ -363,17 +369,20 @@ async def execute(
             "routetype": routetype,
         }
         result = await exec_tool(client, "routing", args, routing_attempts=attempts)
-        results.append({"name": "routing", "args": json.dumps(args), "result": result})
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "tool routing %s -> %s",
                 args,
                 json.dumps(slim_result_for_llm("routing", result), ensure_ascii=False)[:500],
             )
-        return result
+        return {"name": "routing", "args": json.dumps(args), "result": result}
 
-    for m in modes:
-        routed = await _route(m)
+    # The modes are independent, so route them concurrently (wall-clock = the slowest one,
+    # not the sum). Results are appended in modes order to keep _extract_data deterministic.
+    primary = await asyncio.gather(*(_route(m) for m in modes))
+    results.extend(primary)
+    for m, entry in zip(modes, primary):
+        routed = entry["result"]
         if (
             m == "public_transport"
             and isinstance(routed, dict)
@@ -395,7 +404,7 @@ async def execute(
             # already exhausted the stale-retry ladder (~27 s), so this only probes the
             # other graph path, not the transient. car/PT failures get no fallback —
             # they just stay absent from the routes, so the dashboard draws one less line.
-            await _route(_FOOT_FALLBACK[m], attempts=1)
+            results.append(await _route(_FOOT_FALLBACK[m], attempts=1))
 
     return {"tool_results": results, "unsupported": False}
 
@@ -436,6 +445,19 @@ def _route_minutes(route: dict[str, Any]) -> float:
     return float("inf")
 
 
+def _pt_is_foot_only(result: Any) -> bool:
+    """A public_transport routing that came back with no real transit leg — only
+    walking. On short central trips the server degrades PT to a single foot leg (L19),
+    which must NOT be drawn or narrated as a public-transport option. True also for an
+    empty/legless journey (nothing rideable). Non-journey results (errors) are not this
+    case (handled elsewhere)."""
+    if not isinstance(result, dict) or not isinstance(result.get("journey"), dict):
+        return False
+    first = (result["journey"].get("routes") or [{}])[0]
+    legs = group_arc_legs(first.get("arc") or [])
+    return not any((leg.get("transport") or "foot") != "foot" for leg in legs)
+
+
 def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Mine the tool-result audit for the widget payload.
 
@@ -457,6 +479,11 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             journey = result["journey"]
             first = (journey.get("routes") or [{}])[0]
             routetype = _routetype_of(entry)
+            if routetype == "public_transport" and _pt_is_foot_only(result):
+                # Degraded to a walking-only journey: not a real PT option, so don't
+                # surface a (foot-duplicate) bus line. No route_error either — it
+                # "succeeded", just isn't public transport.
+                continue
             route = {
                 "mode": routetype,
                 "wkt": first.get("wkt"),  # full LINESTRING, not truncated
@@ -563,6 +590,10 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
     """
     if not isinstance(result, dict):
         return None
+    if routetype == "public_transport" and _pt_is_foot_only(result):
+        # PT came back as a walking-only journey (no transit leg) — not a real PT
+        # option. respond must not present it as public transport.
+        return "pt_degraded_to_foot"
     err = result.get("error")
     if not isinstance(err, str):
         return None

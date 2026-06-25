@@ -14,6 +14,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _pick_coord,
     _request_to_intent,
     _results_view,
+    _routing_hint,
     execute,
     respond,
     understand,
@@ -268,15 +269,39 @@ async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_res
 
 
 def test_extract_data_collects_three_modes():
-    """foot+car+PT all succeed → routes has all three, keyed to distinct vehicles."""
+    """foot+car+real-PT all succeed → routes has all three, keyed to distinct vehicles."""
     results = [
         _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
-        _routing_entry("public_transport", route={"wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00"}),
+        _routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00",
+            "arc": [{"transport": "foot"}, {"transport": "bus"}],  # a real ride leg
+        }),
     ]
     data = _extract_data(results)
     assert {r["mode"] for r in data["routes"]} == {"foot_shortest", "car", "public_transport"}
     assert len(data["routes"]) == 3
+
+
+def test_extract_data_drops_foot_only_pt():
+    """PT degraded to a walking-only journey (no transit leg) → no bus route, no error."""
+    results = [
+        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00",
+            "arc": [{"transport": "foot"}],  # walking only — not real PT
+        }),
+    ]
+    data = _extract_data(results)
+    assert [r["mode"] for r in data["routes"]] == ["foot_shortest"]
+    assert "route_error" not in data
+
+
+def test_routing_hint_flags_foot_only_pt():
+    foot_only = {"journey": {"routes": [{"arc": [{"transport": "foot"}]}]}}
+    real_pt = {"journey": {"routes": [{"arc": [{"transport": "foot"}, {"transport": "bus"}]}]}}
+    assert _routing_hint("public_transport", foot_only) == "pt_degraded_to_foot"
+    assert _routing_hint("public_transport", real_pt) is None
 
 
 # --- respond -----------------------------------------------------------------

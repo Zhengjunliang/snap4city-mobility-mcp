@@ -43,11 +43,17 @@ html, body { height: 100%; margin: 0; }
 .adv #advInput { flex: 1; box-sizing: border-box; padding: 8px; border: none; border-radius: 4px; font-size: 13px; }
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
+.adv #advLegend { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.adv #advLegend:empty { display: none; }
+.adv .leg { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; opacity: .55; user-select: none; }
+.adv .leg.on { opacity: 1; font-weight: bold; }
+.adv .leg .sw { width: 16px; height: 5px; border-radius: 3px; display: inline-block; }
 </style>
 </head>
 <body>
 <div class="adv">
 <div id="advChat"></div>
+<div id="advLegend"></div>
 <div class="row">
 <input id="advInput" type="text" placeholder='es. "da Piazza del Duomo a Santa Croce a piedi"' autocomplete="off">
 <button id="advSend" type="button">Invia</button>
@@ -77,8 +83,12 @@ foot: { vivid: "#32cd32", pale: "#9fd8a0" },
 car: { vivid: "#1e66ff", pale: "#9fb6e8" },
 bus: { vivid: "#ff7f0e", pale: "#f0c79a" }
 };
+// Italian labels per vehicle, for the legend.
+var VEHICLE_LABEL = { foot: "a piedi", car: "in auto", bus: "mezzi" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
+var lastRoutes = [];        // routes from the latest answer (for legend re-highlight)
+var selectedVehicle = null; // legend pick: which vehicle to show vivid/on-top (null = fastest)
 // ---- Chat UI ------------------------------------------------------------
 function addMsg(text, kind) {
 var $m = $("<div>").addClass("msg " + kind).text(text);
@@ -138,16 +148,17 @@ passedData: [{ id: id, eventType: "Trajectory" }]
 // graphhopper waypoints and letting the widgetMap route between them (the native What-If
 // pattern, proven to draw). Feeding the full downsampled WKT as 12 waypoints +
 // drawMethod:"custom" crashed the widget's addCustomTrajectoryToMap (Cannot read ...
-// 'length'); 2 endpoints + no drawMethod is the shape that works. shade is the leg color
-// (vivid for the faster route, pale for a dimmed alternate). Returns the object - the
-// caller batches all routes into ONE event (see drawRoutes).
-function buildTraj(route, shade) {
+// 'length'); 2 endpoints + no drawMethod is the shape that works. shade is the line color
+// (vivid for the primary route, pale for a dimmed alternate); withIcons puts the start/finish
+// flags on this trajectory only (so they aren't stacked once per route). Returns the object -
+// the caller batches all routes into ONE event (see drawRoutes).
+function buildTraj(route, shade, withIcons) {
 var line = parseWktLine(route.wkt);
 if (line.length < 2) throw new Error("route geometry has < 2 points");
 var coords = [line[0], line[line.length - 1]];  // start + finish only
 var vehicle = vehicleOf(route.mode), startDatetime = nowLocalDatetime();
 // Each waypoint needs a graphhopper mode; type MUST be foot/car/bus (not foot_shortest)
-// or addCustomTrajectoryToMap crashes. Icons on both endpoints.
+// or addCustomTrajectoryToMap crashes.
 var points = coords.map(function (gps, i) {
 var pt = {
 optionalhtmltrajpopup: "",
@@ -155,8 +166,8 @@ mode: { routing: { graphhopper: { type: vehicle, startDatetime: startDatetime, w
 color: [shade],
 position: { serviceUri: "", gps: gps }
 };
-if (i === 0) pt.icon = ICONS.start;
-else if (i === coords.length - 1) pt.icon = ICONS.finish;
+if (withIcons && i === 0) pt.icon = ICONS.start;
+else if (withIcons && i === coords.length - 1) pt.icon = ICONS.finish;
 return pt;
 });
 return {
@@ -164,24 +175,50 @@ id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle),
 eventType: "Trajectory",
 returnInstructionTrigger: "returnedTraj",
 multipleLines: false,
+color: [shade],  // trajectory-level color (the per-point color above tints markers; the
+// line color is set here - real field TBD on the dashboard, see file header / lessons)
 points: points
 };
 }
-// Draw all routes from the backend (already ordered fastest-first). The faster route gets
-// the vivid shade; the slower one(s) are pale (the Google-Maps dimmed alternate). ALL
-// trajectories go in ONE addCustomTrajectory event (passedData is an array): the widget
-// replaces its whole trajectory layer on each event, so sending them separately would let
-// the last one wipe the others. Array order = z-order, so the faster route is placed LAST
-// to sit on top. One route (car empty / mode specified) just draws a single line.
+// Draw all routes from the backend (ordered fastest-first). The primary route (the fastest,
+// or the one picked in the legend) is vivid + carries the icons + is painted LAST so it sits
+// on top; the others are pale (the Google-Maps dimmed alternate). ALL trajectories go in ONE
+// addCustomTrajectory event (passedData is an array): the widget replaces its whole trajectory
+// layer on each event, so separate events would let the last wipe the others. One route (a
+// mode empty / specified) just draws a single line.
 function drawRoutes(routes) {
+lastRoutes = routes;
 clearAllTrajectories();
-var trajs = routes.slice().reverse().map(function (route) {
+// Primary = the legend pick if it's present this turn, else the fastest (routes[0]).
+var primary = routes[0];
+if (selectedVehicle) {
+for (var i = 0; i < routes.length; i++) {
+if (vehicleOf(routes[i].mode) === selectedVehicle) { primary = routes[i]; break; }
+}
+}
+// Paint the non-primary routes first and the primary last so it lands on top.
+var ordered = routes.filter(function (r) { return r !== primary; }).concat([primary]);
+var trajs = ordered.map(function (route) {
 var vehicle = vehicleOf(route.mode);
 var palette = MODE_COLORS[vehicle] || MODE_COLORS.foot;
-var shade = (route === routes[0]) ? palette.vivid : palette.pale;
-return buildTraj(route, shade);
+var isPrimary = route === primary;
+return buildTraj(route, isPrimary ? palette.vivid : palette.pale, isPrimary);
 });
 trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
+updateLegend(routes, primary);
+}
+// Color legend under the chat: one clickable entry per drawn mode. The primary is bold/opaque;
+// clicking an entry makes that mode the primary (vivid + on top) and re-draws.
+function updateLegend(routes, primary) {
+var $leg = $("#advLegend").empty();
+routes.forEach(function (route) {
+var vehicle = vehicleOf(route.mode);
+var palette = MODE_COLORS[vehicle] || MODE_COLORS.foot;
+var $e = $("<span>").addClass("leg" + (route === primary ? " on" : "")).attr("data-vehicle", vehicle);
+$("<span>").addClass("sw").css("background", palette.vivid).appendTo($e);
+$e.append(document.createTextNode(VEHICLE_LABEL[vehicle] || vehicle));
+$leg.append($e);
+});
 }
 // ---- Send a turn to the bridge ------------------------------------------
 function send() {
@@ -205,6 +242,8 @@ addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
+selectedVehicle = null;  // a new answer defaults to highlighting the fastest mode
+$("#advLegend").empty();
 if (routes.length) {
 try { drawRoutes(routes); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
@@ -219,6 +258,14 @@ $("#advInput").focus();
 }
 $("#advSend").on("click", send);
 $("#advInput").on("keydown", function (e) { if (e.key === "Enter") send(); });
+// Click a legend entry to make that mode the highlighted (vivid, on-top) route.
+$("#advLegend").on("click", ".leg", function () {
+var vehicle = $(this).attr("data-vehicle");
+if (!lastRoutes.length) return;
+selectedVehicle = vehicle;
+try { drawRoutes(lastRoutes); }
+catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
+});
 $("#advInput").focus();
 });
 </script>
