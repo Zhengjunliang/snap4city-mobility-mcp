@@ -214,6 +214,58 @@ def test_extract_data_preserves_full_wkt():
     assert len(data["wkt"]) > 80
 
 
+def _routing_entry(routetype, *, route=None, error=None):
+    result = {"error": error} if error is not None else {"journey": {"routes": [route]}}
+    return {"name": "routing", "args": json.dumps({"routetype": routetype}), "result": result}
+
+
+def test_extract_data_orders_routes_fastest_first():
+    """No mode given → both routes returned; routes is fastest-first and the top-level
+    mirrors the faster one (car here: 8 min beats 20 min on foot)."""
+    results = [
+        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
+    ]
+    data = _extract_data(results)
+    assert [r["mode"] for r in data["routes"]] == ["car", "foot_shortest"]
+    assert data["mode"] == "car" and data["wkt"] == "LINESTRING(0 0,2 2)"
+
+
+def test_extract_data_drops_empty_car_keeps_foot():
+    """car empty (ZTL / too close) → a single foot route, no route_error."""
+    results = [
+        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("car", error="no route found (empty routes list)"),
+    ]
+    data = _extract_data(results)
+    assert len(data["routes"]) == 1 and data["routes"][0]["mode"] == "foot_shortest"
+    assert "route_error" not in data
+
+
+def test_extract_data_all_fail_reports_earliest_error():
+    results = [
+        _routing_entry("foot_shortest", error="empty response from routing service"),
+        _routing_entry("car", error="no route found (empty routes list)"),
+    ]
+    data = _extract_data(results)
+    assert data.get("route_error") == "empty response from routing service"  # the user's first mode
+    assert "routes" not in data
+
+
+async def test_execute_unspecified_mode_routes_foot_and_car(make_client, make_result):
+    """Empty mode → execute routes both walking and driving (PT stays out)."""
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey()),                          # foot_shortest
+        make_result(structured=_journey()),                          # car
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": ""}
+    out = await execute({"slots": slots}, client=client)
+    routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
+    assert routetypes == ["foot_shortest", "car"]
+
+
 # --- respond -----------------------------------------------------------------
 
 async def test_respond_uses_llm_answer(make_llm):
@@ -236,12 +288,15 @@ async def test_respond_uses_llm_answer(make_llm):
 
 async def test_respond_route_surfaces_mode_for_widget(make_llm):
     """A drawable route (wkt present) carries data.mode so the dashboard widget knows
-    the vehicle to render; the value comes from the extracted slot."""
+    the vehicle to render; the value is the routetype the route was computed with."""
     llm = make_llm([_text_response("Percorso in auto, 1.83 km.")])
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da Duomo a Santa Croce in auto"}],
-        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
+        "tool_results": [
+            {"name": "routing", "args": json.dumps({"routetype": "car"}),
+             "result": {"journey": _journey()["journey"]}}
+        ],
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
     }

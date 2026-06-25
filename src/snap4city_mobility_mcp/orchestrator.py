@@ -101,6 +101,9 @@ an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
 narrate the trip leg by leg (walk to X, ride the <transport> of <provider> to Y, walk \
 on) using ONLY the leg fields — never invent lines, stops, or times.
+- When RESULTS holds more than one successful route for the same trip (different travel \
+modes), give each mode its own distance and duration and say which is faster, using \
+ONLY the RESULTS fields.
 - If a RESULTS item could not be computed (an `error`, or a route/place not found), \
 say so plainly WITHOUT any numbers and suggest a sensible alternative (another mode, a \
 more precise address); when geocoded addresses are present, mention how you read the \
@@ -342,7 +345,12 @@ async def execute(
     if origin is None or dest is None:
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
-    mode = slots.get("mode") or "foot_shortest"
+    mode_specified = bool(slots.get("mode"))
+    # No mode given: route both walking and driving so the dashboard can draw and
+    # compare them (public_transport stays out of the default set — it goes through the
+    # map's own multimodal path, not MCP routing, and degrades to a foot-only leg on
+    # short hops, see L30/L19). An explicit mode runs that one only.
+    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car"]
 
     async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
         # GeoJSON coordinate order is [longitude, latitude].
@@ -363,28 +371,30 @@ async def execute(
             )
         return result
 
-    routed = await _route(mode)
-    if (
-        mode == "public_transport"
-        and isinstance(routed, dict)
-        and isinstance(routed.get("journey"), dict)
-        and logger.isEnabledFor(logging.DEBUG)
-    ):
-        # The real public-transport arc shape hasn't been observed live yet: dump
-        # the first raw arcs so group_arc_legs' grouping key can be calibrated
-        # offline from debug.log (gitignored).
-        first = (routed["journey"].get("routes") or [{}])[0]
-        arcs = first.get("arc") or []
-        logger.debug(
-            "PT raw arcs (first 5 of %d): %s",
-            len(arcs),
-            json.dumps(arcs[:5], ensure_ascii=False)[:2000],
-        )
-    if isinstance(routed, dict) and "error" in routed and mode in _FOOT_FALLBACK:
-        # Single-shot fallback to the other foot profile. The requested profile
-        # already exhausted the stale-retry ladder (~27 s), so this only probes the
-        # other graph path, not the transient.
-        await _route(_FOOT_FALLBACK[mode], attempts=1)
+    for m in modes:
+        routed = await _route(m)
+        if (
+            m == "public_transport"
+            and isinstance(routed, dict)
+            and isinstance(routed.get("journey"), dict)
+            and logger.isEnabledFor(logging.DEBUG)
+        ):
+            # The real public-transport arc shape hasn't been observed live yet: dump
+            # the first raw arcs so group_arc_legs' grouping key can be calibrated
+            # offline from debug.log (gitignored).
+            first = (routed["journey"].get("routes") or [{}])[0]
+            arcs = first.get("arc") or []
+            logger.debug(
+                "PT raw arcs (first 5 of %d): %s",
+                len(arcs),
+                json.dumps(arcs[:5], ensure_ascii=False)[:2000],
+            )
+        if isinstance(routed, dict) and "error" in routed and m in _FOOT_FALLBACK:
+            # Single-shot fallback to the other foot profile. The requested profile
+            # already exhausted the stale-retry ladder (~27 s), so this only probes the
+            # other graph path, not the transient. car/PT failures get no fallback —
+            # they just stay absent from the routes, so the dashboard draws one less line.
+            await _route(_FOOT_FALLBACK[m], attempts=1)
 
     return {"tool_results": results, "unsupported": False}
 
@@ -398,43 +408,80 @@ def _routetype_of(entry: dict[str, Any]) -> str | None:
         return None
 
 
-def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Mine the tool-result audit for the widget payload (last successful tool wins)."""
-    route_error: str | None = None
-    for entry in reversed(results):
-        name = entry.get("name")
-        result = entry.get("result")
-        if not isinstance(result, dict) and not isinstance(result, list):
-            continue
-        is_err = isinstance(result, dict) and "error" in result
+# Maps an MCP routetype to the dashboard vehicle family (mirrors the front-end
+# vehicleOf): foot profiles collapse to one walking line, car/PT to their own.
+_VEHICLE = {
+    "foot_shortest": "foot",
+    "foot_quiet": "foot",
+    "car": "car",
+    "public_transport": "bus",
+}
 
-        if name == "routing":
-            if isinstance(result, dict) and isinstance(result.get("journey"), dict):
-                journey = result["journey"]
-                first = (journey.get("routes") or [{}])[0]
-                data = {
-                    "wkt": first.get("wkt"),  # full LINESTRING, not truncated
-                    "distance_km": first.get("distance"),
-                    "eta": first.get("eta"),
-                    "duration": first.get("time"),
-                    # "arcs": first.get("arc"),  # per-segment detail: bloats the payload
-                    # ~90%, re-enable once referente confirms the widget needs it.
-                    "source_node": journey.get("source_node"),
-                    "destination_node": journey.get("destination_node"),
-                }
-                if _routetype_of(entry) == "public_transport":
-                    # Walk/ride legs grouped from the journey arcs. Pending referente
-                    # confirmation, same status as data.arcs above.
-                    legs = group_arc_legs(first.get("arc") or [])
-                    if legs:
-                        data["legs"] = legs
-                return data
-            # Scanning backwards, keep overwriting: when every profile failed (mode +
-            # foot fallback), we want the earliest error, the mode the user actually
-            # asked for, not the fallback's.
-            if is_err:
-                route_error = result["error"]
-    return {"route_error": route_error} if route_error else {}
+
+def _route_minutes(route: dict[str, Any]) -> float:
+    """A route's travel time in minutes, for ordering routes fastest-first. The server
+    gives `duration` as "HH:MM:SS"; an unparseable one sorts last (inf)."""
+    dur = route.get("duration")
+    if isinstance(dur, (int, float)):
+        return float(dur)
+    if isinstance(dur, str):
+        parts = dur.split(":")
+        if len(parts) == 3:
+            try:
+                h, m, s = (int(p) for p in parts)
+                return h * 60 + m + s / 60
+            except ValueError:
+                pass
+    return float("inf")
+
+
+def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mine the tool-result audit for the widget payload.
+
+    Collects every successful routing into a `routes` list, one per vehicle family
+    (foot/car/bus) — a later success overwrites an earlier one, so a foot-profile
+    fallback wins over its failed sibling. routes is ordered fastest-first; the
+    top-level wkt/mode/distance mirror routes[0] for single-route consumers and the
+    template. With no success, returns the earliest error (the mode the user asked for).
+    """
+    route_error: str | None = None
+    by_vehicle: dict[str, dict[str, Any]] = {}
+    for entry in results:
+        if entry.get("name") != "routing":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        if isinstance(result.get("journey"), dict):
+            journey = result["journey"]
+            first = (journey.get("routes") or [{}])[0]
+            routetype = _routetype_of(entry)
+            route = {
+                "mode": routetype,
+                "wkt": first.get("wkt"),  # full LINESTRING, not truncated
+                "distance_km": first.get("distance"),
+                "eta": first.get("eta"),
+                "duration": first.get("time"),
+                # "arcs": first.get("arc"),  # per-segment detail: bloats the payload
+                # ~90%, re-enable once referente confirms the widget needs it.
+                "source_node": journey.get("source_node"),
+                "destination_node": journey.get("destination_node"),
+            }
+            if routetype == "public_transport":
+                # Walk/ride legs grouped from the journey arcs. Pending referente
+                # confirmation, same status as data.arcs above.
+                legs = group_arc_legs(first.get("arc") or [])
+                if legs:
+                    route["legs"] = legs
+            by_vehicle[_VEHICLE.get(routetype or "", routetype or "")] = route
+        elif "error" in result and route_error is None:
+            # First error wins = the mode the user actually asked for (modes run in
+            # request order), not a later fallback's.
+            route_error = result["error"]
+    if not by_vehicle:
+        return {"route_error": route_error} if route_error else {}
+    routes = sorted(by_vehicle.values(), key=_route_minutes)
+    return {**routes[0], "routes": routes}
 
 
 def _template_answer(
@@ -462,6 +509,21 @@ def _template_answer(
             tpl_template_answer(intent, data)
             or "Mi dispiace, non ho trovato informazioni per questa richiesta."
         )
+    routes = data.get("routes") or []
+    if len(routes) > 1:
+        labels = {"foot": "a piedi", "car": "in auto", "bus": "con i mezzi"}
+        parts = []
+        for r in routes:
+            label = labels.get(_VEHICLE.get(r.get("mode") or "", ""), "percorso")
+            bits = []
+            if r.get("distance_km") is not None:
+                bits.append(f"{r['distance_km']} km")
+            if r.get("duration"):
+                bits.append(f"~{r['duration']}")
+            if bits:
+                parts.append(f"{label}: {' · '.join(bits)}")
+        if parts:
+            return "; ".join(parts)
     if data.get("distance_km") is not None:
         bits = [f"{data['distance_km']} km"]
         if data.get("duration"):
@@ -555,15 +617,11 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     intent = state.get("intent", "other")
     results = state.get("tool_results") or []
     unsupported = bool(state.get("unsupported"))
+    # The dashboard widget needs each route's travel mode to render it (foot/car icon +
+    # line color). _extract_data already carries `mode` per route (and on the top-level
+    # primary), read back from the routetype the route was computed with, so respond
+    # adds nothing here. Pending referente confirmation of the widget data shape.
     data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
-    # The dashboard widget needs the travel mode to render the route (foot/car/bus icon
-    # + leg colors), so surface it as widget data. Guarded to a successful route (wkt
-    # present): never pollute a tpl payload, a route error ({route_error}), or an
-    # unsupported/missing reply ({}) with a mode field. Mirror execute's default for the
-    # mode the route was actually computed with. Pending referente confirmation of the
-    # widget data shape, same status as the commented-out data.arcs above.
-    if intent == "route" and isinstance(data, dict) and data.get("wkt"):
-        data["mode"] = (state.get("slots") or {}).get("mode") or "foot_shortest"
     # An intent execute refused means slot extraction left a required slot blank
     # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.

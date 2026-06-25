@@ -7,13 +7,21 @@ tabs/spaces as content, so this file is kept flat and paste-ready (see CLAUDE.md
 It is a natural-language chat box: the question is POSTed to the FastAPI bridge (api.py,
 which wraps run_advisor on the JupyterHub) and the reply + route come back as widget JSON
 {status, request_type, data, messages}. The reply bubble is messages[-1].content; the
-route is data.wkt, which is drawn on a sibling widgetMap.
-HOW THE MAP DRAWS (Step-0 finding): the widgetMap's addCustomTrajectory does NOT paint a
-raw polyline - it routes through waypoints with Snap4City's own graphhopper. So the
-backend WKT is fed as downsampled waypoints with a graphhopper mode whose `type` is the
-front-end vehicle name (foot/car/bus, NOT the MCP routetype); the map traces our route
-through them. Per-point `mode` is required and `type` must be foot/car/bus or the map
-crashes in addCustomTrajectoryToMap.
+routes are data.routes (one per travel mode), drawn on a sibling widgetMap.
+MULTIPLE MODES: when the user does not say walk/drive, the backend routes BOTH and returns
+data.routes ordered fastest-first. We draw one line per mode in its own color (foot green,
+car blue); the faster route is vivid and painted on top, the slower one is pale (the
+Google-Maps dimmed-alternate look). When only one route comes back (mode specified, or car
+empty in a ZTL / very short trip), a single line is drawn. (Line width is left untouched -
+the widgetMap may not support a width field and feeding one it does not eat crashes it;
+revisit thicker lines after a real-machine test.)
+HOW THE MAP DRAWS: the widgetMap's addCustomTrajectory does NOT paint a raw polyline - it
+routes through waypoints with Snap4City's own graphhopper. We feed the backend WKT's two
+endpoints (start + finish) as waypoints with a graphhopper mode whose `type` is the
+front-end vehicle name (foot/car/bus, NOT the MCP routetype); the map routes between them.
+Per-point `mode` is required and `type` must be foot/car/bus or the map crashes in
+addCustomTrajectoryToMap. (Feeding the full downsampled WKT as many waypoints + a
+drawMethod:"custom" also crashed it - 2 endpoints, no drawMethod, is the shape that works.)
 Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 -->
 <html lang="en">
@@ -22,8 +30,8 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <style>
+html, body { height: 100%; margin: 0; }
 .adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
-.adv h3 { margin: 0 0 8px; font-size: 15px; color: #f5c518; }
 .adv #advChat { flex: 1; overflow-y: auto; min-height: 120px; padding-right: 4px; }
 .adv .msg { margin: 6px 0; padding: 7px 10px; border-radius: 10px; font-size: 13px; line-height: 1.35; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
 .adv .msg.user { background: #1f2a44; border: 1px solid #f5c518; color: #f5c518; margin-left: auto; }
@@ -37,7 +45,6 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 </head>
 <body>
 <div class="adv">
-<h3>Mobility Advisor</h3>
 <div id="advChat"></div>
 <div class="row">
 <input id="advInput" type="text" placeholder='es. "da Piazza del Duomo a Santa Croce a piedi"' autocomplete="off">
@@ -53,13 +60,21 @@ var MAP_WIDGET_ID = "w_Map_5183_widgetMap46852";  // id of the widgetMap on this
 // whatever the deployment exposes (jupyter-server-proxy path or a same-origin proxy);
 // TODO set this once the browser->bridge reachability is decided. Local dev: localhost.
 var BRIDGE_BASE = "https://www.snap4city.org/jupyterhub/user/mobilityadvisor/proxy/8010";
-var TRAJ_ID = "advisorRoute";          // reused so a re-draw replaces the old line
+// One fixed trajectory id per vehicle so a re-draw replaces that line, and every turn
+// we clear all of them (a turn with only foot must wipe a stale car line, and vice versa).
+var TRAJ_IDS = { foot: "advisorRoute_foot", car: "advisorRoute_car", bus: "advisorRoute_bus" };
 var ICON_BASE = "https://www.snap4city.org/snap4cityWebAppTuscany/img/mapicons/ita/";
 var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "LastStopOfRoute.png" };
-// Route leg palette - MUST be an array (a single string makes the line invisible).
-var COLORS = ["#32cd32", "#800080", "#ff7f0e", "#0000ff"];
-var MAX_WAYPOINTS = 12;  // downsample target: a handful of graphhopper hops, not 100+
-var DEBUG = true;  // TEMPORARY: dump trajectory payload + capture widgetMap crash. Remove after.
+// Per-vehicle colors, Google-Maps style: the faster route is drawn in the vivid shade
+// and painted last (on top); the slower one(s) use the pale shade (the "dimmed
+// alternate"). The color value fed to a leg MUST be an array - a single string makes
+// the line invisible. (Line width is left alone: the widgetMap may not support a width
+// field and L30 warns unsupported fields crash it; revisit width after a real-machine test.)
+var MODE_COLORS = {
+foot: { vivid: "#32cd32", pale: "#9fd8a0" },
+car: { vivid: "#1e66ff", pale: "#9fb6e8" },
+bus: { vivid: "#ff7f0e", pale: "#f0c79a" }
+};
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 // ---- Chat UI ------------------------------------------------------------
@@ -101,65 +116,66 @@ var xy = pair.trim().split(/\s+/);
 return { lat: parseFloat(xy[1]), lng: parseFloat(xy[0]) };
 }).filter(function (p) { return isFinite(p.lat) && isFinite(p.lng); });
 }
-// Keep at most maxN vertices (always first + last) so the map makes a handful of
-// graphhopper hops, not one per WKT vertex. graphhopper fills the gaps with the same path.
-function downsample(coords, maxN) {
-if (coords.length <= maxN) return coords;
-var step = (coords.length - 1) / (maxN - 1), out = [];
-for (var i = 0; i < maxN; i++) out.push(coords[Math.round(i * step)]);
-out[out.length - 1] = coords[coords.length - 1];
-return out;
-}
 // The widget runs in an iframe; the dashboard (and its widgets) live in parent.
 function trigger(payload) {
 if (window.parent && window.parent.$) window.parent.$("body").trigger(payload);
 else throw new Error("dashboard host not reachable");
 }
-function clearTrajectory() {
+// Wipe every per-vehicle trajectory so the previous turn leaves nothing behind (a foot-only
+// answer must erase last turn's car line, and vice versa).
+function clearAllTrajectories() {
+$.each(TRAJ_IDS, function (vehicle, id) {
 trigger({
 type: "removeCustomTrajectory",
 target: MAP_WIDGET_ID,
-passedData: [{ id: TRAJ_ID, eventType: "Trajectory" }]
+passedData: [{ id: id, eventType: "Trajectory" }]
+});
 });
 }
-// Draw the backend route (WKT) by tracing its vertices as graphhopper waypoints.
-function drawRoute(wkt, mode) {
-var coords = downsample(parseWktLine(wkt), MAX_WAYPOINTS);
-if (coords.length < 2) throw new Error("route geometry has < 2 points");
-var vehicle = vehicleOf(mode), startDatetime = nowLocalDatetime();
+// Draw one trajectory for a route by feeding the backend WKT's two endpoints as graphhopper
+// waypoints and letting the widgetMap route between them (the native What-If pattern, proven
+// to draw). Feeding the full downsampled WKT as 12 waypoints + drawMethod:"custom" crashed
+// the widget's addCustomTrajectoryToMap (Cannot read ... 'length'); 2 endpoints + no
+// drawMethod is the shape that works. shade is the leg color (vivid for the faster route,
+// pale for a dimmed alternate).
+function drawOne(route, shade) {
+var line = parseWktLine(route.wkt);
+if (line.length < 2) throw new Error("route geometry has < 2 points");
+var coords = [line[0], line[line.length - 1]];  // start + finish only
+var vehicle = vehicleOf(route.mode), startDatetime = nowLocalDatetime();
 // Each waypoint needs a graphhopper mode; type MUST be foot/car/bus (not foot_shortest)
-// or addCustomTrajectoryToMap crashes. Icons only on first/last so the line shows clean.
+// or addCustomTrajectoryToMap crashes. Icons on both endpoints.
 var points = coords.map(function (gps, i) {
 var pt = {
 optionalhtmltrajpopup: "",
 mode: { routing: { graphhopper: { type: vehicle, startDatetime: startDatetime, weighting: "fastest" } } },
-color: COLORS,
+color: [shade],
 position: { serviceUri: "", gps: gps }
 };
 if (i === 0) pt.icon = ICONS.start;
 else if (i === coords.length - 1) pt.icon = ICONS.finish;
 return pt;
 });
-var traj = {
-id: TRAJ_ID,
+trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: [{
+id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle),
 eventType: "Trajectory",
 returnInstructionTrigger: "returnedTraj",
 multipleLines: false,
-drawMethod: "custom",
 points: points
-};
-if (DEBUG) {
-console.log("[advisor] addCustomTrajectory passedData", JSON.stringify([traj], null, 2));
-var withMode = points.filter(function (p) { return p.mode; }).length;
-var withIcon = points.filter(function (p) { return p.icon; }).length;
-var first = coords[0], last = coords[coords.length - 1];
-addMsg("DEBUG traj: vehicle=" + vehicle + " weighting=fastest startDatetime=" + startDatetime
-+ " points=" + points.length + " mode=" + withMode + "/" + points.length
-+ " icon=" + withIcon + "/" + points.length
-+ " first=" + first.lat + "," + first.lng + " last=" + last.lat + "," + last.lng, "bot");
+}] });
 }
-clearTrajectory();
-trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: [traj] });
+// Draw all routes from the backend (already ordered fastest-first). The faster route gets
+// the vivid shade and is painted LAST so it sits on top; the slower one(s) are pale (the
+// Google-Maps dimmed alternate). One route (car empty / mode specified) draws a single line.
+function drawRoutes(routes) {
+clearAllTrajectories();
+// Paint slowest-first so routes[0] (the fastest) lands on top.
+routes.slice().reverse().forEach(function (route) {
+var vehicle = vehicleOf(route.mode);
+var palette = MODE_COLORS[vehicle] || MODE_COLORS.foot;
+var shade = (route === routes[0]) ? palette.vivid : palette.pale;
+drawOne(route, shade);
+});
 }
 // ---- Send a turn to the bridge ------------------------------------------
 function send() {
@@ -181,8 +197,10 @@ addMsg("✗ " + (response.error || "richiesta fallita"), "err");
 history = (response && response.messages) || history;  // carry multi-turn state
 addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
-if (data.wkt) {
-try { drawRoute(data.wkt, data.mode); }
+// Prefer the multi-route list; fall back to the single top-level route for safety.
+var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
+if (routes.length) {
+try { drawRoutes(routes); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
 }
 }
@@ -196,29 +214,6 @@ $("#advInput").focus();
 $("#advSend").on("click", send);
 $("#advInput").on("keydown", function (e) { if (e.key === "Enter") send(); });
 $("#advInput").focus();
-// TEMPORARY (DEBUG): the widgetMap draws in the PARENT frame, so its async crash is an
-// uncaught promise rejection there - our try/catch in send() never sees it. Listen on the
-// parent for just the trajectory crash and surface it as a chat bubble so we capture the
-// real error text + stack without digging in DevTools. Narrow filter so unrelated dashboard
-// errors are ignored. Remove with the rest of the DEBUG block once the field is identified.
-function looksLikeTrajCrash(text) {
-text = String(text || "");
-return text.indexOf("length") !== -1 || text.indexOf("addCustomTrajectory") !== -1;
-}
-if (DEBUG && window.parent && window.parent.addEventListener) {
-window.parent.addEventListener("unhandledrejection", function (e) {
-var err = e && e.reason, msg = (err && err.message) || String(err);
-if (looksLikeTrajCrash(msg) || looksLikeTrajCrash(err && err.stack)) {
-addMsg("DEBUG widget crash: " + msg + "\n" + ((err && err.stack) || "").split("\n").slice(0, 4).join("\n"), "err");
-}
-});
-window.parent.addEventListener("error", function (e) {
-var msg = (e && e.message) || "", stack = (e && e.error && e.error.stack) || "";
-if (looksLikeTrajCrash(msg) || looksLikeTrajCrash(stack)) {
-addMsg("DEBUG widget error: " + msg + "\n" + stack.split("\n").slice(0, 4).join("\n"), "err");
-}
-});
-}
 });
 </script>
 </body>
