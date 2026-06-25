@@ -134,7 +134,19 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
 
 The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
 
-Run the bridge on the JupyterHub (where Llama4 + the MCP server are reachable); the browser reaches it same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L27, wiring in `frontend/README.md`):
+Run **two processes** on the JupyterHub. First the **local MCP server** that serves forward
+geocoding (referente's remote `address_search_location` is server-side broken, so we host our
+own tool wrapping the public km4city ServiceMap — see `docs/lessons.md` L28/L29). It only needs
+outbound HTTP to the public ServiceMap:
+
+```bash
+python -m snap4city_mobility_mcp.mcp_server          # serves http://0.0.0.0:8020/mcp/
+```
+
+Then the bridge (where Llama4 + the remote MCP server are reachable); the browser reaches it
+same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L27, wiring in
+`frontend/README.md`). It connects to the local geocode server via `S4C_LOCAL_MCP_URL`
+(default `http://127.0.0.1:8020/mcp`):
 
 ```bash
 uvicorn api:app --host 0.0.0.0 --port 8010
@@ -186,6 +198,7 @@ snap4city-mobility-mcp/
     └── snap4city_mobility_mcp/    # client-only package — MCP server itself is referente-managed (remote)
         ├── __init__.py            # package version only
         ├── mcp_tools.py           # client MCP layer: Client config, exec_tool, routing_with_retry, geocode helpers
+        ├── mcp_server.py          # our own local MCP server: forward geocode tool wrapping the public km4city ServiceMap (referente's is broken, L29)
         ├── orchestrator.py        # deterministic Langgraph graph: understand → execute → respond; run_advisor
         ├── tpl.py                 # deterministic public-transport (tpl_*) discovery chains: run_tpl_flow
         ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
@@ -194,9 +207,11 @@ snap4city-mobility-mcp/
 
 ---
 
-## 7. Tools consumed (remote)
+## 7. Tools consumed (remote) + one served locally
 
-This project does **not** expose any MCP tools — it consumes them. The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`routing`, not `snap4agentic_advisor_native_routing`) — see `docs/lessons.md` L6.
+The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth for routing, reverse geocoding, and the `tpl_*` chain; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`routing`, not `snap4agentic_advisor_native_routing`) — see `docs/lessons.md` L6.
+
+**Exception — forward geocoding is served locally.** The remote `address_search_location` is server-side broken (returns foreign hits / zero Tuscan for valid Florence queries, `docs/lessons.md` L28), so we host our own MCP server (`mcp_server.py`) wrapping the **public** km4city ServiceMap and connect to it as a **separate** single-server client (`S4C_LOCAL_MCP_URL`). Keeping it a separate client — rather than merging both into one config — preserves the remote tools' bare names (no prefix migration, L29). The geocode tool returns the same GeoJSON shape, so the client's geocode pipeline is unchanged.
 
 Live registry (run from the JupyterHub):
 
@@ -214,7 +229,7 @@ asyncio.run(main())
 "
 ```
 
-Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor drives **7 of these tools** (`address_search_location`, `routing`, `tpl_agencies`, `tpl_lines`, `tpl_routes_by_line`, `tpl_stops_by_route`, `tpl_stop_timeline`); the deterministic `execute` node chains them in Python — `geocode → geocode → routing` for a trip, and the `tpl_*` discovery chains in `tpl.py` for public-transport questions (the LLM never picks tools). `mcp_tools.exec_tool` executes each call.
+Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor drives **7 tools**: `routing`, `coordinates_to_address`, and the five `tpl_*` from the remote server, plus `address_search_location` from the **local** server (`mcp_server.py`, the forward-geocode exception above). The deterministic `execute` node chains them in Python — `geocode → geocode → routing` for a trip (geocode on the local client, routing on the remote), and the `tpl_*` discovery chains in `tpl.py` for public-transport questions (the LLM never picks tools). `mcp_tools.exec_tool` executes each call.
 
 ---
 

@@ -36,6 +36,7 @@ from snap4city_mobility_mcp.llm import (
 from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
     _label_tokens,
+    _local_config,
     exec_tool,
     group_arc_legs,
     slim_result_for_llm,
@@ -295,7 +296,9 @@ def _pick_coord(geocode: Any, search: str) -> list[float] | None:
 _FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 
 
-async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
+async def execute(
+    state: AdvisorState, *, client: Client, local_client: Client | None = None
+) -> dict[str, Any]:
     """Run the tool flow for the extracted intent (no LLM).
 
     route: geocode both endpoints, then routing with the requested mode (plus a foot
@@ -305,6 +308,9 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
     """
     slots = state.get("slots") or {}
     results: list[dict[str, Any]] = []
+    # Forward geocoding goes to our local MCP server (referente's is broken, L29); routing
+    # and tpl_* stay on the remote client. Tests pass only `client`, so lc falls back to it.
+    lc = local_client or client
 
     if slots.get("intent") in TPL_INTENTS:
         return await run_tpl_flow(client, slots)
@@ -318,7 +324,7 @@ async def execute(state: AdvisorState, *, client: Client) -> dict[str, Any]:
 
     async def _geocode(search: str) -> list[float] | None:
         args = {"search": search}
-        result = await exec_tool(client, "address_search_location", args)
+        result = await exec_tool(lc, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
         coord = _pick_coord(result, search)
         if logger.isEnabledFor(logging.DEBUG):
@@ -616,10 +622,10 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     }
 
 
-def _build_graph(client: Client, llm: Llama4Client):
+def _build_graph(client: Client, llm: Llama4Client, local_client: Client | None = None):
     g = StateGraph(AdvisorState)
     g.add_node("understand", partial(understand, llm=llm))
-    g.add_node("execute", partial(execute, client=client))
+    g.add_node("execute", partial(execute, client=client, local_client=local_client))
     g.add_node("respond", partial(respond, llm=llm))
     g.set_entry_point("understand")
     g.add_edge("understand", "execute")
@@ -659,7 +665,7 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     cfg, llm = await _session_deps()
     messages = list(history or [])
     messages.append({"role": "user", "content": query})
-    async with Client(cfg) as client:
-        graph = _build_graph(client, llm)
+    async with Client(cfg) as client, Client(_local_config()) as local_client:
+        graph = _build_graph(client, llm, local_client)
         out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
     return out.get("response", {"status": "error", "error": "no response produced", "messages": messages})

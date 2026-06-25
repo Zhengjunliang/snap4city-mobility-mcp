@@ -80,6 +80,18 @@ async def _build_config() -> dict[str, Any]:
     }
 
 
+# Our own local MCP server (mcp_server.py) hosts forward geocoding (referente's remote
+# address_search_location is server-side broken, L28/L29). It is a separate single-server
+# client so the remote client stays single-server with bare tool names (no FastMCP server
+# prefix, L6); the single "local" key here likewise yields bare names.
+LOCAL_MCP_URL = os.environ.get("S4C_LOCAL_MCP_URL", "http://127.0.0.1:8020/mcp")
+
+
+def _local_config() -> dict[str, Any]:
+    """FastMCP single-server config for the local MCP server (mcp_server.py)."""
+    return {"mcpServers": {"local": {"url": LOCAL_MCP_URL}}}
+
+
 def _unwrap(result: Any) -> Any:
     """fastmcp.Client.call_tool result → structured payload (dict / list / scalar)."""
     if getattr(result, "structured_content", None):

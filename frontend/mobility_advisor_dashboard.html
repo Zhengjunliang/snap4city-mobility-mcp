@@ -59,6 +59,7 @@ var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "La
 // Route leg palette - MUST be an array (a single string makes the line invisible).
 var COLORS = ["#32cd32", "#800080", "#ff7f0e", "#0000ff"];
 var MAX_WAYPOINTS = 12;  // downsample target: a handful of graphhopper hops, not 100+
+var DEBUG = true;  // TEMPORARY: dump trajectory payload + capture widgetMap crash. Remove after.
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 // ---- Chat UI ------------------------------------------------------------
@@ -139,19 +140,26 @@ if (i === 0) pt.icon = ICONS.start;
 else if (i === coords.length - 1) pt.icon = ICONS.finish;
 return pt;
 });
-clearTrajectory();
-trigger({
-type: "addCustomTrajectory",
-target: MAP_WIDGET_ID,
-passedData: [{
+var traj = {
 id: TRAJ_ID,
 eventType: "Trajectory",
 returnInstructionTrigger: "returnedTraj",
 multipleLines: false,
 drawMethod: "custom",
 points: points
-}]
-});
+};
+if (DEBUG) {
+console.log("[advisor] addCustomTrajectory passedData", JSON.stringify([traj], null, 2));
+var withMode = points.filter(function (p) { return p.mode; }).length;
+var withIcon = points.filter(function (p) { return p.icon; }).length;
+var first = coords[0], last = coords[coords.length - 1];
+addMsg("DEBUG traj: vehicle=" + vehicle + " weighting=fastest startDatetime=" + startDatetime
++ " points=" + points.length + " mode=" + withMode + "/" + points.length
++ " icon=" + withIcon + "/" + points.length
++ " first=" + first.lat + "," + first.lng + " last=" + last.lat + "," + last.lng, "bot");
+}
+clearTrajectory();
+trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: [traj] });
 }
 // ---- Send a turn to the bridge ------------------------------------------
 function send() {
@@ -188,6 +196,29 @@ $("#advInput").focus();
 $("#advSend").on("click", send);
 $("#advInput").on("keydown", function (e) { if (e.key === "Enter") send(); });
 $("#advInput").focus();
+// TEMPORARY (DEBUG): the widgetMap draws in the PARENT frame, so its async crash is an
+// uncaught promise rejection there - our try/catch in send() never sees it. Listen on the
+// parent for just the trajectory crash and surface it as a chat bubble so we capture the
+// real error text + stack without digging in DevTools. Narrow filter so unrelated dashboard
+// errors are ignored. Remove with the rest of the DEBUG block once the field is identified.
+function looksLikeTrajCrash(text) {
+text = String(text || "");
+return text.indexOf("length") !== -1 || text.indexOf("addCustomTrajectory") !== -1;
+}
+if (DEBUG && window.parent && window.parent.addEventListener) {
+window.parent.addEventListener("unhandledrejection", function (e) {
+var err = e && e.reason, msg = (err && err.message) || String(err);
+if (looksLikeTrajCrash(msg) || looksLikeTrajCrash(err && err.stack)) {
+addMsg("DEBUG widget crash: " + msg + "\n" + ((err && err.stack) || "").split("\n").slice(0, 4).join("\n"), "err");
+}
+});
+window.parent.addEventListener("error", function (e) {
+var msg = (e && e.message) || "", stack = (e && e.error && e.error.stack) || "";
+if (looksLikeTrajCrash(msg) || looksLikeTrajCrash(stack)) {
+addMsg("DEBUG widget error: " + msg + "\n" + stack.split("\n").slice(0, 4).join("\n"), "err");
+}
+});
+}
 });
 </script>
 </body>
