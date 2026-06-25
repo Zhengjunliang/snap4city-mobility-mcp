@@ -8,11 +8,13 @@ It is a natural-language chat box: the question is POSTed to the FastAPI bridge 
 which wraps run_advisor on the JupyterHub) and the reply + route come back as widget JSON
 {status, request_type, data, messages}. The reply bubble is messages[-1].content; the
 routes are data.routes (one per travel mode), drawn on a sibling widgetMap.
-MULTIPLE MODES: when the user does not say walk/drive, the backend routes BOTH and returns
-data.routes ordered fastest-first. We draw one line per mode in its own color (foot green,
-car blue); the faster route is vivid and painted on top, the slower one is pale (the
-Google-Maps dimmed-alternate look). When only one route comes back (mode specified, or car
-empty in a ZTL / very short trip), a single line is drawn. (Line width is left untouched -
+MULTIPLE MODES: when the user does not say walk/drive/bus, the backend routes ALL of foot,
+car and public transport and returns data.routes ordered fastest-first. We draw one line per
+mode in its own color (foot green, car blue, bus orange); the faster route is vivid and
+painted on top, the slower ones are pale (the Google-Maps dimmed-alternate look). When only
+one route comes back (mode specified, or a mode empty in a ZTL / very short trip / no PT for
+that OD), a single line is drawn. (The bus line is a single vehicle=bus road line; a true
+foot+bus multimodal split is deferred - no per-leg stop coordinates are available.) (Line width is left untouched -
 the widgetMap may not support a width field and feeding one it does not eat crashes it;
 revisit thicker lines after a real-machine test.)
 HOW THE MAP DRAWS: the widgetMap's addCustomTrajectory does NOT paint a raw polyline - it
@@ -132,13 +134,14 @@ passedData: [{ id: id, eventType: "Trajectory" }]
 });
 });
 }
-// Draw one trajectory for a route by feeding the backend WKT's two endpoints as graphhopper
-// waypoints and letting the widgetMap route between them (the native What-If pattern, proven
-// to draw). Feeding the full downsampled WKT as 12 waypoints + drawMethod:"custom" crashed
-// the widget's addCustomTrajectoryToMap (Cannot read ... 'length'); 2 endpoints + no
-// drawMethod is the shape that works. shade is the leg color (vivid for the faster route,
-// pale for a dimmed alternate).
-function drawOne(route, shade) {
+// Build one trajectory object for a route by feeding the backend WKT's two endpoints as
+// graphhopper waypoints and letting the widgetMap route between them (the native What-If
+// pattern, proven to draw). Feeding the full downsampled WKT as 12 waypoints +
+// drawMethod:"custom" crashed the widget's addCustomTrajectoryToMap (Cannot read ...
+// 'length'); 2 endpoints + no drawMethod is the shape that works. shade is the leg color
+// (vivid for the faster route, pale for a dimmed alternate). Returns the object - the
+// caller batches all routes into ONE event (see drawRoutes).
+function buildTraj(route, shade) {
 var line = parseWktLine(route.wkt);
 if (line.length < 2) throw new Error("route geometry has < 2 points");
 var coords = [line[0], line[line.length - 1]];  // start + finish only
@@ -156,26 +159,29 @@ if (i === 0) pt.icon = ICONS.start;
 else if (i === coords.length - 1) pt.icon = ICONS.finish;
 return pt;
 });
-trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: [{
+return {
 id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle),
 eventType: "Trajectory",
 returnInstructionTrigger: "returnedTraj",
 multipleLines: false,
 points: points
-}] });
+};
 }
 // Draw all routes from the backend (already ordered fastest-first). The faster route gets
-// the vivid shade and is painted LAST so it sits on top; the slower one(s) are pale (the
-// Google-Maps dimmed alternate). One route (car empty / mode specified) draws a single line.
+// the vivid shade; the slower one(s) are pale (the Google-Maps dimmed alternate). ALL
+// trajectories go in ONE addCustomTrajectory event (passedData is an array): the widget
+// replaces its whole trajectory layer on each event, so sending them separately would let
+// the last one wipe the others. Array order = z-order, so the faster route is placed LAST
+// to sit on top. One route (car empty / mode specified) just draws a single line.
 function drawRoutes(routes) {
 clearAllTrajectories();
-// Paint slowest-first so routes[0] (the fastest) lands on top.
-routes.slice().reverse().forEach(function (route) {
+var trajs = routes.slice().reverse().map(function (route) {
 var vehicle = vehicleOf(route.mode);
 var palette = MODE_COLORS[vehicle] || MODE_COLORS.foot;
 var shade = (route === routes[0]) ? palette.vivid : palette.pale;
-drawOne(route, shade);
+return buildTraj(route, shade);
 });
+trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
 }
 // ---- Send a turn to the bridge ------------------------------------------
 function send() {

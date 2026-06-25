@@ -346,11 +346,12 @@ async def execute(
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
     mode_specified = bool(slots.get("mode"))
-    # No mode given: route both walking and driving so the dashboard can draw and
-    # compare them (public_transport stays out of the default set — it goes through the
-    # map's own multimodal path, not MCP routing, and degrades to a foot-only leg on
-    # short hops, see L30/L19). An explicit mode runs that one only.
-    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car"]
+    # No mode given: route walking, driving AND public transport so the dashboard draws
+    # all three for comparison (a foot/car/bus line each). PT returns a journey now (L19),
+    # so it yields a drawable line between the endpoints; a mode that comes back empty
+    # (car in a ZTL, PT on some OD) just stays absent and draws one less line. An explicit
+    # mode runs that one only.
+    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car", "public_transport"]
 
     async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
         # GeoJSON coordinate order is [longitude, latitude].

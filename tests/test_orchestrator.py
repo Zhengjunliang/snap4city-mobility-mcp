@@ -252,18 +252,31 @@ def test_extract_data_all_fail_reports_earliest_error():
     assert "routes" not in data
 
 
-async def test_execute_unspecified_mode_routes_foot_and_car(make_client, make_result):
-    """Empty mode → execute routes both walking and driving (PT stays out)."""
+async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_result):
+    """Empty mode → execute routes walking, driving and public transport."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # foot_shortest
         make_result(structured=_journey()),                          # car
+        make_result(structured=_journey()),                          # public_transport
     ])
     slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": ""}
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
-    assert routetypes == ["foot_shortest", "car"]
+    assert routetypes == ["foot_shortest", "car", "public_transport"]
+
+
+def test_extract_data_collects_three_modes():
+    """foot+car+PT all succeed → routes has all three, keyed to distinct vehicles."""
+    results = [
+        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
+        _routing_entry("public_transport", route={"wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00"}),
+    ]
+    data = _extract_data(results)
+    assert {r["mode"] for r in data["routes"]} == {"foot_shortest", "car", "public_transport"}
+    assert len(data["routes"]) == 3
 
 
 # --- respond -----------------------------------------------------------------
