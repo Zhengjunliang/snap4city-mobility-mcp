@@ -150,23 +150,26 @@ async def main() -> None:
         print("\n=== P3: realtime free-spaces (IoT/orion parkings first) ===", flush=True)
         ordered = ([u for u in parking_uris if ("iot" in u.lower() or "orion" in u.lower())]
                    + [u for u in parking_uris if not ("iot" in u.lower() or "orion" in u.lower())])
-        any_free = False
-        for uri in ordered[:6]:
-            info = await _call(client, "service_info", {"serviceuri": uri})
-            blob = _full(info)
-            # realtimeAttributes / realtime carry the live values when loaded.
-            has_rt = ('"realtimeattributes": {}' not in blob.lower()
-                      and ("realtimeattribute" in blob.lower() or '"realtime": {"' in blob.lower()))
-            seen = [v for v in CANDIDATE_FREE_VALUES if v.lower() in blob.lower()]
-            print(f"- {uri}\n    realtime? {has_rt}  free-values seen: {seen or 'NONE'}", flush=True)
-            if has_rt or seen:
-                any_free = True
-                print("    service_info FULL (first 2500):", blob[:2500], flush=True)
+        # service_info's realtimeAttributes is only the attribute SCHEMA (data_type, refresh
+        # rate...), NOT the current value. The live `freeParkingLots` count comes from
+        # service_info_dev with a time window. Probe the orion parkings BOTH ways and dump the
+        # dev response in full so we can see WHERE the live integer lives (realtime/values/etc).
+        orion = [u for u in ordered if ("iot" in u.lower() or "orion" in u.lower())]
+        print(f"orion/iot parkings (have realtime): {len(orion)}", flush=True)
+        for uri in orion[:2]:
+            print(f"\n--- {uri} ---", flush=True)
+            dev = await _call(client, "service_info_dev", {"serviceuri": uri, "fromtime": "1-hour"})
+            print("service_info_dev(fromtime=1-hour) FULL (first 3500):", _full(dev)[:3500], flush=True)
+            dev2 = await _call(client, "service_info_dev", {"serviceuri": uri, "fromtime": "1-day"})
+            blob2 = _full(dev2).lower()
+            print(f"fromtime=1-day: freeParkingLots present? {'freeparkinglots' in blob2}  "
+                  f"head: {_full(dev2)[:1500]}", flush=True)
         if not parking_uris:
             print("(no parking serviceUri resolved — check P1 category name / P2 radius)", flush=True)
-        print(f"\n>>> realtime free-spaces available on SOME parking? {any_free}. If yes, note the "
-              f"value name + which URI kind (iot/orion vs POI) → wire per-spot service_info for "
-              f"those; if no, degrade to locations-only (agreed fallback).", flush=True)
+        print("\n>>> LOOK ABOVE: find the actual current freeParkingLots INTEGER in the "
+              "service_info_dev response (under realtime / Service.features[].properties / a "
+              "values array?) — that path is what the client will read for live free spaces.",
+              flush=True)
 
     print("\n>>> DONE. Calibrate from this run: PARKING_CATEGORY (P1), _extract_parking shape + "
           "distance presence (P2), PARKING_FREE_VALUE / realtime availability (P3). Capture the "
