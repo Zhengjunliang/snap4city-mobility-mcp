@@ -37,15 +37,16 @@ from snap4city_mobility_mcp.llm import (
 )
 from snap4city_mobility_mcp.mcp_tools import (
     PARKING_CATEGORY,
-    PARKING_FREE_VALUE,
     PARKING_MAX,
     PARKING_RADIUS_KM,
+    PARKING_REALTIME_FROMTIME,
     _build_config,
     _label_tokens,
     _local_config,
     exec_tool,
     group_arc_legs,
     parse_parking_features,
+    read_parking_realtime,
     slim_result_for_llm,
 )
 from snap4city_mobility_mcp.tpl import (
@@ -138,12 +139,12 @@ was not recognized), ask the user to pick one of those agencies.
 lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
 are not available right now — NEVER invent departure times. If the requested stop was not \
 found on the line, say so and suggest checking the stop name or the line.
-- If RESULTS holds a `service_search_near_gps_position` item (car parks near the \
-destination, present only for car trips): briefly point the driver to the nearest car \
-parks by name. If an item has a `free_spaces` count, give it and prefer the ones with \
-more free spaces; if the items carry NO free-space count, just list the nearest few and \
-say the live availability is not available right now — never invent a free-space number. \
-If there is no such item, do not mention parking at all.
+- If RESULTS has a `parking` list (car parks near the destination, present only for car \
+trips): briefly point the driver to the nearest car parks by name. Each entry may have \
+`free_spaces` (live free places) and `total_spaces`; when `free_spaces` is present give it \
+(e.g. "31 posti liberi") and prefer the ones with more; for entries whose `free_spaces` is \
+null say the live availability is not available for that one — never invent a number. If \
+`parking` is absent or empty, do not mention parking at all.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
 public-transport discovery questions (lines, routes, stops, timetables) and invite \
@@ -214,6 +215,7 @@ class AdvisorState(TypedDict, total=False):
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
     endpoints: dict[str, Any]  # precise geocoded {origin, destination} {lat,lng} for the route
+    parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
     response: dict[str, Any]  # widget JSON assembled by respond
 
 
@@ -393,15 +395,14 @@ async def execute(
     async def _parking() -> dict[str, Any]:
         # Find car parks near the destination (called only when a car route is in play — the
         # feature is car-specific). Runs concurrently with routing (one flat gather below) so
-        # it adds no wall-clock when routing is the long pole. Asks for free-space counts
-        # inline via `values=` (one call, no per-spot service_info). Returns the audit entry.
+        # it adds no wall-clock when routing is the long pole. The search has no free-spaces;
+        # the live count is fetched per-spot afterwards (_enrich_parking). Returns the entry.
         p_args = {
             "latitude": dest[1],
             "longitude": dest[0],
             "categories": PARKING_CATEGORY,
             "maxdistance": PARKING_RADIUS_KM,
             "maxresults": PARKING_MAX * 3,
-            "values": PARKING_FREE_VALUE,
         }
         result = await exec_tool(client, "service_search_near_gps_position", p_args)
         if logger.isEnabledFor(logging.DEBUG):
@@ -449,8 +450,14 @@ async def execute(
 
     # Parking entry goes after every routing entry so _extract_data (routing-only) is
     # unaffected and _extract_parking finds it deterministically.
+    parking: list[dict[str, Any]] = []
     if parking_entry is not None:
         results.append(parking_entry)
+        # Build the nearest-N list (parse + Haversine distance + sort), then enrich each with
+        # its live free-spaces (service_info_dev per spot, concurrently).
+        spots = _extract_parking(results, {"lat": dest[1], "lng": dest[0]})
+        if spots:
+            parking = await _enrich_parking(client, spots)
 
     # Surface the precise geocoded endpoints (origin/dest are [lng, lat]) so the front-end
     # pins markers on the real civic address, not on the routing service's road-snapped WKT
@@ -459,7 +466,44 @@ async def execute(
         "origin": {"lat": origin[1], "lng": origin[0]},
         "destination": {"lat": dest[1], "lng": dest[0]},
     }
-    return {"tool_results": results, "unsupported": False, "endpoints": endpoints}
+    return {
+        "tool_results": results,
+        "unsupported": False,
+        "endpoints": endpoints,
+        "parking": parking,
+    }
+
+
+async def _enrich_parking(
+    client: Client, spots: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fill each car park's live free/total spaces via service_info_dev (concurrent, one per
+    spot), then re-sort so spots with known availability come first (most free first), the
+    rest by distance. Plain POI car parks have no realtime → free stays None (degraded
+    display). The enrichment calls are NOT added to the audit (internal, not LLM-facing)."""
+
+    async def one(spot: dict[str, Any]) -> dict[str, Any]:
+        if not spot.get("uri"):
+            return spot
+        res = await exec_tool(
+            client, "service_info_dev",
+            {"serviceuri": spot["uri"], "fromtime": PARKING_REALTIME_FROMTIME},
+        )
+        rt = read_parking_realtime(res)
+        if rt["free_spaces"] is not None:
+            spot["free_spaces"] = rt["free_spaces"]
+        if rt["total_spaces"] is not None:
+            spot["total_spaces"] = rt["total_spaces"]
+        return spot
+
+    enriched = await asyncio.gather(*(one(s) for s in spots))
+
+    def _key(s: dict[str, Any]) -> tuple[bool, float, float]:
+        free = s.get("free_spaces")
+        dist = s.get("distance_km")
+        return (free is None, -(free or 0), dist if dist is not None else float("inf"))
+
+    return sorted(enriched, key=_key)
 
 
 def _routetype_of(entry: dict[str, Any]) -> str | None:
@@ -757,14 +801,14 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     if intent == "route" and data.get("routes") and endpoints:
         data["origin"] = endpoints.get("origin")
         data["destination"] = endpoints.get("destination")
-    # Free car parks near the destination (car routes). Injected independently of
-    # data["routes"] so it still shows when the car route itself came back empty (ZTL/L8) —
-    # "couldn't drive there, but here's parking nearby". data.parking is consumed by our own
-    # front-end (like data.origin/destination, L32), not the referente widget contract (rule 8).
-    if intent == "route":
-        parking = _extract_parking(results, endpoints.get("destination"))
-        if parking:
-            data["parking"] = parking
+    # Free car parks near the destination (car routes), built + enriched in execute. Injected
+    # independently of data["routes"] so it still shows when the car route itself came back
+    # empty (ZTL/L8) — "couldn't drive there, but here's parking nearby". data.parking is
+    # consumed by our own front-end (like data.origin/destination, L32), not the referente
+    # widget contract (rule 8).
+    parking = state.get("parking")
+    if intent == "route" and parking:
+        data["parking"] = parking
     # An intent execute refused means slot extraction left a required slot blank
     # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.
@@ -782,6 +826,14 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     # here is [history..., current user]; the assistant turn isn't appended yet.
     is_followup = any(m.get("role") == "assistant" for m in messages)
     view = _results_view(results, unsupported=unsupported, missing=missing)
+    # Surface the enriched car parks (name + distance + live free-spaces) to the LLM so it can
+    # name the nearest free ones; the search slim in `results` has no free count.
+    if parking and isinstance(view, dict):
+        view["parking"] = [
+            {"name": p.get("name"), "distance_km": p.get("distance_km"),
+             "free_spaces": p.get("free_spaces"), "total_spaces": p.get("total_spaces")}
+            for p in parking
+        ]
     answer: str | None = None
     try:
         resp = await llm.achat(

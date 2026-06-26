@@ -228,9 +228,12 @@ $("<div>").addClass("ph").text("Parcheggi vicino alla destinazione:").appendTo($
 parking.forEach(function (p) {
 var dist = (typeof p.distance_km === "number") ? (Math.round(p.distance_km * 1000) + " m") : "";
 var hasFree = (p.free_spaces !== null && p.free_spaces !== undefined);
+var freeTxt = hasFree
+? (p.free_spaces + (typeof p.total_spaces === "number" ? "/" + p.total_spaces : "") + " liberi")
+: "post. n/d";
 var $row = $("<div>").addClass("pi");
 $("<span>").addClass("pn").text((p.name || "Parcheggio") + (dist ? " · " + dist : "")).appendTo($row);
-$("<span>").addClass("pf" + (hasFree ? "" : " na")).text(hasFree ? (p.free_spaces + " liberi") : "post. n/d").appendTo($row);
+$("<span>").addClass("pf" + (hasFree ? "" : " na")).text(freeTxt).appendTo($row);
 $m.append($row);
 });
 $("#advChat").append($m);

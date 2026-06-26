@@ -57,6 +57,7 @@ EXPOSED_TOOLS = (
     "coordinates_to_address",  # reverse geocode (GPS point -> address); foundation for near-me
     "routing",
     "service_search_near_gps_position",  # find car parks near the destination (car routes)
+    "service_info_dev",  # latest realtime free-spaces for a car park (serviceUri + time window)
     "tpl_agencies",
     "tpl_lines",
     "tpl_routes_by_line",
@@ -65,18 +66,17 @@ EXPOSED_TOOLS = (
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
-# Parking discovery (car routes): search car parks near the destination. Calibrated from
-# scripts/probe_parking.py on the JupyterHub (2026-06-26):
-# - PARKING_CATEGORY="Car_park" CONFIRMED (returns the city's car parks, serviceType
-#   "TransferServiceAndRenting_Car_park", tipo "Car_park").
-# - Realtime free-spaces is NOT loaded server-side: parking `realtimeAttributes`/`realtime`
-#   come back {} (lessons L21/L22), so free_spaces is None in practice and the feature shows
-#   locations only (the agreed degraded mode). PARKING_FREE_VALUE / the `values=` request stay
-#   so occupancy surfaces automatically if the backend starts loading it.
+# Parking discovery (car routes): search car parks near the destination, then read live
+# free-spaces per spot. Calibrated from scripts/probe_parking.py on the JupyterHub (2026-06-26):
+# - PARKING_CATEGORY="Car_park" CONFIRMED (serviceType "TransferServiceAndRenting_Car_park").
+# - The search result carries NO free-spaces; the live count is on the orion/IoT car-park
+#   entities and is fetched per-spot via service_info_dev, whose `realtime.results.bindings`
+#   (newest first) carry freeParkingLots/capacity as string values (read_parking_realtime).
+#   Plain POI car parks have no realtime → free stays None (the agreed degraded display).
 PARKING_CATEGORY = "Car_park"  # probe-confirmed (2026-06-26)
-PARKING_FREE_VALUE = "freeParking"  # best-guess value name; realtime empty server-side for now
 PARKING_RADIUS_KM = 0.5
 PARKING_MAX = 5
+PARKING_REALTIME_FROMTIME = "1-hour"  # service_info_dev window; bindings[0] is the latest reading
 
 
 async def _build_config() -> dict[str, Any]:
@@ -424,9 +424,35 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
     return legs
 
 
-# Property keys that might carry a parking's free-space count, tried in order. The real one
-# is probe-calibrated (PARKING_FREE_VALUE leads); the rest are fallbacks for robustness.
-_PARKING_FREE_KEYS = (PARKING_FREE_VALUE, "freeParking", "free", "available", "freeSpaces", "occupancy")
+# Property keys that might carry a parking's free-space count inline, tried in order. The
+# live value usually comes from read_parking_realtime (service_info_dev); these only catch an
+# inline count if the search ever starts returning one.
+_PARKING_FREE_KEYS = ("freeParkingLots", "freeParking", "free", "available", "freeSpaces")
+
+
+def read_parking_realtime(result: Any) -> dict[str, int | None]:
+    """Latest free/total spaces from a service_info_dev response for a car park.
+
+    Shape (probe_parking.py, 2026-06-26): result["realtime"]["results"]["bindings"] is a
+    list newest-first; bindings[0] carries {"freeParkingLots": {"value": "31"},
+    "capacity": {"value": "202"}, ...} as string values. Returns {"free_spaces", "total_spaces"}
+    with None when realtime is absent (plain POI car parks) or unparseable."""
+    out: dict[str, int | None] = {"free_spaces": None, "total_spaces": None}
+    if not isinstance(result, dict):
+        return out
+    rt = result.get("realtime")
+    binds = (rt.get("results") or {}).get("bindings") if isinstance(rt, dict) else None
+    if not isinstance(binds, list) or not binds or not isinstance(binds[0], dict):
+        return out
+    latest = binds[0]
+    for key, field in (("freeParkingLots", "free_spaces"), ("capacity", "total_spaces")):
+        cell = latest.get(key)
+        val = cell.get("value") if isinstance(cell, dict) else None
+        try:
+            out[field] = int(float(val))
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def _find_feature_list(obj: Any) -> list | None:

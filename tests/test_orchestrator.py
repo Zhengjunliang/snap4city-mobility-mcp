@@ -23,9 +23,9 @@ from snap4city_mobility_mcp.orchestrator import (
 
 
 def _parking_search(*spots) -> dict:
-    """service_search_near_gps_position envelope from (name, lng, lat, free) tuples, in the
-    LIVE shape probe_parking.py captured: {"result": [[uris], {"Services": {"features": [...]}}]}.
-    free may be None (realtime not loaded — the degraded case observed on the real backend)."""
+    """service_search_near_gps_position envelope from (name, lng, lat) tuples, in the LIVE
+    shape probe_parking.py captured: {"result": [[uris], {"Services": {"features": [...]}}]}.
+    The search carries NO free-spaces (that comes per-spot from service_info_dev)."""
     features = [
         {
             "type": "Feature",
@@ -36,13 +36,19 @@ def _parking_search(*spots) -> dict:
                 "serviceType": "TransferServiceAndRenting_Car_park",
                 "tipo": "Car_park",
                 "distance": "0.1",
-                "realtimeAttributes": ({"freeParking": free} if free is not None else {}),
             },
         }
-        for (name, lng, lat, free) in spots
+        for (name, lng, lat) in spots
     ]
     uris = [f["properties"]["serviceUri"] for f in features]
     return {"result": [uris, {"Services": {"features": features}}]}
+
+
+def _parking_realtime(free, capacity=200) -> dict:
+    """service_info_dev realtime response: latest binding carries free/total as strings."""
+    return {"realtime": {"head": {"vars": ["freeParkingLots", "capacity"]}, "results": {"bindings": [
+        {"freeParkingLots": {"value": str(free)}, "capacity": {"value": str(capacity)}},
+    ]}}}
 
 
 def _slots_response(arguments: str) -> dict:
@@ -222,14 +228,15 @@ async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result
         make_result(structured=stale),                               # car #1
         make_result(structured=stale),                               # car #2
         make_result(structured=stale),                               # car #3
-        make_result(structured=_parking_search(("P1", 11.26, 43.76, 20))),  # parking (car triggers it)
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car triggers it)
+        make_result(structured=_parking_realtime(20, 100)),          # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
     assert len([n for n, _ in client.calls if n == "routing"]) == 3  # ladder only, no 4th probe
     assert "route_error" in _extract_data(out["tool_results"])
     # car route failed but parking near the destination still came back (S4: independent).
-    assert _extract_parking(out["tool_results"], {"lat": 43.76, "lng": 11.26})[0]["name"] == "P1"
+    assert out["parking"][0]["name"] == "P1" and out["parking"][0]["free_spaces"] == 20
 
 
 # --- _extract_data -----------------------------------------------------------
@@ -288,7 +295,8 @@ async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_res
         make_result(structured=_journey()),                          # foot_shortest
         make_result(structured=_journey()),                          # car
         make_result(structured=_journey()),                          # public_transport
-        make_result(structured=_parking_search(("P1", 11.26, 43.76, 5))),  # parking (car in modes)
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
+        make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": ""}
     out = await execute({"slots": slots}, client=client)
@@ -296,6 +304,7 @@ async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_res
     assert routetypes == ["foot_shortest", "car", "public_transport"]
     # car is among the modes → the parking entry is appended after all routing entries.
     assert out["tool_results"][-1]["name"] == "service_search_near_gps_position"
+    assert out["parking"][0]["free_spaces"] == 5
 
 
 def test_extract_data_collects_three_modes():
@@ -319,66 +328,84 @@ def _parking_entry(*spots) -> dict:
     return {"name": "service_search_near_gps_position", "result": _parking_search(*spots)}
 
 
-def test_extract_parking_sorts_free_then_distance():
-    """Known free-spaces first (most free first); distance breaks ties; computed from dest."""
-    dest = {"lat": 43.770, "lng": 11.250}
-    # A: far, 30 free; B: near, 10 free; C: nearest, no realtime.
-    results = [_parking_entry(
-        ("A", 11.260, 43.780, 30),
-        ("B", 11.251, 43.771, 10),
-        ("C", 11.2502, 43.7701, None),
-    )]
-    parking = _extract_parking(results, dest)
-    assert [p["name"] for p in parking] == ["A", "B", "C"]  # free desc, then the unknown last
-    assert parking[0]["free_spaces"] == 30
-    assert parking[2]["free_spaces"] is None
-    # distance computed (Haversine) from dest, not taken from the envelope
-    assert all(isinstance(p["distance_km"], float) for p in parking)
-    assert parking[2]["distance_km"] < parking[0]["distance_km"]  # C is nearest
-
-
-def test_extract_parking_degraded_sorts_by_distance():
-    """Realtime not loaded (all free None, the agreed fallback) → nearest-first."""
+def test_extract_parking_distance_sort_and_haversine():
+    """The search has no free-spaces, so _extract_parking sorts by distance (Haversine from
+    dest, not the envelope's own distance field) and leaves free_spaces None."""
     dest = {"lat": 43.770, "lng": 11.250}
     results = [_parking_entry(
-        ("far", 11.270, 43.790, None),
-        ("near", 11.2505, 43.7705, None),
+        ("far", 11.270, 43.790),
+        ("near", 11.2505, 43.7705),
     )]
     parking = _extract_parking(results, dest)
     assert [p["name"] for p in parking] == ["near", "far"]
     assert all(p["free_spaces"] is None for p in parking)
+    assert all(isinstance(p["distance_km"], float) for p in parking)
+    assert parking[0]["distance_km"] < parking[1]["distance_km"]
 
 
 def test_extract_parking_caps_and_handles_empty():
     dest = {"lat": 43.77, "lng": 11.25}
-    many = _parking_entry(*[(f"P{i}", 11.25, 43.77 + i * 0.001, i) for i in range(12)])
+    many = _parking_entry(*[(f"P{i}", 11.25, 43.77 + i * 0.001) for i in range(12)])
     assert len(_extract_parking([many], dest)) == mcp_tools.PARKING_MAX
     assert _extract_parking([_parking_entry()], dest) is None      # empty features
     assert _extract_parking([{"name": "routing", "result": {}}], dest) is None  # no parking entry
 
 
 def test_parse_parking_features_reads_nested_service_envelope():
-    """Defensive: the flattened-vs-grouped envelope is probe-uncalibrated, so the parser
-    also reads a nested Service.features shape and alternate free-value keys."""
+    """Defensive: the parser reads the live result[1].Services nesting and a Service wrapper."""
     nested = {"Service": {"features": [
         {"geometry": {"coordinates": [11.25, 43.77]},
-         "properties": {"serviceName": "Garage X", "serviceuri": "http://x", "free": "7"}},
+         "properties": {"serviceName": "Garage X", "serviceuri": "http://x"}},
     ]}}
     spots = mcp_tools.parse_parking_features(nested)
-    assert spots == [{"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": 7}]
+    assert spots == [{"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": None}]
     assert mcp_tools.parse_parking_features({"error": "boom"}) == []
+    # the live envelope shape (result -> [uris, {Services: {features}}])
+    live = _parking_search(("P", 11.25, 43.77))
+    assert mcp_tools.parse_parking_features(live)[0]["name"] == "P"
 
 
-def test_slim_parking_compacts_to_name_and_free():
-    slim = mcp_tools.slim_result_for_llm(
-        "service_search_near_gps_position",
-        _parking_search(("P1", 11.25, 43.77, 12), ("P2", 11.26, 43.78, None)),
-    )
-    assert slim["count"] == 2
-    assert slim["parking"] == [
-        {"name": "P1", "free_spaces": 12},
-        {"name": "P2", "free_spaces": None},
+def test_read_parking_realtime():
+    """Latest free/total from a service_info_dev realtime binding; absent → None."""
+    rt = mcp_tools.read_parking_realtime(_parking_realtime(31, 202))
+    assert rt == {"free_spaces": 31, "total_spaces": 202}
+    assert mcp_tools.read_parking_realtime({"realtime": {}}) == {"free_spaces": None, "total_spaces": None}
+    assert mcp_tools.read_parking_realtime({"error": "x"}) == {"free_spaces": None, "total_spaces": None}
+
+
+async def test_enrich_parking_fills_free_and_resorts(make_client, make_result):
+    """_enrich_parking calls service_info_dev per spot, fills live free-spaces, and re-sorts
+    so a farther parking with known free outranks a nearer one without realtime."""
+    from snap4city_mobility_mcp.orchestrator import _enrich_parking
+    spots = [
+        {"name": "near_nodata", "uri": "http://near", "lat": 43.771, "lng": 11.250, "distance_km": 0.1, "free_spaces": None},
+        {"name": "far_30free", "uri": "http://far", "lat": 43.780, "lng": 11.260, "distance_km": 1.2, "free_spaces": None},
     ]
+    client = make_client([
+        make_result(structured={"realtime": {}}),              # near → no realtime
+        make_result(structured=_parking_realtime(30, 200)),    # far → 30 free
+    ])
+    out = await _enrich_parking(client, spots)
+    assert out[0]["name"] == "far_30free" and out[0]["free_spaces"] == 30 and out[0]["total_spaces"] == 200
+    assert out[1]["name"] == "near_nodata" and out[1]["free_spaces"] is None
+
+
+async def test_execute_car_enriches_parking(make_client, make_result):
+    """Car route → search car parks, then enrich each with live free-spaces via service_info_dev."""
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey()),                          # routing (car)
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search
+        make_result(structured=_parking_realtime(42, 100)),          # P1 realtime enrichment
+    ])
+    slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert out["parking"][0]["name"] == "P1"
+    assert out["parking"][0]["free_spaces"] == 42 and out["parking"][0]["total_spaces"] == 100
+    # the enrichment call hit service_info_dev but is NOT in the audit (internal only)
+    assert any(n == "service_info_dev" for n, _ in client.calls)
+    assert not any(e["name"] == "service_info_dev" for e in out["tool_results"])
 
 
 async def test_execute_foot_only_skips_parking(make_client, make_result):
@@ -391,7 +418,7 @@ async def test_execute_foot_only_skips_parking(make_client, make_result):
     slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "foot_shortest"}
     out = await execute({"slots": slots}, client=client)
     assert not any(n == "service_search_near_gps_position" for n, _ in client.calls)
-    assert _extract_parking(out["tool_results"], {"lat": 43.76, "lng": 11.26}) is None
+    assert out["parking"] == []
 
 
 def test_extract_data_drops_foot_only_pt():
@@ -436,7 +463,7 @@ async def test_respond_uses_llm_answer(make_llm):
 
 
 async def test_respond_injects_parking_into_data(make_llm):
-    """A car route with a parking search → data.parking carries the nearest spots."""
+    """A car route with parking (built in execute, carried on state) → data.parking present."""
     llm = make_llm([_text_response("In auto 3.5 km. Parcheggio P1 (20 liberi) a 80 m.")])
     state = {
         "intent": "route",
@@ -445,9 +472,9 @@ async def test_respond_injects_parking_into_data(make_llm):
         "tool_results": [
             {"name": "routing", "args": json.dumps({"routetype": "car"}),
              "result": {"journey": _journey()["journey"]}},
-            {"name": "service_search_near_gps_position",
-             "result": _parking_search(("P1", 11.26, 43.76, 20))},
         ],
+        "parking": [{"name": "P1", "lat": 43.76, "lng": 11.26, "uri": "http://p1",
+                     "distance_km": 0.08, "free_spaces": 20, "total_spaces": 100}],
         "unsupported": False,
     }
     out = await respond(state, llm=llm)
@@ -464,9 +491,9 @@ async def test_respond_parking_when_car_route_empty(make_llm):
         "endpoints": {"origin": {"lat": 43.77, "lng": 11.24}, "destination": {"lat": 43.76, "lng": 11.26}},
         "tool_results": [
             {"name": "routing", "args": json.dumps({"routetype": "car"}), "result": {"error": ""}},
-            {"name": "service_search_near_gps_position",
-             "result": _parking_search(("P1", 11.26, 43.76, None))},
         ],
+        "parking": [{"name": "P1", "lat": 43.76, "lng": 11.26, "uri": "http://p1",
+                     "distance_km": 0.08, "free_spaces": None}],
         "unsupported": False,
     }
     out = await respond(state, llm=llm)
