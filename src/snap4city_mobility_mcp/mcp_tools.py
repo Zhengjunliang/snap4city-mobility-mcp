@@ -65,12 +65,16 @@ EXPOSED_TOOLS = (
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
-# Parking discovery (car routes): search car parks near the destination, ask for free-space
-# counts inline via the search `values=` param (one call, no per-spot service_info). The
-# category and value names are probe-calibrated — run scripts/probe_parking.py on the
-# JupyterHub to confirm them; the defaults below are best guesses until then.
-PARKING_CATEGORY = "Car_park"  # probe-calibrated (Stage 0); default is a guess
-PARKING_FREE_VALUE = "freeParking"  # probe-calibrated (Stage 0); default is a guess
+# Parking discovery (car routes): search car parks near the destination. Calibrated from
+# scripts/probe_parking.py on the JupyterHub (2026-06-26):
+# - PARKING_CATEGORY="Car_park" CONFIRMED (returns the city's car parks, serviceType
+#   "TransferServiceAndRenting_Car_park", tipo "Car_park").
+# - Realtime free-spaces is NOT loaded server-side: parking `realtimeAttributes`/`realtime`
+#   come back {} (lessons L21/L22), so free_spaces is None in practice and the feature shows
+#   locations only (the agreed degraded mode). PARKING_FREE_VALUE / the `values=` request stay
+#   so occupancy surfaces automatically if the backend starts loading it.
+PARKING_CATEGORY = "Car_park"  # probe-confirmed (2026-06-26)
+PARKING_FREE_VALUE = "freeParking"  # best-guess value name; realtime empty server-side for now
 PARKING_RADIUS_KM = 0.5
 PARKING_MAX = 5
 
@@ -425,22 +429,46 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
 _PARKING_FREE_KEYS = (PARKING_FREE_VALUE, "freeParking", "free", "available", "freeSpaces", "occupancy")
 
 
+def _find_feature_list(obj: Any) -> list | None:
+    """Locate the GeoJSON features list inside a service-search result of unknown nesting.
+
+    The live envelope (probe_parking.py, 2026-06-26) is
+    {"result": [[uri, ...], {"Services": {"features": [...]}}]} — a 2-element list whose
+    second item nests the features under "Services". We also accept a direct `features`,
+    a `Service`/`Services` wrapper, or a `result` dict, so the parser survives shape drift."""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("features"), list):
+        return obj["features"]
+    for k in ("Services", "Service"):
+        v = obj.get(k)
+        if isinstance(v, dict) and isinstance(v.get("features"), list):
+            return v["features"]
+    inner = obj.get("result")
+    if isinstance(inner, list):
+        for el in inner:
+            found = _find_feature_list(el)
+            if found is not None:
+                return found
+    elif isinstance(inner, dict):
+        return _find_feature_list(inner)
+    return None
+
+
 def parse_parking_features(result: Any) -> list[dict[str, Any]]:
     """Normalize a service_search_near_gps_position result into parking dicts.
 
     The backend envelope is "an array of URIs, raw grouped GeoJSON, and flattened GeoJSON"
-    (probe-native-tools.json) — the exact nesting is probe-calibrated, so this reads the
-    common shapes defensively: a top-level `features` list, a nested `Service.features`
-    list, or a bare list. Each item yields {name, lat, lng, uri, free_spaces} with missing
-    fields as None (distance is computed later by the caller, which knows the destination).
-    Returns [] on error / unrecognized shape."""
+    (probe-native-tools.json); the live shape nests the features under result[1].Services
+    (see _find_feature_list). Each item yields {name, lat, lng, uri, free_spaces} with
+    missing fields as None — realtime free-spaces is currently empty server-side (parking
+    `realtimeAttributes`/`realtime` come back {}, lessons L21/L22), so free_spaces is None
+    in practice and the feature degrades to locations-only; the key lookup stays for when
+    the backend starts loading occupancy. Distance is computed later by the caller (which
+    knows the destination). Returns [] on error / unrecognized shape."""
     if not isinstance(result, dict) or "error" in result:
         return []
-    feats: Any = None
-    if isinstance(result.get("features"), list):
-        feats = result["features"]
-    elif isinstance(result.get("Service"), dict) and isinstance(result["Service"].get("features"), list):
-        feats = result["Service"]["features"]
+    feats = _find_feature_list(result)
     if not isinstance(feats, list):
         return []
     out: list[dict[str, Any]] = []
@@ -456,14 +484,21 @@ def parse_parking_features(result: Any) -> list[dict[str, Any]]:
                 lng, lat = float(coords[0]), float(coords[1])
             except (TypeError, ValueError):
                 lat = lng = None
+        # Free spaces may live directly on properties or, once the backend loads occupancy,
+        # inside realtimeAttributes (currently {} — L21/L22). Check both.
+        rt = props.get("realtimeAttributes")
+        sources = [props, rt] if isinstance(rt, dict) else [props]
         free = None
-        for k in _PARKING_FREE_KEYS:
-            v = props.get(k)
-            if v is not None:
-                try:
-                    free = int(float(v))
-                except (TypeError, ValueError):
-                    free = None
+        for src in sources:
+            for k in _PARKING_FREE_KEYS:
+                v = src.get(k)
+                if v is not None:
+                    try:
+                        free = int(float(v))
+                    except (TypeError, ValueError):
+                        free = None
+                    break
+            if free is not None:
                 break
         out.append({
             "name": props.get("name") or props.get("serviceName") or props.get("address"),

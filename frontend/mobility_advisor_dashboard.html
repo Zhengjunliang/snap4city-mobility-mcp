@@ -81,13 +81,16 @@ var TRAJ_IDS = { foot: "advisorRoute_foot", car: "advisorRoute_car", bus: "advis
 var ICON_BASE = "https://www.snap4city.org/snap4cityWebAppTuscany/img/mapicons/ita/";
 var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "LastStopOfRoute.png" };
 // Parking pins (car routes): the widgetMap "addSelectorPin" event plots a service by its
-// km4city serviceUri (queryType "Default") - Snap4City's own code fires one per pin in a loop,
-// so we do the same (one event per car park). REAL-MACHINE NOTE (L30): the exact passedData
-// fields + the SuperServiceMap base + any clear-pins event must be confirmed against a working
-// PA.php payload via DevTools; until then this is the documented shape, wrapped in try/catch so
-// a mismatch never breaks the chat. The parking list in the chat always renders regardless.
-var KB_SUPERSERVICEMAP = "https://www.disit.org/superservicemap/api/v1/";
-var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square" };
+// km4city serviceUri - Snap4City's own code fires one per pin in a loop, so we do the same
+// (one event per car park). The `query` is a ServiceMap API URL; the docs show an individual
+// device is selected with "?serviceUri=<URI>" (a category query "?categories=Car_park" would
+// plot ALL of them, which we avoid). Base = the public ServiceMap (same as mcp_server.py).
+// REAL-MACHINE NOTE (L30): addSelectorPin fields are documented; removeSelectorPin (clear) is
+// the documented mirror but its exact passedData is unconfirmed - capture from the PA.php
+// dashboard via DevTools if pins don't clear. All wrapped in try/catch so a mismatch never
+// breaks the chat; the parking list always renders regardless.
+var SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1/";
+var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", display: "pins", queryType: "Default" };
 // One vivid color per vehicle (foot green, car blue, bus orange). Every drawn route uses
 // its mode color; there is no primary/alternate dimming. The color value fed to a leg MUST
 // be an array - a single string makes the line invisible. (Line width is left alone: the
@@ -240,12 +243,13 @@ $("#advChat").scrollTop($("#advChat")[0].scrollHeight);
 // list above is never affected if the widget balks. lastParkingUris lets us clear last turn's
 // pins (a foot follow-up must wipe the previous car parking pins).
 var lastParkingUris = [];
+function parkQuery(uri) { return SERVICEMAP_BASE + "?serviceUri=" + encodeURIComponent(uri); }
 function clearParkingPins() {
 try {
 lastParkingUris.forEach(function (uri) {
-trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { query: KB_SUPERSERVICEMAP + "?serviceUri=" + uri } });
+trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { query: parkQuery(uri), queryType: PARK_PIN.queryType } });
 });
-} catch (e) { /* unverified clear path (no remove event in widget source); ignore */ }
+} catch (e) { /* removeSelectorPin is the documented mirror but its passedData is unconfirmed; ignore */ }
 lastParkingUris = [];
 }
 function drawParkingPins(parking) {
@@ -255,9 +259,9 @@ try {
 parking.forEach(function (p) {
 if (!p.uri) return;
 trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
-query: KB_SUPERSERVICEMAP + "?serviceUri=" + p.uri, queryType: "Default",
+query: parkQuery(p.uri), queryType: PARK_PIN.queryType, display: PARK_PIN.display,
 desc: p.name || "Parcheggio", color1: PARK_PIN.color1, color2: PARK_PIN.color2,
-pinattr: PARK_PIN.pinattr, display: "pins"
+pinattr: PARK_PIN.pinattr
 } });
 lastParkingUris.push(p.uri);
 });

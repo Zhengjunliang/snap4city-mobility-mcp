@@ -142,24 +142,31 @@ async def main() -> None:
                     print("  head:", _full(retry)[:1500], flush=True)
                     break
 
-        # --- P3: realtime free-spaces on one parking -----------------------------------
-        print("\n=== P3: realtime free-spaces on a parking serviceUri ===", flush=True)
-        if parking_uris:
-            uri = parking_uris[0]
-            print(f"probe serviceUri: {uri}", flush=True)
+        # --- P3: realtime free-spaces -------------------------------------------------
+        # The plain Car_park POIs (e.g. GARAGE VERDI) carry NO realtime; the live free-space
+        # data lives on the IoT sensor entities (iot/orionUNIFI/... — the PA.php dashboard
+        # shows CarParkParterre/Beccaria/S.Ambrogio with live SingleContent + TimeTrend
+        # widgets). So probe the IoT/orion URIs FIRST, then fall back to the rest.
+        print("\n=== P3: realtime free-spaces (IoT/orion parkings first) ===", flush=True)
+        ordered = ([u for u in parking_uris if ("iot" in u.lower() or "orion" in u.lower())]
+                   + [u for u in parking_uris if not ("iot" in u.lower() or "orion" in u.lower())])
+        any_free = False
+        for uri in ordered[:6]:
             info = await _call(client, "service_info", {"serviceuri": uri})
-            print("service_info FULL (first 3000):", _full(info)[:3000], flush=True)
-            dev = await _call(client, "service_info_dev", {
-                "serviceuri": uri, "fromtime": "1-hour",
-            })
-            print("service_info_dev (fromtime=1-hour) FULL (first 3000):", _full(dev)[:3000], flush=True)
-            blob = (_full(info) + _full(dev)).lower()
-            seen = [v for v in CANDIDATE_FREE_VALUES if v.lower() in blob]
-            print(f"\n>>> candidate free-space value names actually present: {seen or 'NONE'} "
-                  f"→ set PARKING_FREE_VALUE accordingly; NONE ⇒ realtime not loaded, "
-                  f"degrade to locations-only (agreed fallback).", flush=True)
-        else:
+            blob = _full(info)
+            # realtimeAttributes / realtime carry the live values when loaded.
+            has_rt = ('"realtimeattributes": {}' not in blob.lower()
+                      and ("realtimeattribute" in blob.lower() or '"realtime": {"' in blob.lower()))
+            seen = [v for v in CANDIDATE_FREE_VALUES if v.lower() in blob.lower()]
+            print(f"- {uri}\n    realtime? {has_rt}  free-values seen: {seen or 'NONE'}", flush=True)
+            if has_rt or seen:
+                any_free = True
+                print("    service_info FULL (first 2500):", blob[:2500], flush=True)
+        if not parking_uris:
             print("(no parking serviceUri resolved — check P1 category name / P2 radius)", flush=True)
+        print(f"\n>>> realtime free-spaces available on SOME parking? {any_free}. If yes, note the "
+              f"value name + which URI kind (iot/orion vs POI) → wire per-spot service_info for "
+              f"those; if no, degrade to locations-only (agreed fallback).", flush=True)
 
     print("\n>>> DONE. Calibrate from this run: PARKING_CATEGORY (P1), _extract_parking shape + "
           "distance presence (P2), PARKING_FREE_VALUE / realtime availability (P3). Capture the "

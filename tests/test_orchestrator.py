@@ -23,19 +23,26 @@ from snap4city_mobility_mcp.orchestrator import (
 
 
 def _parking_search(*spots) -> dict:
-    """service_search_near_gps_position envelope from (name, lng, lat, free) tuples.
-    free may be None (realtime not loaded — the degraded case)."""
-    return {"features": [
+    """service_search_near_gps_position envelope from (name, lng, lat, free) tuples, in the
+    LIVE shape probe_parking.py captured: {"result": [[uris], {"Services": {"features": [...]}}]}.
+    free may be None (realtime not loaded — the degraded case observed on the real backend)."""
+    features = [
         {
-            "geometry": {"coordinates": [lng, lat]},
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lng, lat]},
             "properties": {
                 "name": name,
                 "serviceUri": f"http://www.disit.org/km4city/resource/{name}",
-                **({"freeParking": free} if free is not None else {}),
+                "serviceType": "TransferServiceAndRenting_Car_park",
+                "tipo": "Car_park",
+                "distance": "0.1",
+                "realtimeAttributes": ({"freeParking": free} if free is not None else {}),
             },
         }
         for (name, lng, lat, free) in spots
-    ]}
+    ]
+    uris = [f["properties"]["serviceUri"] for f in features]
+    return {"result": [uris, {"Services": {"features": features}}]}
 
 
 def _slots_response(arguments: str) -> dict:
