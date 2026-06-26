@@ -201,6 +201,7 @@ class AdvisorState(TypedDict, total=False):
     slots: dict[str, Any]  # understand output (request_type, info_kind, intent, origin_text, ...)
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
+    endpoints: dict[str, Any]  # precise geocoded {origin, destination} {lat,lng} for the route
     response: dict[str, Any]  # widget JSON assembled by respond
 
 
@@ -406,7 +407,14 @@ async def execute(
             # they just stay absent from the routes, so the dashboard draws one less line.
             results.append(await _route(_FOOT_FALLBACK[m], attempts=1))
 
-    return {"tool_results": results, "unsupported": False}
+    # Surface the precise geocoded endpoints (origin/dest are [lng, lat]) so the front-end
+    # pins markers on the real civic address, not on the routing service's road-snapped WKT
+    # endpoint (which drifts ~27 m up the street). See docs/lessons.md.
+    endpoints = {
+        "origin": {"lat": origin[1], "lng": origin[0]},
+        "destination": {"lat": dest[1], "lng": dest[0]},
+    }
+    return {"tool_results": results, "unsupported": False, "endpoints": endpoints}
 
 
 def _routetype_of(entry: dict[str, Any]) -> str | None:
@@ -654,6 +662,12 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     # primary), read back from the routetype the route was computed with, so respond
     # adds nothing here. Pending referente confirmation of the widget data shape.
     data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
+    # Hand the precise geocoded endpoints to the front-end (route intent only) so it can pin
+    # the start/finish markers on the real address instead of the WKT road-snap point.
+    endpoints = state.get("endpoints") or {}
+    if intent == "route" and data.get("routes") and endpoints:
+        data["origin"] = endpoints.get("origin")
+        data["destination"] = endpoints.get("destination")
     # An intent execute refused means slot extraction left a required slot blank
     # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.

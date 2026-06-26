@@ -269,3 +269,32 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 ## 10. License
 
 TBD — academic project.
+
+---
+
+## 11. JupyterHub quick start (run order)
+
+Run from a **JupyterHub terminal** inside the `s4c` conda env (Python 3.11). Two long-running processes — start them in **two separate terminals**, the local MCP server first.
+
+**Terminal 1 — local geocode MCP server** (forward geocode, wraps public km4city ServiceMap, `docs/lessons.md` L29). Must be up before the bridge:
+
+```bash
+python -m snap4city_mobility_mcp.mcp_server
+```
+
+Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127.0.0.1:8020/mcp`). Routing / reverse geocode / `tpl_*` still go to the referente remote server.
+
+**Terminal 2 — advisor bridge (FastAPI)** (drives LLM + remote MCP server, dashboard 联动):
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8010
+```
+
+Self-check (separate terminal):
+
+```bash
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+```
+
+Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).
