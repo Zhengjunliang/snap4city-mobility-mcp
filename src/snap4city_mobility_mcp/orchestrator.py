@@ -22,6 +22,7 @@ llm.py. Runs end-to-end only on the Snap4City JupyterHub.
 import asyncio
 import json
 import logging
+import math
 from functools import partial
 from typing import Any, TypedDict
 
@@ -35,11 +36,16 @@ from snap4city_mobility_mcp.llm import (
     tool_calls,
 )
 from snap4city_mobility_mcp.mcp_tools import (
+    PARKING_CATEGORY,
+    PARKING_FREE_VALUE,
+    PARKING_MAX,
+    PARKING_RADIUS_KM,
     _build_config,
     _label_tokens,
     _local_config,
     exec_tool,
     group_arc_legs,
+    parse_parking_features,
     slim_result_for_llm,
 )
 from snap4city_mobility_mcp.tpl import (
@@ -132,6 +138,12 @@ was not recognized), ask the user to pick one of those agencies.
 lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
 are not available right now — NEVER invent departure times. If the requested stop was not \
 found on the line, say so and suggest checking the stop name or the line.
+- If RESULTS holds a `service_search_near_gps_position` item (car parks near the \
+destination, present only for car trips): briefly point the driver to the nearest car \
+parks by name. If an item has a `free_spaces` count, give it and prefer the ones with \
+more free spaces; if the items carry NO free-space count, just list the nearest few and \
+say the live availability is not available right now — never invent a free-space number. \
+If there is no such item, do not mention parking at all.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
 public-transport discovery questions (lines, routes, stops, timetables) and invite \
@@ -378,9 +390,37 @@ async def execute(
             )
         return {"name": "routing", "args": json.dumps(args), "result": result}
 
+    async def _parking() -> dict[str, Any]:
+        # Find car parks near the destination (called only when a car route is in play — the
+        # feature is car-specific). Runs concurrently with routing (one flat gather below) so
+        # it adds no wall-clock when routing is the long pole. Asks for free-space counts
+        # inline via `values=` (one call, no per-spot service_info). Returns the audit entry.
+        p_args = {
+            "latitude": dest[1],
+            "longitude": dest[0],
+            "categories": PARKING_CATEGORY,
+            "maxdistance": PARKING_RADIUS_KM,
+            "maxresults": PARKING_MAX * 3,
+            "values": PARKING_FREE_VALUE,
+        }
+        result = await exec_tool(client, "service_search_near_gps_position", p_args)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "tool service_search_near_gps_position %s -> %s",
+                p_args,
+                json.dumps(slim_result_for_llm("service_search_near_gps_position", result), ensure_ascii=False)[:500],
+            )
+        return {"name": "service_search_near_gps_position", "args": json.dumps(p_args), "result": result}
+
     # The modes are independent, so route them concurrently (wall-clock = the slowest one,
-    # not the sum). Results are appended in modes order to keep _extract_data deterministic.
-    primary = await asyncio.gather(*(_route(m) for m in modes))
+    # not the sum); parking (car only) runs alongside in the SAME flat gather, placed last so
+    # routing keeps its modes-order append (deterministic _extract_data) and the parking entry
+    # comes after. One flat gather (not nested) keeps the call order stable.
+    do_parking = "car" in modes
+    coros = [_route(m) for m in modes] + ([_parking()] if do_parking else [])
+    gathered = await asyncio.gather(*coros)
+    primary = gathered[: len(modes)]
+    parking_entry = gathered[len(modes)] if do_parking else None
     results.extend(primary)
     for m, entry in zip(modes, primary):
         routed = entry["result"]
@@ -406,6 +446,11 @@ async def execute(
             # other graph path, not the transient. car/PT failures get no fallback —
             # they just stay absent from the routes, so the dashboard draws one less line.
             results.append(await _route(_FOOT_FALLBACK[m], attempts=1))
+
+    # Parking entry goes after every routing entry so _extract_data (routing-only) is
+    # unaffected and _extract_parking finds it deterministically.
+    if parking_entry is not None:
+        results.append(parking_entry)
 
     # Surface the precise geocoded endpoints (origin/dest are [lng, lat]) so the front-end
     # pins markers on the real civic address, not on the routing service's road-snapped WKT
@@ -518,6 +563,50 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
         return {"route_error": route_error} if route_error else {}
     routes = sorted(by_vehicle.values(), key=_route_minutes)
     return {**routes[0], "routes": routes}
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in km between two lat/lng points."""
+    radius = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(a))
+
+
+def _extract_parking(
+    results: list[dict[str, Any]], dest: dict[str, Any] | None
+) -> list[dict[str, Any]] | None:
+    """Mine the parking search entry into the widget payload.
+
+    dest is the geocoded destination {"lat","lng"} (from the endpoints). Each spot gets a
+    Haversine distance from dest (the search envelope is not relied on for distance — units
+    are unverified, L-style probe discipline). Sort: spots with a known free-space count
+    first (most free first), then by distance; spots with unknown free (realtime not loaded,
+    the agreed degraded case) sort after, nearest first. Capped to PARKING_MAX. None when
+    there is no parking entry or it is empty/errored (route still returned without it)."""
+    for entry in results:
+        if entry.get("name") != "service_search_near_gps_position":
+            continue
+        spots = parse_parking_features(entry.get("result"))
+        if not spots:
+            return None
+        for s in spots:
+            if dest and s.get("lat") is not None and s.get("lng") is not None:
+                s["distance_km"] = round(
+                    _haversine_km(dest["lat"], dest["lng"], s["lat"], s["lng"]), 3
+                )
+            else:
+                s["distance_km"] = None
+
+        def _key(s: dict[str, Any]) -> tuple[bool, float, float]:
+            free = s.get("free_spaces")
+            dist = s.get("distance_km")
+            return (free is None, -(free or 0), dist if dist is not None else float("inf"))
+
+        spots.sort(key=_key)
+        return spots[:PARKING_MAX]
+    return None
 
 
 def _template_answer(
@@ -668,6 +757,14 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     if intent == "route" and data.get("routes") and endpoints:
         data["origin"] = endpoints.get("origin")
         data["destination"] = endpoints.get("destination")
+    # Free car parks near the destination (car routes). Injected independently of
+    # data["routes"] so it still shows when the car route itself came back empty (ZTL/L8) —
+    # "couldn't drive there, but here's parking nearby". data.parking is consumed by our own
+    # front-end (like data.origin/destination, L32), not the referente widget contract (rule 8).
+    if intent == "route":
+        parking = _extract_parking(results, endpoints.get("destination"))
+        if parking:
+            data["parking"] = parking
     # An intent execute refused means slot extraction left a required slot blank
     # (a place for route, line/stop for tpl). respond then asks for it instead of
     # claiming the request is unsupported.

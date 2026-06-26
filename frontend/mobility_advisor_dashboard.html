@@ -27,6 +27,10 @@ routes between them.
 Per-point `mode` is required and `type` must be foot/car/bus or the map crashes in
 addCustomTrajectoryToMap. (Feeding the full downsampled WKT as many waypoints + a
 drawMethod:"custom" also crashed it - 2 endpoints, no drawMethod, is the shape that works.)
+PARKING (car routes): data.parking lists free car parks near the destination; we show a compact
+list under the reply and plot each on the map via the widgetMap "addSelectorPin" event (one per
+serviceUri, Snap4City's own pin pattern). The pin payload + clear event are real-machine-calibrated
+against the PA.php parking dashboard (L30); the list always renders even if the pins balk.
 Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 -->
 <html lang="en">
@@ -46,6 +50,12 @@ html, body { height: 100%; margin: 0; }
 .adv #advInput { flex: 1; box-sizing: border-box; padding: 8px; border: none; border-radius: 4px; font-size: 13px; }
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
+.adv .msg.park { background: #1d3326; border: 1px solid #3a6b4a; }
+.adv .park .ph { font-weight: bold; margin-bottom: 4px; }
+.adv .park .pi { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.adv .park .pi .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adv .park .pi .pf { color: #7fe0a0; white-space: nowrap; }
+.adv .park .pi .pf.na { color: #9aa6b8; }
 </style>
 </head>
 <body>
@@ -70,6 +80,14 @@ var BRIDGE_BASE = "https://www.snap4city.org/jupyterhub/user/mobilityadvisor/pro
 var TRAJ_IDS = { foot: "advisorRoute_foot", car: "advisorRoute_car", bus: "advisorRoute_bus" };
 var ICON_BASE = "https://www.snap4city.org/snap4cityWebAppTuscany/img/mapicons/ita/";
 var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "LastStopOfRoute.png" };
+// Parking pins (car routes): the widgetMap "addSelectorPin" event plots a service by its
+// km4city serviceUri (queryType "Default") - Snap4City's own code fires one per pin in a loop,
+// so we do the same (one event per car park). REAL-MACHINE NOTE (L30): the exact passedData
+// fields + the SuperServiceMap base + any clear-pins event must be confirmed against a working
+// PA.php payload via DevTools; until then this is the documented shape, wrapped in try/catch so
+// a mismatch never breaks the chat. The parking list in the chat always renders regardless.
+var KB_SUPERSERVICEMAP = "https://www.disit.org/superservicemap/api/v1/";
+var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square" };
 // One vivid color per vehicle (foot green, car blue, bus orange). Every drawn route uses
 // its mode color; there is no primary/alternate dimming. The color value fed to a leg MUST
 // be an array - a single string makes the line invisible. (Line width is left alone: the
@@ -196,6 +214,55 @@ return buildTraj(route, color, origin, destination);
 });
 trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
 }
+// ---- Parking near the destination (car routes) --------------------------
+// Compact list under the reply: name + distance + free spaces ("post. n/d" when live
+// availability is not loaded server-side - the agreed degraded case). Always renders when
+// data.parking is present, independent of the map pins below.
+function renderParking(parking) {
+if (!parking || !parking.length) return;
+var $m = $("<div>").addClass("msg bot park");
+$("<div>").addClass("ph").text("Parcheggi vicino alla destinazione:").appendTo($m);
+parking.forEach(function (p) {
+var dist = (typeof p.distance_km === "number") ? (Math.round(p.distance_km * 1000) + " m") : "";
+var hasFree = (p.free_spaces !== null && p.free_spaces !== undefined);
+var $row = $("<div>").addClass("pi");
+$("<span>").addClass("pn").text((p.name || "Parcheggio") + (dist ? " · " + dist : "")).appendTo($row);
+$("<span>").addClass("pf" + (hasFree ? "" : " na")).text(hasFree ? (p.free_spaces + " liberi") : "post. n/d").appendTo($row);
+$m.append($row);
+});
+$("#advChat").append($m);
+$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
+}
+// Map pins via addSelectorPin (one event per car park, by serviceUri - Snap4City's own widget
+// loops one event per pin, so we do too). REAL-MACHINE NOTE (L30): the passedData fields, the
+// SuperServiceMap base, and the clear-pins event are the documented/likely shape but UNVERIFIED
+// against a live PA.php payload - confirm via DevTools. All wrapped in try/catch so the chat
+// list above is never affected if the widget balks. lastParkingUris lets us clear last turn's
+// pins (a foot follow-up must wipe the previous car parking pins).
+var lastParkingUris = [];
+function clearParkingPins() {
+try {
+lastParkingUris.forEach(function (uri) {
+trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { query: KB_SUPERSERVICEMAP + "?serviceUri=" + uri } });
+});
+} catch (e) { /* unverified clear path (no remove event in widget source); ignore */ }
+lastParkingUris = [];
+}
+function drawParkingPins(parking) {
+clearParkingPins();
+if (!parking || !parking.length) return;
+try {
+parking.forEach(function (p) {
+if (!p.uri) return;
+trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
+query: KB_SUPERSERVICEMAP + "?serviceUri=" + p.uri, queryType: "Default",
+desc: p.name || "Parcheggio", color1: PARK_PIN.color1, color2: PARK_PIN.color2,
+pinattr: PARK_PIN.pinattr, display: "pins"
+} });
+lastParkingUris.push(p.uri);
+});
+} catch (e) { /* L30: addSelectorPin shape unverified; chat list still shows parking */ }
+}
 // ---- Send a turn to the bridge ------------------------------------------
 function send() {
 var query = $("#advInput").val().trim();
@@ -222,6 +289,12 @@ if (routes.length) {
 try { drawRoutes(routes, data.origin, data.destination); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
 }
+// Parking (car routes). Clear last turn's pins unconditionally so a non-car follow-up wipes
+// them; then render the list + pins when present (independent of routes - parking shows even
+// if the car route itself came back empty).
+clearParkingPins();
+renderParking(data.parking);
+drawParkingPins(data.parking);
 }
 }).fail(function (xhr, status) {
 addMsg("✗ bridge non raggiungibile (" + status + "). Controlla BRIDGE_BASE / il bridge.", "err");

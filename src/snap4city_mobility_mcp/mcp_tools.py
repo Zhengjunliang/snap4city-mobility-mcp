@@ -56,6 +56,7 @@ EXPOSED_TOOLS = (
     "address_search_location",
     "coordinates_to_address",  # reverse geocode (GPS point -> address); foundation for near-me
     "routing",
+    "service_search_near_gps_position",  # find car parks near the destination (car routes)
     "tpl_agencies",
     "tpl_lines",
     "tpl_routes_by_line",
@@ -63,6 +64,15 @@ EXPOSED_TOOLS = (
     "tpl_stop_timeline",
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
+
+# Parking discovery (car routes): search car parks near the destination, ask for free-space
+# counts inline via the search `values=` param (one call, no per-spot service_info). The
+# category and value names are probe-calibrated — run scripts/probe_parking.py on the
+# JupyterHub to confirm them; the defaults below are best guesses until then.
+PARKING_CATEGORY = "Car_park"  # probe-calibrated (Stage 0); default is a guess
+PARKING_FREE_VALUE = "freeParking"  # probe-calibrated (Stage 0); default is a guess
+PARKING_RADIUS_KM = 0.5
+PARKING_MAX = 5
 
 
 async def _build_config() -> dict[str, Any]:
@@ -410,6 +420,61 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
     return legs
 
 
+# Property keys that might carry a parking's free-space count, tried in order. The real one
+# is probe-calibrated (PARKING_FREE_VALUE leads); the rest are fallbacks for robustness.
+_PARKING_FREE_KEYS = (PARKING_FREE_VALUE, "freeParking", "free", "available", "freeSpaces", "occupancy")
+
+
+def parse_parking_features(result: Any) -> list[dict[str, Any]]:
+    """Normalize a service_search_near_gps_position result into parking dicts.
+
+    The backend envelope is "an array of URIs, raw grouped GeoJSON, and flattened GeoJSON"
+    (probe-native-tools.json) — the exact nesting is probe-calibrated, so this reads the
+    common shapes defensively: a top-level `features` list, a nested `Service.features`
+    list, or a bare list. Each item yields {name, lat, lng, uri, free_spaces} with missing
+    fields as None (distance is computed later by the caller, which knows the destination).
+    Returns [] on error / unrecognized shape."""
+    if not isinstance(result, dict) or "error" in result:
+        return []
+    feats: Any = None
+    if isinstance(result.get("features"), list):
+        feats = result["features"]
+    elif isinstance(result.get("Service"), dict) and isinstance(result["Service"].get("features"), list):
+        feats = result["Service"]["features"]
+    if not isinstance(feats, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for f in feats:
+        if not isinstance(f, dict):
+            continue
+        props = f.get("properties") if isinstance(f.get("properties"), dict) else f
+        geom = f.get("geometry") if isinstance(f.get("geometry"), dict) else {}
+        coords = geom.get("coordinates")
+        lat = lng = None
+        if isinstance(coords, list) and len(coords) >= 2:
+            try:
+                lng, lat = float(coords[0]), float(coords[1])
+            except (TypeError, ValueError):
+                lat = lng = None
+        free = None
+        for k in _PARKING_FREE_KEYS:
+            v = props.get(k)
+            if v is not None:
+                try:
+                    free = int(float(v))
+                except (TypeError, ValueError):
+                    free = None
+                break
+        out.append({
+            "name": props.get("name") or props.get("serviceName") or props.get("address"),
+            "lat": lat,
+            "lng": lng,
+            "uri": props.get("serviceUri") or props.get("serviceuri") or f.get("serviceUri"),
+            "free_spaces": free,
+        })
+    return out
+
+
 def slim_result_for_llm(name: str, result: Any) -> Any:
     """Compact a tool result for the LLM context. Full fidelity stays in the audit;
     this only shrinks what the model re-reads each turn. Errors and unknown shapes
@@ -451,6 +516,12 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
             if desc and desc != "nd" and desc not in streets:  # drop unnamed and dupes
                 streets.append(desc)
         return {"journey": {**base, "streets": streets}}
+    if name == "service_search_near_gps_position":
+        spots = parse_parking_features(result)
+        if spots:
+            return {"count": len(spots), "parking": [
+                {"name": s["name"], "free_spaces": s["free_spaces"]} for s in spots[:PARKING_MAX]
+            ]}
     return result
 
 
