@@ -165,16 +165,28 @@ async def bus_route(
         return {"error": "whatif-router bus path has no wkt"}
     dist = first.get("distance")  # metres
     distance_km = round(dist / 1000, 3) if isinstance(dist, (int, float)) else None
+    # Main streets from the GraphHopper turn-by-turn, one bus arc each (all tagged `bus` so
+    # group_arc_legs folds them into a single bus leg). This gives the client's slim view real
+    # street names to narrate the trip by, instead of a bare placeholder that reads as "no
+    # detail" and makes the LLM ask the user to restate the places. Capped to keep it concise.
+    streets: list[str] = []
+    for ins in first.get("instructions") or []:
+        name = ins.get("street_name") if isinstance(ins, dict) else None
+        if isinstance(name, str) and name.strip() and name not in streets:
+            streets.append(name.strip())
+    arc = [
+        {"transport": "bus", "transport_provider": "public", "desc": s} for s in streets[:10]
+    ] or [{"transport": "bus", "transport_provider": "public", "desc": "nd"}]
     return {
         "journey": {
             "routes": [
                 {
                     "wkt": wkt,
                     "distance": distance_km,
-                    # One synthetic bus leg marks this as real public transport so the client
-                    # keeps it (not a foot-only degrade) and draws/narrates a bus route. No
-                    # `time`/`eta`: the GraphHopper bus duration is unreliable (see docstring).
-                    "arc": [{"transport": "bus", "transport_provider": "public", "desc": "nd"}],
+                    # The bus arc marks this as real public transport so the client keeps it
+                    # (not a foot-only degrade) and draws/narrates a bus route. No `time`/`eta`:
+                    # the GraphHopper bus duration is unreliable (see docstring).
+                    "arc": arc,
                 }
             ]
         }

@@ -110,7 +110,11 @@ an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 - For a successful route: give the distance in km and the duration/ETA; main streets, \
 if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
 narrate the trip leg by leg (walk to X, ride the <transport> of <provider> to Y, walk \
-on) using ONLY the leg fields — never invent lines, stops, or times.
+on) using ONLY the leg fields — never invent lines, stops, or times. A route that carries \
+a distance HAS BEEN FOUND: present it directly and NEVER ask the user to restate, clarify, \
+or give a nearby landmark for the origin/destination — they were already located. If a \
+route has no duration/ETA (e.g. a bus route), give its distance and main streets and simply \
+note the schedule/time is not available — do not invent one and do not treat it as a failure.
 - When RESULTS holds more than one successful route for the same trip (different travel \
 modes), give each mode its own distance and duration and say which is faster, using \
 ONLY the RESULTS fields.
