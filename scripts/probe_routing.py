@@ -21,6 +21,7 @@ block pairs the exact geocoded coord with the real Firenze Rifredi station coord
 
 import asyncio
 import json
+import time
 
 from fastmcp import Client
 
@@ -82,16 +83,20 @@ MODES = ["car", "foot_shortest", "foot_quiet", "public_transport"]
 PT_STARTDATETIME = "15/06/2026, 09:00"  # Mon morning — buses running
 
 
-async def _probe(client: Client, label: str, args: dict) -> None:
-    """One raw routing call, dumped (shared by the per-mode loop and the PT@datetime pass)."""
-    print(f"\n### {label} ###  (calling...)", flush=True)
+async def _probe(client: Client, label: str, args: dict, *, timeout: float = 30) -> None:
+    """One raw routing call, dumped with elapsed seconds (shared by the per-mode loop and the
+    PT@datetime pass). Elapsed shows the real per-mode latency — a PT call routinely taking
+    >30s confirms the orchestrator's default 30s timeout was silently dropping a slow journey."""
+    print(f"\n### {label} ###  (calling, timeout={timeout:.0f}s...)", flush=True)
+    start = time.perf_counter()
     try:
-        res = await asyncio.wait_for(client.call_tool("routing", args), timeout=30)
-        print(json.dumps(_unwrap(res), ensure_ascii=False)[:2000], flush=True)
+        res = await asyncio.wait_for(client.call_tool("routing", args), timeout=timeout)
+        print(f"[{time.perf_counter() - start:.1f}s] "
+              + json.dumps(_unwrap(res), ensure_ascii=False)[:2000], flush=True)
     except asyncio.TimeoutError:
-        print("[TIMEOUT >30s]", flush=True)
+        print(f"[TIMEOUT >{timeout:.0f}s after {time.perf_counter() - start:.1f}s]", flush=True)
     except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
-        print(f"[EXC] {type(e).__name__}: {e}", flush=True)
+        print(f"[EXC after {time.perf_counter() - start:.1f}s] {type(e).__name__}: {e}", flush=True)
 
 
 async def main() -> None:
@@ -115,6 +120,7 @@ async def main() -> None:
                 client,
                 f"{label} | routetype=public_transport @{PT_STARTDATETIME}",
                 {**od, "routetype": "public_transport", "startdatetime": PT_STARTDATETIME},
+                timeout=120,  # let a slow multimodal PT journey finish so we see the real payload
             )
     print("\n>>> DONE", flush=True)
 

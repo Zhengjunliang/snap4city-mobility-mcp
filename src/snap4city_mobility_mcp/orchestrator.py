@@ -23,6 +23,8 @@ import asyncio
 import json
 import logging
 import math
+import time
+from datetime import datetime
 from functools import partial
 from typing import Any, TypedDict
 
@@ -139,12 +141,9 @@ was not recognized), ask the user to pick one of those agencies.
 lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
 are not available right now — NEVER invent departure times. If the requested stop was not \
 found on the line, say so and suggest checking the stop name or the line.
-- If RESULTS has a `parking` list (car parks near the destination, present only for car \
-trips): briefly point the driver to the nearest car parks by name. Each entry may have \
-`free_spaces` (live free places) and `total_spaces`; when `free_spaces` is present give it \
-(e.g. "31 posti liberi") and prefer the ones with more; for entries whose `free_spaces` is \
-null say the live availability is not available for that one — never invent a number. If \
-`parking` is absent or empty, do not mention parking at all.
+- Do NOT mention car parks / parking in your reply: the interface shows the nearby car \
+parks (with live free-spaces) in its own list under your message, so listing them in text \
+would just duplicate it. Answer only the trip itself.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
 public-transport discovery questions (lines, routes, stops, timetables) and invite \
@@ -383,7 +382,17 @@ async def execute(
             "endlongitude": dest[0],
             "routetype": routetype,
         }
+        # Public transport is schedule-based, so the server needs a departure time to plan a
+        # journey (the Gea-Night What-If UI always sends one). Pass the current time; car/foot
+        # are time-independent and stay unchanged. exec_tool forwards startdatetime as-is.
+        if routetype == "public_transport":
+            args["startdatetime"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        start = time.perf_counter()
         result = await exec_tool(client, "routing", args, routing_attempts=attempts)
+        elapsed = time.perf_counter() - start
+        # Per-mode latency: confirms whether a "missing" PT line is a slow call hitting the
+        # routing timeout (ROUTING_CALL_TIMEOUT_S) vs. a fast foot-only degrade.
+        logger.debug("routing mode=%s took %.1fs", routetype, elapsed)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "tool routing %s -> %s",
@@ -497,13 +506,7 @@ async def _enrich_parking(
         return spot
 
     enriched = await asyncio.gather(*(one(s) for s in spots))
-
-    def _key(s: dict[str, Any]) -> tuple[bool, float, float]:
-        free = s.get("free_spaces")
-        dist = s.get("distance_km")
-        return (free is None, -(free or 0), dist if dist is not None else float("inf"))
-
-    return sorted(enriched, key=_key)
+    return sorted(enriched, key=_parking_sort_key)
 
 
 def _routetype_of(entry: dict[str, Any]) -> str | None:
@@ -579,7 +582,9 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             if routetype == "public_transport" and _pt_is_foot_only(result):
                 # Degraded to a walking-only journey: not a real PT option, so don't
                 # surface a (foot-duplicate) bus line. No route_error either — it
-                # "succeeded", just isn't public transport.
+                # "succeeded", just isn't public transport. Logged so this silent drop is
+                # distinguishable from a timeout/empty error when diagnosing a missing PT line.
+                logger.debug("PT route dropped: foot-only degraded journey (no transit leg)")
                 continue
             route = {
                 "mode": routetype,
@@ -607,6 +612,15 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
         return {"route_error": route_error} if route_error else {}
     routes = sorted(by_vehicle.values(), key=_route_minutes)
     return {**routes[0], "routes": routes}
+
+
+def _parking_sort_key(s: dict[str, Any]) -> tuple[bool, float, float]:
+    """Sort key for car parks: spots with a known free-space count first (most free
+    first), then by distance; spots with unknown free (realtime not loaded, the agreed
+    degraded case) sort after, nearest first."""
+    free = s.get("free_spaces")
+    dist = s.get("distance_km")
+    return (free is None, -(free or 0), dist if dist is not None else float("inf"))
 
 
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -643,12 +657,7 @@ def _extract_parking(
             else:
                 s["distance_km"] = None
 
-        def _key(s: dict[str, Any]) -> tuple[bool, float, float]:
-            free = s.get("free_spaces")
-            dist = s.get("distance_km")
-            return (free is None, -(free or 0), dist if dist is not None else float("inf"))
-
-        spots.sort(key=_key)
+        spots.sort(key=_parking_sort_key)
         return spots[:PARKING_MAX]
     return None
 
@@ -762,6 +771,10 @@ def _results_view(
     view = []
     for e in results:
         name = e.get("name")
+        # Parking is shown by the front-end's own list (data.parking); keep it out of the
+        # LLM view so the reply doesn't repeat the spots/free-spaces already listed below it.
+        if name == "service_search_near_gps_position":
+            continue
         slim = (
             slim_tpl_result(name, e.get("result"))
             if name in TPL_TOOL_NAMES
@@ -826,14 +839,6 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     # here is [history..., current user]; the assistant turn isn't appended yet.
     is_followup = any(m.get("role") == "assistant" for m in messages)
     view = _results_view(results, unsupported=unsupported, missing=missing)
-    # Surface the enriched car parks (name + distance + live free-spaces) to the LLM so it can
-    # name the nearest free ones; the search slim in `results` has no free count.
-    if parking and isinstance(view, dict):
-        view["parking"] = [
-            {"name": p.get("name"), "distance_km": p.get("distance_km"),
-             "free_spaces": p.get("free_spaces"), "total_spaces": p.get("total_spaces")}
-            for p in parking
-        ]
     answer: str | None = None
     try:
         resp = await llm.achat(
