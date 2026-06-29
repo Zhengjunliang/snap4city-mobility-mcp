@@ -36,12 +36,6 @@ logger = logging.getLogger(__name__)
 ROUTING_STALE_RETRIES = 2
 ROUTING_STALE_RETRY_DELAY_S = 6.0
 
-# Per-call read timeout for the routing tool only. FastMCP's default is 30 s; a multimodal
-# public_transport route can take longer to compute server-side, and a slow-but-valid PT
-# journey would otherwise hit the 30 s ReadTimeout and be silently dropped as an error.
-# Routing alone gets the longer budget; geocode/tpl keep FastMCP's 30 s default.
-ROUTING_CALL_TIMEOUT_S = 90.0
-
 # km4city's geocoder is no longer region-locked: its index now also covers Valencia and
 # southern France, so a fuzzy Florence query can rank Spanish streets first ("Piazza del
 # Duomo, Firenze" once returned 100 foreign hits and zero Tuscan). We pin results to a
@@ -125,7 +119,7 @@ def _unwrap(result: Any) -> Any:
 async def _call_routing_once(client: Client, args: dict[str, Any]) -> dict[str, Any]:
     """Single routing tool call -> {data} | {error}. Stale retry handled by the caller."""
     try:
-        result = await client.call_tool("routing", args, timeout=ROUTING_CALL_TIMEOUT_S)
+        result = await client.call_tool("routing", args)
     except Exception as e:
         return {"error": f"routing call failed: {type(e).__name__}: {e}"}
     data = _unwrap(result)

@@ -24,7 +24,6 @@ import json
 import logging
 import math
 import time
-from datetime import datetime
 from functools import partial
 from typing import Any, TypedDict
 
@@ -382,16 +381,11 @@ async def execute(
             "endlongitude": dest[0],
             "routetype": routetype,
         }
-        # Public transport is schedule-based, so the server needs a departure time to plan a
-        # journey (the Gea-Night What-If UI always sends one). Pass the current time; car/foot
-        # are time-independent and stay unchanged. exec_tool forwards startdatetime as-is.
-        if routetype == "public_transport":
-            args["startdatetime"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         start = time.perf_counter()
         result = await exec_tool(client, "routing", args, routing_attempts=attempts)
         elapsed = time.perf_counter() - start
-        # Per-mode latency: confirms whether a "missing" PT line is a slow call hitting the
-        # routing timeout (ROUTING_CALL_TIMEOUT_S) vs. a fast foot-only degrade.
+        # Per-mode latency in debug.log. Probe (2026-06-29) measured routing at 1.6-4.6 s, so a
+        # missing PT line is a foot-only degrade / route-not-found, NOT a slow call timing out.
         logger.debug("routing mode=%s took %.1fs", routetype, elapsed)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

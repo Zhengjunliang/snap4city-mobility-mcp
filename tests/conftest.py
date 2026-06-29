@@ -20,9 +20,7 @@ class FakeClient:
         self._tools = list(tools)
         self.calls = []
 
-    async def call_tool(self, name, args, **_kwargs):
-        # **_kwargs tolerates the real Client's per-call options (e.g. timeout=) without
-        # the double needing to know them; only name/args are recorded for assertions.
+    async def call_tool(self, name, args):
         self.calls.append((name, dict(args)))
         if not self._responses:
             raise AssertionError(f"unexpected call_tool({name!r})")

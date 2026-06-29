@@ -82,6 +82,21 @@ MODES = ["car", "foot_shortest", "foot_quiet", "public_transport"]
 # Edit to a weekday daytime that actually has service if the default returns nothing.
 PT_STARTDATETIME = "15/06/2026, 09:00"  # Mon morning — buses running
 
+# Hypothesis (user, 2026-06-29): the server's transit timetable may only cover OLD dates,
+# so a present-day startdatetime finds no service (empty / foot-only degrade) while a
+# ~20-years-ago date returns a real bus/tram journey. Sweep one central + one suburban OD
+# across years and report, per year, whether the journey carries a non-foot (transit) leg.
+PT_DATE_SWEEP = [
+    "15/06/2005, 09:00", "15/06/2010, 09:00", "15/06/2015, 09:00",
+    "15/06/2020, 09:00", "15/06/2024, 09:00", "15/06/2026, 09:00",
+]
+# All Mondays-ish weekday mornings (service running). Probe the same two ODs the main loop
+# uses so the year is the only variable.
+PT_SWEEP_ODS = (
+    "Duomo->SantaCroce (central)",
+    "Sesto Fiorentino->Scandicci (suburb->suburb, no ZTL)",
+)
+
 
 async def _probe(client: Client, label: str, args: dict, *, timeout: float = 30) -> None:
     """One raw routing call, dumped with elapsed seconds (shared by the per-mode loop and the
@@ -95,6 +110,48 @@ async def _probe(client: Client, label: str, args: dict, *, timeout: float = 30)
               + json.dumps(_unwrap(res), ensure_ascii=False)[:2000], flush=True)
     except asyncio.TimeoutError:
         print(f"[TIMEOUT >{timeout:.0f}s after {time.perf_counter() - start:.1f}s]", flush=True)
+    except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
+        print(f"[EXC after {time.perf_counter() - start:.1f}s] {type(e).__name__}: {e}", flush=True)
+
+
+def _pt_verdict(payload) -> str:
+    """One-line verdict on a PT routing payload: real transit vs foot-only vs empty.
+
+    Makes the year-sweep readable without scrolling raw JSON: HAS-TRANSIT names the
+    non-foot transports found in the first route's arcs; FOOT-ONLY means a degraded
+    walking journey; EMPTY / NO-JOURNEY mark a route-not-found / error payload.
+    """
+    if not isinstance(payload, dict):
+        return f"NON-DICT ({type(payload).__name__})"
+    journey = payload.get("journey")
+    if not isinstance(journey, dict):
+        return f"NO-JOURNEY (error={payload.get('error')!r})"
+    routes = journey.get("routes") or []
+    if not routes:
+        code = (payload.get("response") or {}).get("error_code")
+        return f"EMPTY routes (error_code={code!r})"
+    arcs = (routes[0] or {}).get("arc") or []
+    non_foot = sorted({
+        a.get("transport") for a in arcs
+        if isinstance(a, dict) and (a.get("transport") or "foot") != "foot"
+    })
+    return f"HAS-TRANSIT: {','.join(non_foot)}" if non_foot else "FOOT-ONLY"
+
+
+async def _probe_pt_year(client: Client, label: str, od: dict, when: str) -> None:
+    """One PT call at a given startdatetime, printed as a compact year-sweep verdict line."""
+    print(f"\n### {label} | public_transport @{when} ###", flush=True)
+    start = time.perf_counter()
+    try:
+        res = await asyncio.wait_for(
+            client.call_tool("routing", {**od, "routetype": "public_transport", "startdatetime": when}),
+            timeout=120,
+        )
+        payload = _unwrap(res)
+        print(f"[{time.perf_counter() - start:.1f}s] {_pt_verdict(payload)}", flush=True)
+        print("  head: " + json.dumps(payload, ensure_ascii=False)[:600], flush=True)
+    except asyncio.TimeoutError:
+        print(f"[TIMEOUT >120s after {time.perf_counter() - start:.1f}s]", flush=True)
     except Exception as e:  # noqa: BLE001 — diagnostic script, surface anything
         print(f"[EXC after {time.perf_counter() - start:.1f}s] {type(e).__name__}: {e}", flush=True)
 
@@ -122,6 +179,14 @@ async def main() -> None:
                 {**od, "routetype": "public_transport", "startdatetime": PT_STARTDATETIME},
                 timeout=120,  # let a slow multimodal PT journey finish so we see the real payload
             )
+        # PT date sweep: does the transit timetable only exist for OLD dates? If a 2005/2010
+        # startdatetime returns HAS-TRANSIT while 2026 is FOOT-ONLY/EMPTY, the server's schedule
+        # data is stale-dated and the real fix is to send an in-range (old) departure time.
+        print("\n--- public_transport DATE SWEEP (does an old date unlock real transit?) ---", flush=True)
+        for label in PT_SWEEP_ODS:
+            od = ODS[label]
+            for when in PT_DATE_SWEEP:
+                await _probe_pt_year(client, label, od, when)
     print("\n>>> DONE", flush=True)
 
 
