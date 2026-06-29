@@ -54,6 +54,7 @@ NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 # instead of hitting the network.
 EXPOSED_TOOLS = (
     "address_search_location",
+    "bus_route",  # local: public-transport (bus) route via the What-If router (mcp_server.py, L19/L29)
     "coordinates_to_address",  # reverse geocode (GPS point -> address); foundation for near-me
     "routing",
     "service_search_near_gps_position",  # find car parks near the destination (car routes)
@@ -65,6 +66,12 @@ EXPOSED_TOOLS = (
     "tpl_stop_timeline",
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
+
+# Tools served only by our local MCP server (mcp_server.py), with no referente remote
+# equivalent — so they are NOT expected in the referente probe. `bus_route` wraps the
+# What-If router (L19/L29); geocode reuses referente's `address_search_location` name (it
+# exists remotely, just broken) so it is NOT local-only here.
+LOCAL_ONLY_TOOLS = frozenset({"bus_route"})
 
 # Parking discovery (car routes): search car parks near the destination, then read live
 # free-spaces per spot. Calibrated from scripts/probe_parking.py on the JupyterHub (2026-06-26):

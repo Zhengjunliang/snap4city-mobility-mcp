@@ -37,6 +37,14 @@ FLORENCE_SELECTION = "43.7731;11.2558"
 SEARCH_MAX_DISTS_KM = "30"
 HTTP_TIMEOUT_S = 40.0
 
+# Snap4City What-If GraphHopper router. The referente remote `routing` tool's
+# public_transport mode never returns transit (it degrades to a walking journey or -2 for
+# any date/OD, see docs/lessons.md L19); the Gea-Night What-If dashboard draws its bus line
+# by calling this endpoint with vehicle=bus, which returns a bus-road route as WKT. We wrap
+# it here (same local-server pattern as the geocode tool, L29) so forward bus routing is a
+# local MCP tool the client drives, never a raw HTTP call from the orchestrator.
+WHATIF_ROUTER_URL = "https://www.snap4city.org/whatif-router/route"
+
 mcp = FastMCP("snap4mobility-local")
 
 
@@ -111,6 +119,66 @@ async def address_search_location(
     biased to Florence via selection/maxDists; the client applies the Tuscany bbox filter.
     """
     return await _servicemap_search(search, excludePOI=excludePOI, lang=lang, maxresults=maxresults)
+
+
+@mcp.tool
+async def bus_route(
+    start_latitude: float,
+    start_longitude: float,
+    end_latitude: float,
+    end_longitude: float,
+    startdatetime: str | None = None,
+) -> dict[str, Any]:
+    """Public-transport (bus) route between two GPS points, via the What-If GraphHopper router.
+
+    The referente remote `routing` tool's public_transport mode never returns transit
+    (L19); this wraps the What-If `vehicle=bus` endpoint the Gea-Night dashboard uses and
+    returns a routing-shaped {"journey": {"routes": [...]}} so the client renders/narrates
+    it like any route. The single route carries one synthetic `bus` arc so the client does
+    not treat it as a foot-only degrade (L31). Returns {"error": ...} on any failure.
+
+    The GraphHopper bus `time` is unreliable (it clocks a ~4 km route at ~50 min, walking
+    pace), so only the distance and geometry are surfaced — never a fabricated ETA.
+    """
+    params = {
+        "vehicle": "bus",
+        "waypoints": f"{start_longitude},{start_latitude};{end_longitude},{end_latitude}",
+        "weighting": "fastest",
+        "wkt": "true",
+    }
+    if startdatetime:
+        params["startDatetime"] = startdatetime
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as h:
+            resp = await h.get(WHATIF_ROUTER_URL, params=params, timeout=HTTP_TIMEOUT_S)
+            resp.raise_for_status()
+            body = resp.json()
+    except Exception as e:  # noqa: BLE001 - surface any failure as a routing error
+        logger.debug("whatif-router bus route failed: %s", e)
+        return {"error": f"whatif-router bus route failed: {type(e).__name__}: {e}"}
+    paths = body.get("paths") if isinstance(body, dict) else None
+    if not (isinstance(paths, list) and paths and isinstance(paths[0], dict)):
+        return {"error": "whatif-router returned no bus path"}
+    first = paths[0]
+    wkt = first.get("wkt")
+    if not isinstance(wkt, str) or not wkt:
+        return {"error": "whatif-router bus path has no wkt"}
+    dist = first.get("distance")  # metres
+    distance_km = round(dist / 1000, 3) if isinstance(dist, (int, float)) else None
+    return {
+        "journey": {
+            "routes": [
+                {
+                    "wkt": wkt,
+                    "distance": distance_km,
+                    # One synthetic bus leg marks this as real public transport so the client
+                    # keeps it (not a foot-only degrade) and draws/narrates a bus route. No
+                    # `time`/`eta`: the GraphHopper bus duration is unreliable (see docstring).
+                    "arc": [{"transport": "bus", "transport_provider": "public", "desc": "nd"}],
+                }
+            ]
+        }
+    }
 
 
 if __name__ == "__main__":

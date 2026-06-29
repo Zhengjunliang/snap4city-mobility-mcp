@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import time
+from datetime import datetime
 from functools import partial
 from typing import Any, TypedDict
 
@@ -395,6 +396,25 @@ async def execute(
             )
         return {"name": "routing", "args": json.dumps(args), "result": result}
 
+    async def _route_pt() -> dict[str, Any]:
+        # MCP routing's public_transport never returns transit (foot-only / -2 for any
+        # date/OD, L19). The bus line comes from our local `bus_route` tool instead, which
+        # wraps the What-If GraphHopper router (mcp_server.py) — the same source the
+        # Gea-Night dashboard draws from. Goes to the local client (lc), like geocode (L29).
+        args = {
+            "start_latitude": origin[1],
+            "start_longitude": origin[0],
+            "end_latitude": dest[1],
+            "end_longitude": dest[0],
+            "startdatetime": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+        }
+        start = time.perf_counter()
+        result = await exec_tool(lc, "bus_route", args)
+        logger.debug("routing mode=public_transport (bus_route) took %.1fs", time.perf_counter() - start)
+        # Shaped as a routing audit entry (routetype=public_transport) so _extract_data /
+        # _results_view render and narrate it exactly like a routing-derived route.
+        return {"name": "routing", "args": json.dumps({"routetype": "public_transport"}), "result": result}
+
     async def _parking() -> dict[str, Any]:
         # Find car parks near the destination (called only when a car route is in play — the
         # feature is car-specific). Runs concurrently with routing (one flat gather below) so
@@ -421,29 +441,14 @@ async def execute(
     # routing keeps its modes-order append (deterministic _extract_data) and the parking entry
     # comes after. One flat gather (not nested) keeps the call order stable.
     do_parking = "car" in modes
-    coros = [_route(m) for m in modes] + ([_parking()] if do_parking else [])
+    coros = [(_route_pt() if m == "public_transport" else _route(m)) for m in modes]
+    coros += [_parking()] if do_parking else []
     gathered = await asyncio.gather(*coros)
     primary = gathered[: len(modes)]
     parking_entry = gathered[len(modes)] if do_parking else None
     results.extend(primary)
     for m, entry in zip(modes, primary):
         routed = entry["result"]
-        if (
-            m == "public_transport"
-            and isinstance(routed, dict)
-            and isinstance(routed.get("journey"), dict)
-            and logger.isEnabledFor(logging.DEBUG)
-        ):
-            # The real public-transport arc shape hasn't been observed live yet: dump
-            # the first raw arcs so group_arc_legs' grouping key can be calibrated
-            # offline from debug.log (gitignored).
-            first = (routed["journey"].get("routes") or [{}])[0]
-            arcs = first.get("arc") or []
-            logger.debug(
-                "PT raw arcs (first 5 of %d): %s",
-                len(arcs),
-                json.dumps(arcs[:5], ensure_ascii=False)[:2000],
-            )
         if isinstance(routed, dict) and "error" in routed and m in _FOOT_FALLBACK:
             # Single-shot fallback to the other foot profile. The requested profile
             # already exhausted the stale-retry ladder (~27 s), so this only probes the

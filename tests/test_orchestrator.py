@@ -307,6 +307,30 @@ async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_res
     assert out["parking"][0]["free_spaces"] == 5
 
 
+async def test_execute_public_transport_routes_via_bus_route(make_client, make_result):
+    """public_transport routes through the local `bus_route` tool (What-If router), NOT the
+    transit-blind MCP routing; a returned bus journey becomes a drawable PT route."""
+    bus_journey = {"journey": {"routes": [{
+        "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38,
+        "arc": [{"transport": "bus", "transport_provider": "public", "desc": "nd"}],
+    }]}}
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=bus_journey),                         # bus_route (local tool)
+    ])
+    slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "public_transport"}
+    out = await execute({"slots": slots}, client=client)
+    # PT went to bus_route, not MCP routing; the audit entry is still tagged public_transport.
+    assert client.calls[-1][0] == "bus_route"
+    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
+    assert len(routings) == 1 and json.loads(routings[0]["args"])["routetype"] == "public_transport"
+    # the bus journey (real ride leg) survives _extract_data as a drawable PT route.
+    data = _extract_data(out["tool_results"])
+    assert data["routes"][0]["mode"] == "public_transport"
+    assert data["wkt"] == "LINESTRING(0 0,3 3)" and data["distance_km"] == 4.38
+
+
 def test_extract_data_collects_three_modes():
     """foot+car+real-PT all succeed → routes has all three, keyed to distinct vehicles."""
     results = [

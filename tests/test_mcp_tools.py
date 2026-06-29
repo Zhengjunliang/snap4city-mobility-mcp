@@ -11,6 +11,7 @@ import pytest
 
 from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.mcp_tools import (
+    LOCAL_ONLY_TOOLS,
     TOOL_NAMES,
     _unwrap,
     exec_tool,
@@ -173,5 +174,7 @@ def test_exposed_tools_exist_in_probe():
         pytest.skip("probe-native-tools.json not present")
     names: set = set()
     _collect_names(json.loads(probe.read_text(encoding="utf-8")), names)
-    missing = TOOL_NAMES - names
+    # Local-only tools (bus_route) live on our own MCP server, not referente's, so they
+    # are not expected in the referente probe.
+    missing = TOOL_NAMES - LOCAL_ONLY_TOOLS - names
     assert not missing, f"exposed tools absent from probe: {missing}"
