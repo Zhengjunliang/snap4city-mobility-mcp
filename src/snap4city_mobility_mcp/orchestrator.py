@@ -371,12 +371,12 @@ async def execute(
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
     mode_specified = bool(slots.get("mode"))
-    # No mode given: route walking, driving AND public transport so the dashboard draws
-    # all three for comparison (a foot/car/bus line each). PT returns a journey now (L19),
-    # so it yields a drawable line between the endpoints; a mode that comes back empty
-    # (car in a ZTL, PT on some OD) just stays absent and draws one less line. An explicit
-    # mode runs that one only.
-    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car", "public_transport"]
+    # No mode given: route walking AND driving only (a foot/car line each). Public transport
+    # is NOT run by default: the What-If bus router is ~25 s per call (no CH preprocessing,
+    # server-side, unfixable client-side), which dominated the whole turn. The bus line is
+    # run ONLY when the user explicitly asks for it (mode=public_transport → the branch below),
+    # so a plain "A to B" query answers in a few seconds. An explicit mode runs that one only.
+    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car"]
 
     async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
         # GeoJSON coordinate order is [longitude, latitude]. Returns the audit entry; the
@@ -462,10 +462,19 @@ async def execute(
             # they just stay absent from the routes, so the dashboard draws one less line.
             results.append(await _route(_FOOT_FALLBACK[m], attempts=1))
 
-    # Parking entry goes after every routing entry so _extract_data (routing-only) is
+    # Parking is only meaningful when a car route was actually found: if the car routing
+    # failed (ZTL / route-not-found), there is nowhere to drive to, so we drop the parking
+    # (the search was fetched concurrently above to add no wall-clock, and is simply discarded
+    # here). Parking entry goes after every routing entry so _extract_data (routing-only) is
     # unaffected and _extract_parking finds it deterministically.
+    car_ok = any(
+        m == "car"
+        and isinstance(entry["result"], dict)
+        and isinstance(entry["result"].get("journey"), dict)
+        for m, entry in zip(modes, primary)
+    )
     parking: list[dict[str, Any]] = []
-    if parking_entry is not None:
+    if parking_entry is not None and car_ok:
         results.append(parking_entry)
         # Build the nearest-N list (parse + Haversine distance + sort), then enrich each with
         # its live free-spaces (service_info_dev per spot, concurrently).
@@ -819,11 +828,11 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     if intent == "route" and data.get("routes") and endpoints:
         data["origin"] = endpoints.get("origin")
         data["destination"] = endpoints.get("destination")
-    # Free car parks near the destination (car routes), built + enriched in execute. Injected
-    # independently of data["routes"] so it still shows when the car route itself came back
-    # empty (ZTL/L8) — "couldn't drive there, but here's parking nearby". data.parking is
-    # consumed by our own front-end (like data.origin/destination, L32), not the referente
-    # widget contract (rule 8).
+    # Free car parks near the destination, built + enriched in execute ONLY when a car route
+    # was actually found (execute drops parking on a car failure — nowhere to drive to). So
+    # state["parking"] is present only for a successful car route, and injecting it here needs
+    # no extra guard. data.parking is consumed by our own front-end (like data.origin/
+    # destination, L32), not the referente widget contract (rule 8).
     parking = state.get("parking")
     if intent == "route" and parking:
         data["parking"] = parking

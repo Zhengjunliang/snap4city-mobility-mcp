@@ -228,15 +228,16 @@ async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result
         make_result(structured=stale),                               # car #1
         make_result(structured=stale),                               # car #2
         make_result(structured=stale),                               # car #3
-        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car triggers it)
-        make_result(structured=_parking_realtime(20, 100)),          # P1 realtime enrichment
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (fetched concurrently, then discarded)
     ])
     slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
     assert len([n for n, _ in client.calls if n == "routing"]) == 3  # ladder only, no 4th probe
     assert "route_error" in _extract_data(out["tool_results"])
-    # car route failed but parking near the destination still came back (S4: independent).
-    assert out["parking"][0]["name"] == "P1" and out["parking"][0]["free_spaces"] == 20
+    # car route failed → nowhere to drive, so parking is dropped (fetched concurrently but not
+    # surfaced) and never enriched (no service_info_dev call).
+    assert out["parking"] == []
+    assert not any(n == "service_info_dev" for n, _ in client.calls)
 
 
 # --- _extract_data -----------------------------------------------------------
@@ -287,21 +288,21 @@ def test_extract_data_all_fail_reports_earliest_error():
     assert "routes" not in data
 
 
-async def test_execute_unspecified_mode_routes_foot_car_pt(make_client, make_result):
-    """Empty mode → execute routes walking, driving and public transport."""
+async def test_execute_unspecified_mode_routes_foot_car_only(make_client, make_result):
+    """Empty mode → execute routes walking and driving only. Public transport is NOT run by
+    default (the What-If bus router is ~25 s); it runs only on an explicit public_transport mode."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # foot_shortest
         make_result(structured=_journey()),                          # car
-        make_result(structured=_journey()),                          # public_transport
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
         make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": ""}
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
-    assert routetypes == ["foot_shortest", "car", "public_transport"]
+    assert routetypes == ["foot_shortest", "car"]  # no public_transport by default
     # car is among the modes → the parking entry is appended after all routing entries.
     assert out["tool_results"][-1]["name"] == "service_search_near_gps_position"
     assert out["parking"][0]["free_spaces"] == 5
@@ -504,27 +505,6 @@ async def test_respond_injects_parking_into_data(make_llm):
     out = await respond(state, llm=llm)
     parking = out["response"]["data"]["parking"]
     assert parking[0]["name"] == "P1" and parking[0]["free_spaces"] == 20
-
-
-async def test_respond_parking_when_car_route_empty(make_llm):
-    """S4/G2: car route came back empty (ZTL) but parking still shows (independent of routes)."""
-    llm = make_llm([_text_response("Non riesco a calcolare il percorso in auto, ma vicino: P1.")])
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "in auto da A a B"}],
-        "endpoints": {"origin": {"lat": 43.77, "lng": 11.24}, "destination": {"lat": 43.76, "lng": 11.26}},
-        "tool_results": [
-            {"name": "routing", "args": json.dumps({"routetype": "car"}), "result": {"error": ""}},
-        ],
-        "parking": [{"name": "P1", "lat": 43.76, "lng": 11.26, "uri": "http://p1",
-                     "distance_km": 0.08, "free_spaces": None}],
-        "unsupported": False,
-    }
-    out = await respond(state, llm=llm)
-    data = out["response"]["data"]
-    assert "routes" not in data  # car route failed
-    assert data["parking"][0]["name"] == "P1"  # parking still present
-    assert data["parking"][0]["free_spaces"] is None  # degraded: realtime not loaded
 
 
 async def test_respond_route_surfaces_mode_for_widget(make_llm):
