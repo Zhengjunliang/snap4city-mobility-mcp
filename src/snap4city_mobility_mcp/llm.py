@@ -22,6 +22,7 @@ TokenManager caches and refreshes the access token in token_stored.json.
 """
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import time
@@ -30,6 +31,8 @@ from typing import Any
 import httpx
 
 from snap4city_mobility_mcp.token_manager import TokenManager
+
+logger = logging.getLogger(__name__)
 
 LLAMA4_API_URL = os.environ.get(
     "S4C_LLM_API_URL", "https://www.snap4city.org/apis/llama4-agentic-inference"
@@ -170,6 +173,7 @@ class Llama4Client:
             params["temperature"] = temperature
 
         last_exc: Llama4Error | None = None
+        t0 = time.perf_counter()
         for attempt in range(LLM_RETRIES + 1):
             # Re-fetch the token each attempt: TokenManager caches a valid one
             # (cheap), but a long retried turn can outlive a near-expiry token.
@@ -197,6 +201,11 @@ class Llama4Client:
                     f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"
                 ) from e
             if isinstance(data, dict) and "choices" in data:
+                # attempt count + wall time (incl. retry backoff sleeps) to diagnose
+                # whether an LLM node is slow itself vs. slow due to transient retries.
+                logger.debug(
+                    "llm chat ok: %d attempt(s), %.1fs", attempt + 1, time.perf_counter() - t0
+                )
                 return data
             # Error envelopes: {"message": ...} / {"detail": ...}. (A deprecated endpoint
             # or an inactive API rule shows up here as e.g. "Rule not found for this user/path".)

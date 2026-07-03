@@ -255,12 +255,14 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
     convo = [m for m in history if m.get("role") in ("user", "assistant")]
     slots: dict[str, Any] = {"intent": "other"}
     try:
+        t0 = time.perf_counter()
         resp = await llm.achat(
             messages=[{"role": "system", "content": UNDERSTAND_SYSTEM}, *convo],
             tools=[_EXTRACT_SLOTS_SCHEMA],
             tool_choice={"type": "function", "function": {"name": "extract_slots"}},
             temperature=0,
         )
+        logger.debug("understand LLM took %.1fs", time.perf_counter() - t0)
         calls = tool_calls(resp)
         if calls:
             raw = (calls[0].get("function") or {}).get("arguments")
@@ -844,6 +846,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     view = _results_view(results, unsupported=unsupported, missing=missing)
     answer: str | None = None
     try:
+        t0 = time.perf_counter()
         resp = await llm.achat(
             messages=[
                 {"role": "system", "content": RESPOND_SYSTEM},
@@ -860,6 +863,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
             # English. Phrasing room matters less than never fabricating. (Slots use 0.)
             temperature=0.2,
         )
+        logger.debug("respond LLM took %.1fs", time.perf_counter() - t0)
         content = assistant_message(resp).get("content")
         if isinstance(content, str) and content.strip():
             answer = content.strip()
@@ -926,7 +930,9 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     cfg, llm = await _session_deps()
     messages = list(history or [])
     messages.append({"role": "user", "content": query})
+    t0 = time.perf_counter()
     async with Client(cfg) as client, Client(_local_config()) as local_client:
         graph = _build_graph(client, llm, local_client)
         out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
+    logger.debug("advisor turn total %.1fs", time.perf_counter() - t0)
     return out.get("response", {"status": "error", "error": "no response produced", "messages": messages})
