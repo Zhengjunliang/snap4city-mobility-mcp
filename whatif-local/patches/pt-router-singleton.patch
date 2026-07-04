@@ -1,0 +1,139 @@
+diff --git a/pom.xml b/pom.xml
+index 0cc7068..135c2fd 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -31,6 +31,14 @@
+             <artifactId>jersey-bundle</artifactId>
+             <version>1.19.1</version>
+         </dependency>
++        <!-- Servlet API for the PtWarmupListener (ServletContextListener). provided: the servlet
++             container (Tomcat 9) supplies it at runtime, so it is not bundled into the war. -->
++        <dependency>
++            <groupId>javax.servlet</groupId>
++            <artifactId>javax.servlet-api</artifactId>
++            <version>4.0.1</version>
++            <scope>provided</scope>
++        </dependency>
+         <dependency>
+             <groupId>com.graphhopper</groupId>
+             <artifactId>graphhopper-core</artifactId>
+diff --git a/src/main/java/com/dashboard/servlet/PtWarmupListener.java b/src/main/java/com/dashboard/servlet/PtWarmupListener.java
+new file mode 100644
+index 0000000..7dc312e
+--- /dev/null
++++ b/src/main/java/com/dashboard/servlet/PtWarmupListener.java
+@@ -0,0 +1,40 @@
++/* WhatIfRouter
++ Copyright (C) 2023 DISIT Lab http://www.disit.org - University of Florence
++ This program is free software: you can redistribute it and/or modify
++ it under the terms of the GNU Affero General Public License as
++ published by the Free Software Foundation, either version 3 of the
++ License, or (at your option) any later version.
++ This program is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU Affero General Public License for more details.
++ You should have received a copy of the GNU Affero General Public License
++ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
++package com.dashboard.servlet;
++
++import javax.servlet.ServletContextEvent;
++import javax.servlet.ServletContextListener;
++
++/**
++ * Builds the cached PT router at webapp startup so the one-time ~2GB GTFS graph load happens during
++ * container boot instead of on the first user's request. Registered in web.xml.
++ */
++public class PtWarmupListener implements ServletContextListener {
++
++    @Override
++    public void contextInitialized(ServletContextEvent sce) {
++        System.out.println("PtWarmupListener: warming up PT router (loading GTFS graph)...");
++        try {
++            Servlet.getPtRouter();   // blocks once; every later PT request reuses the cached instance
++            System.out.println("PtWarmupListener: PT router ready.");
++        } catch (Throwable t) {
++            // Do not block webapp startup on a warmup failure; the first PT request will retry.
++            System.out.println("PtWarmupListener: warmup failed, will build lazily on first request: " + t);
++            t.printStackTrace();
++        }
++    }
++
++    @Override
++    public void contextDestroyed(ServletContextEvent sce) {
++    }
++}
+diff --git a/src/main/java/com/dashboard/servlet/Servlet.java b/src/main/java/com/dashboard/servlet/Servlet.java
+index e32700e..b401582 100644
+--- a/src/main/java/com/dashboard/servlet/Servlet.java
++++ b/src/main/java/com/dashboard/servlet/Servlet.java
+@@ -48,6 +48,30 @@ public class Servlet {
+     private static String _datareaderFile = "centro-latest.osm.pbf";
+     private static final ZoneId _zoneId = ZoneId.of("Europe/Rome");
+ 
++    // Cached PT engine. Building it means loading the whole ~2GB GTFS graph-cache into the heap
++    // and importing the translation map, which takes minutes; doing it per request made a single
++    // route take 125-293s. The router is date-independent (the query date only enters the Request
++    // in getGtfsRoute), so it is safe to build once and reuse for the lifetime of the webapp.
++    private static volatile GraphHopperGtfs PT_HOPPER;
++    private static volatile PtRouter PT_ROUTER;
++
++    /**
++     * Lazily build and cache the PT router (double-checked locking so concurrent requests and the
++     * startup warmup listener build it exactly once). Reused across all PT requests.
++     */
++    static PtRouter getPtRouter() {
++        if (PT_ROUTER == null) {
++            synchronized (Servlet.class) {
++                if (PT_ROUTER == null) {
++                    GraphHopperConfig config = createConfig();
++                    PT_HOPPER = (GraphHopperGtfs) initGHGtfs(config);
++                    PT_ROUTER = initPtRouter(config, PT_HOPPER);
++                }
++            }
++        }
++        return PT_ROUTER;
++    }
++
+     /**
+      * API interface method called by Dashboard
+      *
+@@ -110,9 +134,8 @@ public class Servlet {
+ 
+             if (routing.equals("pt") || routing.equals("public_transport") || vehicle.equals("bus")) {
+                 routing = "pt";
+-                GraphHopperConfig config = createConfig();
+-                hopper = initGHGtfs(config);
+-                PtRouter ptRouter = initPtRouter(config, (GraphHopperGtfs) hopper);
++                PtRouter ptRouter = getPtRouter();   // cached: builds the ~2GB graph once, reused
++                hopper = PT_HOPPER;                  // buildFormattedResponse casts this to GraphHopperGtfs for legs
+                 response = getGtfsRoute(ptRouter, waypointsArray, startDatetime);
+             } else {
+                 hopper = initGH(vehicle, weighting, startDatetime);
+@@ -123,9 +146,7 @@ public class Servlet {
+             }
+ 
+             JSONObject jsonResponse = buildFormattedResponse(routing, wkt, hopper, response);
+-            if (routing.equals("pt")) {
+-                hopper.close();
+-            }
++            // NB: do not close the PT hopper here — it is the shared cached singleton (PT_HOPPER).
+             return Response.ok(jsonResponse.toString())
+                     .header("Access-Control-Allow-Origin", "*")
+                     .header("Content-Type", "application/json")
+diff --git a/web/WEB-INF/web.xml b/web/WEB-INF/web.xml
+index c5349a7..7dc15b1 100644
+--- a/web/WEB-INF/web.xml
++++ b/web/WEB-INF/web.xml
+@@ -3,6 +3,11 @@
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee http://xmlns.jcp.org/xml/ns/javaee/web-app_4_0.xsd"
+          version="4.0">
++    <!-- Warm up the cached PT router at startup so the ~2GB GTFS graph load happens during boot,
++         not on the first user request. See PtWarmupListener / Servlet.getPtRouter(). -->
++    <listener>
++        <listener-class>com.dashboard.servlet.PtWarmupListener</listener-class>
++    </listener>
+     <servlet>
+         <servlet-name>GHServlet</servlet-name>
+         <servlet-class>com.sun.jersey.spi.container.servlet.ServletContainer</servlet-class>
