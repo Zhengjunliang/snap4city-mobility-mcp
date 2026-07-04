@@ -284,6 +284,12 @@ python -m snap4city_mobility_mcp.mcp_server
 
 Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127.0.0.1:8020/mcp`). Routing / reverse geocode / `tpl_*` still go to the referente remote server.
 
+The local server's `bus_route` tool calls the Snap4City What-If GraphHopper router at `https://www.snap4city.org/whatif-router/route` by default. Override the base with `S4C_WHATIF_ROUTER_URL` to point it at a locally-run whatif-router container loaded with Tuscany GTFS (see `whatif-local/` for the container + a tunnel so the JupyterHub-side server can reach it):
+
+```bash
+export S4C_WHATIF_ROUTER_URL=https://<cloudflared-tunnel>.trycloudflare.com/whatif-router/route
+```
+
 **Terminal 2 — advisor bridge (FastAPI)** (drives LLM + remote MCP server, dashboard 联动):
 
 ```bash

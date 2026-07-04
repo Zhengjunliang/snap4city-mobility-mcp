@@ -1,0 +1,7 @@
+# Cloned third-party source (build it locally, don't vendor it into our repo).
+whatif-router-src/
+# Downloaded data (PBF ~450MB + GTFS) and the graph GraphHopper builds from them.
+data/
+# Test outputs.
+test-output.json
+test-output-foot.json

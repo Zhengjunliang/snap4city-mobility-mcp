@@ -12,9 +12,11 @@ import pytest
 from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.mcp_tools import (
     LOCAL_ONLY_TOOLS,
+    STOPS_LLM_KEEP,
     TOOL_NAMES,
     _unwrap,
     exec_tool,
+    group_arc_legs,
     reverse_geocode,
     routing_with_retry,
     slim_result_for_llm,
@@ -152,6 +154,53 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     assert j["distance_km"] == 0.83 and j["eta"] == "10:11:00"
     assert j["streets"] == ["Via Ricasoli", "Borgo degli Albizi"]  # deduped, "nd" dropped
     assert "source_node" not in j and "destination_node" not in j  # no raw coordinates
+
+
+# --- group_arc_legs (walk -> ride -> walk from the bus_route arc list) --------
+
+def _multimodal_arcs():
+    """The arc list bus_route._bus_arcs produces for a GTFS ride: foot -> board -> alight -> foot."""
+    stops = [{"name": "PORTE NUOVE BELFIORE", "time": "2026-07-06T06:23:00Z"},
+             {"name": "ACC. DEL CIMENTO ARTOM", "time": "2026-07-06T06:34:28Z"}]
+    return [
+        {"transport": "foot", "transport_provider": None, "desc": "a piedi 100 m", "distance": 0.1},
+        {"transport": "bus", "transport_provider": "at - Firenze urbano", "desc": "linea 57 da PORTE NUOVE BELFIORE",
+         "line": "57", "headsign": "CALENZANO UNIVERSITA'", "stops": stops, "start_datetime": "2026-07-06T06:23:00Z"},
+        {"transport": "bus", "transport_provider": "at - Firenze urbano", "desc": "a ACC. DEL CIMENTO ARTOM",
+         "end_datetime": "2026-07-06T06:34:28Z"},
+        {"transport": "foot", "transport_provider": None, "desc": "a piedi 50 m", "distance": 0.05},
+    ]
+
+
+def test_group_arc_legs_walk_ride_walk():
+    legs = group_arc_legs(_multimodal_arcs())
+    # Three legs: walk, bus ride, walk (the two bus arcs merge, foot arcs bracket them).
+    assert [leg.get("transport") for leg in legs] == ["foot", "bus", "foot"]
+    walk_in, ride, walk_out = legs
+    assert walk_in["distance_km"] == 0.1 and "provider" not in walk_in
+    # The ride leg surfaces line / operator / headsign / full stops / board+alight times.
+    assert ride["line"] == "57" and ride["provider"] == "at - Firenze urbano"
+    assert ride["headsign"] == "CALENZANO UNIVERSITA'"
+    assert [s["name"] for s in ride["stops"]] == ["PORTE NUOVE BELFIORE", "ACC. DEL CIMENTO ARTOM"]
+    assert ride["from"] == "linea 57 da PORTE NUOVE BELFIORE"
+    assert ride["start_datetime"] == "2026-07-06T06:23:00Z" and ride["end_datetime"] == "2026-07-06T06:34:28Z"
+    assert walk_out["distance_km"] == 0.05
+
+
+def test_slim_routing_multimodal_caps_stops():
+    long_stops = [{"name": f"S{i}", "time": None} for i in range(STOPS_LLM_KEEP + 8)]
+    full = {"journey": {"routes": [{
+        "wkt": "LINESTRING(...)", "distance": 2.9, "time": "0:13:16",
+        "arc": [
+            {"transport": "foot", "transport_provider": None, "distance": 0.1, "desc": "a piedi 100 m"},
+            {"transport": "bus", "transport_provider": "at", "line": "57", "stops": long_stops, "desc": "linea 57"},
+        ],
+    }]}}
+    slim = slim_result_for_llm("routing", full)
+    legs = slim["journey"]["legs"]
+    assert [leg.get("transport") for leg in legs] == ["foot", "bus"]  # legs kept, not streets
+    ride = legs[1]
+    assert len(ride["stops"]) == STOPS_LLM_KEEP and ride["stops_total"] == STOPS_LLM_KEEP + 8
 
 
 # --- contract: exposed tools exist in the live probe -------------------------

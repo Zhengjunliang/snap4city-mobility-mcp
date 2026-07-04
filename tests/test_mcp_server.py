@@ -7,7 +7,14 @@ shape the client expects — plus the error path.
 import httpx
 
 from snap4city_mobility_mcp import mcp_server
-from snap4city_mobility_mcp.mcp_server import _normalize_feature, _servicemap_search
+from snap4city_mobility_mcp.mcp_server import (
+    _bus_arcs,
+    _fmt_hms,
+    _journey_duration_ms,
+    _normalize_feature,
+    _servicemap_search,
+    _wkt_length_km,
+)
 
 
 def _install_fake_httpx(monkeypatch, *, body=None, raise_exc=None):
@@ -88,3 +95,107 @@ async def test_search_missing_feature_list_returns_error(monkeypatch):
     _install_fake_httpx(monkeypatch, body={"unexpected": "shape"})
     out = await _servicemap_search("Duomo", excludePOI=True, lang="it", maxresults=100)
     assert "error" in out
+
+
+# --- _bus_arcs: turn the What-If GraphHopper turn-by-turn into journey arcs ---------------
+
+def _pt_first():
+    """A GTFS-loaded whatif-router path (shape from whatif-local/test-output.json):
+    walk to the stop -> a Pt_start_trip ride carrying line/operator/headsign/stops -> walk on.
+    Walking instructions carry distance (m) and time (ms); the ride carries leg.map.travelTime."""
+    return {
+        "instructions": [
+            {"text": "Turn right", "street_name": "", "distance": 100.0, "time": 72000, "leg": None},
+            {
+                "text": "Pt_start_trip",
+                "leg": {
+                    "map": {
+                        "type": "pt",
+                        "route_name": "57",
+                        "agency_name": "at - Firenze urbano",
+                        "trip_headsign": "CALENZANO UNIVERSITA'",
+                        "travelTime": 688000,
+                        "stop": {
+                            "myArrayList": [
+                                {"map": {"stop_name": "PORTE NUOVE BELFIORE", "stop_arrivalTime": "2026-07-06T06:23:00Z"}},
+                                {"map": {"stop_name": "CARRA SCARLATTI", "stop_arrivalTime": "2026-07-06T06:24:00Z"}},
+                                {"map": {"stop_name": "ACC. DEL CIMENTO ARTOM", "stop_arrivalTime": "2026-07-06T06:34:28Z"}},
+                            ]
+                        },
+                    }
+                },
+            },
+            {"text": "Pt_end_trip", "street_name": "ACC. DEL CIMENTO ARTOM"},
+            {"text": "Continue", "street_name": "", "distance": 50.0, "time": 36000, "leg": None},
+        ]
+    }
+
+
+def test_bus_arcs_multimodal_walk_ride_walk():
+    arc = _bus_arcs(_pt_first())
+    # foot -> board -> alight -> foot: a real door-to-door multimodal journey.
+    assert [a["transport"] for a in arc] == ["foot", "bus", "bus", "foot"]
+    # Walk arcs carry distance in KM (matches route distance_km unit) and no provider.
+    assert arc[0]["distance"] == 0.1 and arc[0]["transport_provider"] is None
+    assert arc[3]["distance"] == 0.05
+    # Boarding arc carries the raw line/headsign/full stop list for group_arc_legs to surface.
+    board = arc[1]
+    assert board["transport_provider"] == "at - Firenze urbano"
+    assert board["line"] == "57" and board["headsign"] == "CALENZANO UNIVERSITA'"
+    assert [s["name"] for s in board["stops"]] == ["PORTE NUOVE BELFIORE", "CARRA SCARLATTI", "ACC. DEL CIMENTO ARTOM"]
+    # Line + boarding stop on the way in; alighting stop + headsign on the way out.
+    assert "linea 57" in board["desc"] and "PORTE NUOVE BELFIORE" in board["desc"]
+    assert "ACC. DEL CIMENTO ARTOM" in arc[2]["desc"] and "CALENZANO UNIVERSITA'" in arc[2]["desc"]
+    # Scheduled stop times ride along as leg start/end datetimes (the GTFS timetable).
+    assert board["start_datetime"] == "2026-07-06T06:23:00Z"
+    assert arc[2]["end_datetime"] == "2026-07-06T06:34:28Z"
+
+
+def test_journey_duration_and_fmt():
+    # Duration = walking time (72000 + 36000 ms) + ride travelTime (688000 ms) = 796000 ms.
+    assert _journey_duration_ms(_pt_first()) == 796000
+    assert _fmt_hms(796000) == "0:13:16"  # 796 s = 13 min 16 s
+    assert _fmt_hms(0) == "0:00:00"
+
+
+def test_wkt_length_km():
+    # A ~1 km north hop in Florence (0.009 deg lat ≈ 1 km). Parses "lng lat" pairs, sums haversine.
+    d = _wkt_length_km("LINESTRING (11.2558 43.7731, 11.2558 43.7821)")
+    assert d is not None and 0.9 < d < 1.1
+    assert _wkt_length_km("not a linestring") is None
+
+
+def test_bus_arcs_degrade_falls_back_to_streets():
+    # No GTFS PT ride (online instance without Tuscany data): walking-only instructions must
+    # still yield synthetic bus arcs from the street names, not an empty/foot-only journey (L31).
+    first = {
+        "instructions": [
+            {"text": "Turn right onto Via della Scala", "street_name": "Via della Scala", "leg": None},
+            {"text": "Continue", "street_name": "", "leg": None},
+            {"text": "Turn left onto Via dei Martelli", "street_name": "Via dei Martelli"},
+        ]
+    }
+    arc = _bus_arcs(first)
+    assert [a["desc"] for a in arc] == ["Via della Scala", "Via dei Martelli"]
+    assert all(a == {"transport": "bus", "transport_provider": "public", "desc": a["desc"]} for a in arc)
+
+
+def test_bus_arcs_degrade_with_walk_distances_still_bus_not_foot_only():
+    # Regression guard: walking instructions now populate foot arcs, so the fallback must be
+    # gated on "no PT ride seen", NOT "no arc produced". A degrade where the walk steps carry
+    # distances would make an `if arc:` gate return a foot-only journey -> _pt_is_foot_only
+    # drops the whole route online. The synthetic-bus fallback must still win here.
+    first = {
+        "instructions": [
+            {"text": "Turn right onto Via della Scala", "street_name": "Via della Scala", "distance": 200.0, "time": 144000, "leg": None},
+            {"text": "Continue onto Viale Belfiore", "street_name": "Viale Belfiore", "distance": 300.0, "time": 216000, "leg": None},
+        ]
+    }
+    arc = _bus_arcs(first)
+    assert arc and all(a["transport"] == "bus" for a in arc)  # never foot-only
+    assert [a["desc"] for a in arc] == ["Via della Scala", "Viale Belfiore"]
+
+
+def test_bus_arcs_empty_instructions_yield_placeholder():
+    arc = _bus_arcs({"instructions": []})
+    assert arc == [{"transport": "bus", "transport_provider": "public", "desc": "nd"}]

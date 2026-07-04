@@ -109,12 +109,18 @@ an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 - Never include raw coordinates in your answer.
 - For a successful route: give the distance in km and the duration/ETA; main streets, \
 if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
-narrate the trip leg by leg (walk to X, ride the <transport> of <provider> to Y, walk \
-on) using ONLY the leg fields — never invent lines, stops, or times. A route that carries \
-a distance HAS BEEN FOUND: present it directly and NEVER ask the user to restate, clarify, \
-or give a nearby landmark for the origin/destination — they were already located. If a \
-route has no duration/ETA (e.g. a bus route), give its distance and main streets and simply \
-note the schedule/time is not available — do not invent one and do not treat it as a failure.
+narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <provider> \
+toward <headsign> from the first to the last stop, then walk on), using ONLY the leg \
+fields — the leg's `line`, `provider`, `headsign`, `stops` (name + time), `stops_total` \
+and start/end times. You may say how many stops the ride covers and name the boarding/ \
+alighting stops, but never invent a line, stop, operator, or time not in the fields. A \
+route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
+to restate, clarify, or give a nearby landmark for the origin/destination — they were \
+already located. When a bus route carries a `duration`, present it as an approximate ride \
+time (walking + in-vehicle, excluding the wait at the stop), not a precise arrival. If a \
+route has no duration/ETA at all (e.g. a bus route with no timetable), give its distance \
+and main streets and simply note the schedule/time is not available — do not invent one \
+and do not treat it as a failure.
 - When RESULTS holds more than one successful route for the same trip (different travel \
 modes), give each mode its own distance and duration and say which is faster, using \
 ONLY the RESULTS fields.

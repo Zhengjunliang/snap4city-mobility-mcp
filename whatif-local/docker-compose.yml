@@ -1,0 +1,43 @@
+# Local whatif-router container to validate Tuscany GTFS data (referente's request).
+#
+# The disit/whatif-router repo ships no published image and no prebuilt .war, so this is a
+# two-service compose: `whatif-router` (Maven) builds the .war from the cloned source, then
+# `tomcat` serves it. Filled-in version of the placeholder compose in the upstream repo.
+#
+# Prereq (you run these by hand, see README.md):
+#   git clone https://github.com/disit/whatif-router whatif-router-src
+#   bash fetch-data.sh                       # downloads data/ (PBF + GTFS)
+#   docker compose run --rm whatif-router    # builds target/whatif-router-1.0-SNAPSHOT.war
+#   docker compose up tomcat                 # serves http://localhost:8080/whatif-router/route
+services:
+  # Builder: compiles the .war from the cloned upstream source into ./whatif-router-src/target.
+  whatif-router:
+    image: maven:3.9.6-eclipse-temurin-8
+    container_name: whatif-router-build
+    working_dir: /app
+    volumes:
+      - ./whatif-router-src:/app
+    command: mvn -q clean package
+
+  # Server: Tomcat 9 / JDK8 serving the built .war. GraphHopper builds its graph from the OSM
+  # PBF + GTFS on first boot (slow, minutes) into the mounted graph-cache, then reuses it.
+  tomcat:
+    image: tomcat:9.0-jdk8
+    container_name: whatif-router
+    ports:
+      - "8080:8080"
+    environment:
+      # Paths are inside the container; ./data is mounted at /data below.
+      GH_MAP_PBF: /data/centro-latest.osm.pbf
+      GH_LOCATION_PFX: /data/graph-cache
+      GH_TYPICAL_TTT_PATH: /data/typical_ttt
+      GH_GTFS_FILES: /data/at.gtfs,/data/gest.gtfs
+      # GraphHopper's PBF+GTFS graph build is heap-hungry; Tomcat's default heap OOMs on the
+      # centro extract. 6g needs Docker Desktop memory >= 8g (Settings > Resources > Memory).
+      CATALINA_OPTS: "-Xmx6g -Xms2g"
+    volumes:
+      - ./data:/data
+      # war name `whatif-router` -> context path /whatif-router -> endpoint /whatif-router/route
+      # (same shape as the online instance).
+      - ./whatif-router-src/target/whatif-router-1.0-SNAPSHOT.war:/usr/local/tomcat/webapps/whatif-router.war
+    restart: unless-stopped

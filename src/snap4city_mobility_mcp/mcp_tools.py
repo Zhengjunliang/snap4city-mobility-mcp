@@ -391,17 +391,20 @@ async def geocode_with_retry(client: Client, args: dict[str, Any]) -> Any:
 # its audit (tool_results), so the dashboard widget still gets complete data.
 GEOCODE_LLM_KEEP = 5
 PT_LEGS_LLM_KEEP = 10
+STOPS_LLM_KEEP = 12  # per-leg stop list cap for the LLM view (full list stays in the audit)
 
 
 def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
     """Group consecutive routing arcs into journey legs by transport identity.
 
-    Grouping key = (transport, transport_provider). This is provisional: the field
-    carrying the bus line number hasn't been observed live yet (execute dumps the raw
-    PT arcs to debug.log on the first real run). If the line actually lives in `desc`,
-    two lines meeting at the same stop would merge, so recalibrate then. Every emitted
-    field comes from an observed arc field (api-notes §2); missing ones are skipped.
-    A `desc` of "nd" (no data) never names a leg endpoint.
+    Grouping key = (transport, transport_provider): a walk arc ("foot", None) and a bus arc
+    ("bus", operator) split into separate legs, so a public-transport journey comes out as
+    walk -> ride -> walk. A ride's boarding arc (the first of its group) also carries the raw
+    `line`, `headsign` and full `stops` (from _bus_arcs), copied onto the leg so respond can
+    name the line and list the stops. Consecutive rides by the same operator still merge (two
+    lines of one operator are not yet split); single-line urban trips are unaffected.
+    Every emitted field comes from an observed arc field; missing ones are skipped. A `desc`
+    of "nd" (no data) never names a leg endpoint.
     """
     legs: list[dict[str, Any]] = []
     last_key: tuple[Any, Any] | None = None
@@ -415,6 +418,12 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
                 leg["transport"] = arc["transport"]
             if arc.get("transport_provider") is not None:
                 leg["provider"] = arc["transport_provider"]
+            if arc.get("line") is not None:
+                leg["line"] = arc["line"]
+            if arc.get("headsign") is not None:
+                leg["headsign"] = arc["headsign"]
+            if isinstance(arc.get("stops"), list) and arc["stops"]:
+                leg["stops"] = arc["stops"]
             if arc.get("start_datetime"):
                 leg["start_datetime"] = arc["start_datetime"]
             legs.append(leg)
@@ -576,8 +585,15 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
             # A change of transport (a public-transport journey: walk + ride
             # segments). The model needs legs to narrate the trip, not a flat street
             # list. Single-group journeys (foot, car, or a PT request satisfied
-            # entirely on foot) keep the street view below.
-            return {"journey": {**base, "legs": legs[:PT_LEGS_LLM_KEEP]}}
+            # entirely on foot) keep the street view below. A ride leg's `stops` is
+            # capped (full list stays in the audit) so the LLM view stays slim.
+            kept = []
+            for leg in legs[:PT_LEGS_LLM_KEEP]:
+                stops = leg.get("stops")
+                if isinstance(stops, list) and len(stops) > STOPS_LLM_KEEP:
+                    leg = {**leg, "stops": stops[:STOPS_LLM_KEEP], "stops_total": len(stops)}
+                kept.append(leg)
+            return {"journey": {**base, "legs": kept}}
         streets: list[str] = []
         for arc in first.get("arc") or []:
             desc = arc.get("desc")
