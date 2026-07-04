@@ -57,20 +57,29 @@ else
   echo "== 2. Tomcat present =="
 fi
 
-# --- 3. data (OSM PBF + GTFS) ---
-if [ ! -f "$DATA/centro-latest.osm.pbf" ] || [ ! -f "$DATA/at.gtfs" ]; then
+# --- 3. data (OSM PBF + GTFS) — sources per referente / dati.toscana.it (rt-oraritb) ---
+mkdir -p "$DATA" "$DATA/graph-cache" "$DATA/typical_ttt"
+if [ ! -f "$DATA/centro-latest.osm.pbf" ] || [ ! -f "$DATA/at.gtfs" ] || [ ! -f "$DATA/gest.gtfs" ]; then
   echo "== 3. fetching data (PBF ~450MB + GTFS) =="
-  bash "$HERE/fetch-data.sh"
+  curl -fL -o "$DATA/centro-latest.osm.pbf" "https://download.geofabrik.de/europe/italy/centro-latest.osm.pbf"
+  curl -fL -o "$DATA/at.gtfs"   "https://regionetoscana.smartregion.toscana.it/mobility/artifacts/gtfs"        # Autolinee Toscane
+  curl -fL -o "$DATA/gest.gtfs" "https://dati.toscana.it/dataset/8bb8f8fe-fe7d-41d0-90dc-49f2456180d1/resource/1f62d551-65f4-49f8-9a99-e19b02077be3/download/gest.gtfs"  # GEST tram
+  # sanity-check each GTFS zip carries the mandatory tables (a missing table -> partial transit graph)
+  for f in "$DATA/at.gtfs" "$DATA/gest.gtfs"; do
+    unzip -l "$f" >/dev/null 2>&1 || { echo "   !! $f not a valid zip (URL returned an error page?)" >&2; continue; }
+    for tbl in stops.txt routes.txt trips.txt stop_times.txt; do
+      unzip -l "$f" | grep -qi "$tbl" && echo "   ok   $f $tbl" || echo "   MISS $f $tbl" >&2
+    done
+  done
 else
   echo "== 3. data present =="
 fi
-mkdir -p "$DATA/graph-cache" "$DATA/typical_ttt"
 
 # --- 4. deploy war ---
 echo "== 4. deploy war =="
 cp -f "$WAR" "$TOMCAT_DIR/webapps/whatif-router.war"
 
-# --- 5. env for the war (absolute paths; matches docker-compose.yml) + heap ---
+# --- 5. env for the war (absolute paths, read by the war at startup) + heap ---
 export GH_MAP_PBF="$DATA/centro-latest.osm.pbf"
 export GH_LOCATION_PFX="$DATA/graph-cache"
 export GH_TYPICAL_TTT_PATH="$DATA/typical_ttt"
