@@ -15,6 +15,14 @@
 # leave it running in this terminal. In a second terminal point mcp_server at it:
 #   export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
 #   python -m snap4city_mobility_mcp.mcp_server
+#
+# Env knobs:
+#   WHATIF_DAEMON=1   start Tomcat in the background (catalina.sh start) and return, instead of
+#                     foreground. Used by the repo-root run-jupyterhub.sh one-shot launcher.
+#   REBUILD_GRAPH=1   wipe data/graph-cache/ before boot. Use this to recover from a
+#                     'Wrong index checksum, store was not closed properly' error, which means a
+#                     previous run was hard-killed (kill -9 / OOM / terminal closed) before the PT
+#                     singleton could write MapDB's clean-shutdown flag. Rebuild takes minutes.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"          # whatif-local/
@@ -58,6 +66,10 @@ else
 fi
 
 # --- 3. data (OSM PBF + GTFS) — sources per referente / dati.toscana.it (rt-oraritb) ---
+if [ "${REBUILD_GRAPH:-0}" = "1" ] && [ -d "$DATA/graph-cache" ]; then
+  echo "== 3a. REBUILD_GRAPH=1 -> wiping data/graph-cache (recover from checksum corruption) =="
+  rm -rf "$DATA/graph-cache"/*
+fi
 mkdir -p "$DATA" "$DATA/graph-cache" "$DATA/typical_ttt"
 if [ ! -f "$DATA/centro-latest.osm.pbf" ] || [ ! -f "$DATA/at.gtfs" ] || [ ! -f "$DATA/gest.gtfs" ]; then
   echo "== 3. fetching data (PBF ~450MB + GTFS) =="
@@ -87,8 +99,17 @@ export GH_GTFS_FILES="$DATA/at.gtfs,$DATA/gest.gtfs"
 # 55GB RAM available -> give the graph build/load plenty; -Xmx6g was the docker floor.
 export CATALINA_OPTS="-Xmx12g -Xms2g"
 
-echo "== 5. starting Tomcat (foreground). First boot builds the graph-cache (minutes),"
-echo "      then 'PtWarmupListener: PT router ready.' — leave this terminal running. =="
 echo "      endpoint: http://localhost:8080/whatif-router/route"
-echo
-exec "$TOMCAT_DIR/bin/catalina.sh" run
+if [ "${WHATIF_DAEMON:-0}" = "1" ]; then
+  # Background mode (used by run-jupyterhub.sh): start as a daemon and return. Logs go to
+  # $TOMCAT_DIR/logs/catalina.out. The caller is responsible for a clean 'catalina.sh stop'
+  # (which writes MapDB's clean-shutdown flag and prevents the checksum corruption on next boot).
+  echo "== 5. starting Tomcat (background daemon). First boot builds the graph-cache (minutes),"
+  echo "      then 'PtWarmupListener: PT router ready.' in logs/catalina.out. =="
+  "$TOMCAT_DIR/bin/catalina.sh" start
+else
+  echo "== 5. starting Tomcat (foreground). First boot builds the graph-cache (minutes),"
+  echo "      then 'PtWarmupListener: PT router ready.' — leave this terminal running. =="
+  echo
+  exec "$TOMCAT_DIR/bin/catalina.sh" run
+fi
