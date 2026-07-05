@@ -151,9 +151,12 @@ was not recognized), ask the user to pick one of those agencies.
 lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
 are not available right now — NEVER invent departure times. If the requested stop was not \
 found on the line, say so and suggest checking the stop name or the line.
-- Do NOT mention car parks / parking in your reply: the interface shows the nearby car \
-parks (with live free-spaces) in its own list under your message, so listing them in text \
-would just duplicate it. Answer only the trip itself.
+- When RESULTS includes a car-park entry (name `service_search_near_gps_position`, with a \
+`count` and per-spot `free_spaces`), add ONE short closing sentence about parking near the \
+destination — how many car parks are nearby and, if any `free_spaces` is a number > 0, that \
+there are free spots (else that live availability is not known right now). Do NOT list the \
+car-park names, addresses, or coordinates: the map already shows their pins. Keep it to that \
+single sentence.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport) and \
 public-transport discovery questions (lines, routes, stops, timetables) and invite \
@@ -617,12 +620,6 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "source_node": journey.get("source_node"),
                 "destination_node": journey.get("destination_node"),
             }
-            if routetype == "public_transport":
-                # Walk/ride legs grouped from the journey arcs. Pending referente
-                # confirmation, same status as data.arcs above.
-                legs = group_arc_legs(first.get("arc") or [])
-                if legs:
-                    route["legs"] = legs
             by_vehicle[_VEHICLE.get(routetype or "", routetype or "")] = route
         elif "error" in result and route_error is None:
             # First error wins = the mode the user actually asked for (modes run in
@@ -791,10 +788,9 @@ def _results_view(
     view = []
     for e in results:
         name = e.get("name")
-        # Parking is shown by the front-end's own list (data.parking); keep it out of the
-        # LLM view so the reply doesn't repeat the spots/free-spaces already listed below it.
-        if name == "service_search_near_gps_position":
-            continue
+        # Parking IS shown to the LLM (slimmed to count + per-spot free_spaces by
+        # slim_result_for_llm) so respond can add one brief availability sentence. The map
+        # still plots the pins (data.parking); the reply no longer lists spot names.
         slim = (
             slim_tpl_result(name, e.get("result"))
             if name in TPL_TOOL_NAMES

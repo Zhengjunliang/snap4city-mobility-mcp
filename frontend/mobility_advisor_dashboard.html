@@ -39,7 +39,6 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <style>
-html, body { height: 100%; margin: 0; }
 .adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
 .adv #advChat { flex: 1; overflow-y: auto; min-height: 120px; padding-right: 4px; }
 .adv .msg { margin: 6px 0; padding: 7px 10px; border-radius: 10px; font-size: 13px; line-height: 1.35; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
@@ -50,19 +49,6 @@ html, body { height: 100%; margin: 0; }
 .adv #advInput { flex: 1; box-sizing: border-box; padding: 8px; border: none; border-radius: 4px; font-size: 13px; }
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
-.adv .msg.park { background: #1d3326; border: 1px solid #3a6b4a; }
-.adv .park .ph { font-weight: bold; margin-bottom: 4px; }
-.adv .park .pi { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
-.adv .park .pi .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.adv .park .pi .pf { color: #7fe0a0; white-space: nowrap; }
-.adv .park .pi .pf.na { color: #9aa6b8; }
-.adv .msg.journey { background: #2a2436; border: 1px solid #ff7f00; }
-.adv .journey .jh { font-weight: bold; margin-bottom: 4px; }
-.adv .journey .leg { margin: 4px 0; }
-.adv .journey .legh { font-weight: bold; padding: 2px 0; }
-.adv .journey .stop { display: flex; justify-content: space-between; gap: 10px; padding: 1px 0 1px 14px; }
-.adv .journey .stop .sn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.adv .journey .stop .st { color: #ffb15c; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -224,78 +210,7 @@ return buildTraj(route, color, origin, destination);
 });
 trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
 }
-// ---- Public-transport journey: fermate + orari list ---------------------
-// The bus route's walk->ride->walk legs (data.routes[mode=public_transport].legs, or the
-// top-level data.legs when PT is the fastest route). Each bus leg carries line/provider/
-// headsign + stops [{name, time}] (from the backend group_arc_legs); foot legs carry only a
-// distance. Returns null when there is no PT route with legs.
-function journeyLegs(data) {
-var routes = data.routes || [];
-for (var i = 0; i < routes.length; i++) {
-if (routes[i].mode === "public_transport" && routes[i].legs && routes[i].legs.length) return routes[i].legs;
-}
-if (data.mode === "public_transport" && data.legs && data.legs.length) return data.legs;
-return null;
-}
-// GTFS stop time "06:23:00" -> "06:23" (keep HH:MM; anything else passes through; null -> "").
-function fmtStopTime(t) {
-if (typeof t !== "string" || !t) return "";
-return /^\d{1,2}:\d{2}:\d{2}$/.test(t) ? t.slice(0, 5) : t;
-}
-// Compact fermate + orari list under the reply (bus theme, orange border). Rendered ONLY when a
-// leg actually carries stops - with no Toscana GTFS the router degrades to a walking line whose
-// single bus leg has no stops (from/to are street names), so the box is skipped rather than
-// shown empty. Text goes through .text() (no injection), same pattern as renderParking.
-function renderJourney(legs) {
-if (!legs || !legs.some(function (l) { return l.stops && l.stops.length; })) return;
-var $m = $("<div>").addClass("msg bot journey");
-$("<div>").addClass("jh").text("Fermate e orari:").appendTo($m);
-legs.forEach(function (leg) {
-var $leg = $("<div>").addClass("leg");
-if (leg.transport === "foot") {
-var m = (typeof leg.distance_km === "number") ? " · " + Math.round(leg.distance_km * 1000) + " m" : "";
-$("<div>").addClass("legh").text("A piedi" + m).appendTo($leg);
-} else {
-var head = "";
-if (leg.line) head += "Linea " + leg.line;
-if (leg.provider) head += (head ? " (" + leg.provider + ")" : leg.provider);
-if (leg.headsign) head += " verso " + leg.headsign;
-if (!head) head = (leg.from || "") + (leg.to && leg.to !== leg.from ? " - " + leg.to : "");
-$("<div>").addClass("legh").text(head || "Bus").appendTo($leg);
-(leg.stops || []).forEach(function (s) {
-var $s = $("<div>").addClass("stop");
-$("<span>").addClass("sn").text(s.name || "").appendTo($s);
-$("<span>").addClass("st").text(fmtStopTime(s.time)).appendTo($s);
-$leg.append($s);
-});
-}
-$m.append($leg);
-});
-$("#advChat").append($m);
-$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
-}
 // ---- Parking near the destination (car routes) --------------------------
-// Compact list under the reply: name + distance + free spaces ("post. n/d" when live
-// availability is not loaded server-side - the agreed degraded case). Always renders when
-// data.parking is present, independent of the map pins below.
-function renderParking(parking) {
-if (!parking || !parking.length) return;
-var $m = $("<div>").addClass("msg bot park");
-$("<div>").addClass("ph").text("Parcheggi vicino alla destinazione:").appendTo($m);
-parking.forEach(function (p) {
-var dist = (typeof p.distance_km === "number") ? (Math.round(p.distance_km * 1000) + " m") : "";
-var hasFree = (p.free_spaces !== null && p.free_spaces !== undefined);
-var freeTxt = hasFree
-? (p.free_spaces + (typeof p.total_spaces === "number" ? "/" + p.total_spaces : "") + " liberi")
-: "post. n/d";
-var $row = $("<div>").addClass("pi");
-$("<span>").addClass("pn").text((p.name || "Parcheggio") + (dist ? " · " + dist : "")).appendTo($row);
-$("<span>").addClass("pf" + (hasFree ? "" : " na")).text(freeTxt).appendTo($row);
-$m.append($row);
-});
-$("#advChat").append($m);
-$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
-}
 // Map pins via addSelectorPin (one event per car park, by serviceUri - Snap4City's own widget
 // loops one event per pin, so we do too). REAL-MACHINE NOTE (L30): the passedData fields, the
 // SuperServiceMap base, and the clear-pins event are the documented/likely shape but UNVERIFIED
@@ -347,7 +262,6 @@ addMsg("✗ " + (response.error || "richiesta fallita"), "err");
 history = (response && response.messages) || history;  // carry multi-turn state
 addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
-renderJourney(journeyLegs(data));
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
 if (routes.length) {
@@ -355,10 +269,9 @@ try { drawRoutes(routes, data.origin, data.destination); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
 }
 // Parking (car routes). Clear last turn's pins unconditionally so a non-car follow-up wipes
-// them; then render the list + pins when present (independent of routes - parking shows even
-// if the car route itself came back empty).
+// them; then plot the pins when present (independent of routes - parking pins show even if the
+// car route itself came back empty). The availability is stated in the reply text, not a list.
 clearParkingPins();
-renderParking(data.parking);
 drawParkingPins(data.parking);
 }
 }).fail(function (xhr, status) {
