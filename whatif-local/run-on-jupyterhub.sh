@@ -18,7 +18,8 @@
 #
 # Env knobs:
 #   WHATIF_DAEMON=1   start Tomcat in the background (catalina.sh start) and return, instead of
-#                     foreground. Used by the repo-root run-jupyterhub.sh one-shot launcher.
+#                     foreground. The standard flow runs foreground (this terminal shows the
+#                     'PT router ready.' line and Ctrl-C stops it cleanly).
 #   REBUILD_GRAPH=1   wipe data/graph-cache/ before boot. Use this to recover from a
 #                     'Wrong index checksum, store was not closed properly' error, which means a
 #                     previous run was hard-killed (kill -9 / OOM / terminal closed) before the PT
@@ -101,7 +102,7 @@ export CATALINA_OPTS="-Xmx12g -Xms2g"
 
 echo "      endpoint: http://localhost:8080/whatif-router/route"
 if [ "${WHATIF_DAEMON:-0}" = "1" ]; then
-  # Background mode (used by run-jupyterhub.sh): start as a daemon and return. Logs go to
+  # Background mode: start as a daemon and return. Logs go to
   # $TOMCAT_DIR/logs/catalina.out. The caller is responsible for a clean 'catalina.sh stop'
   # (which writes MapDB's clean-shutdown flag and prevents the checksum corruption on next boot).
   echo "== 5. starting Tomcat (background daemon). First boot builds the graph-cache (minutes),"

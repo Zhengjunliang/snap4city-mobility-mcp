@@ -254,14 +254,14 @@ legs.forEach(function (leg) {
 var $leg = $("<div>").addClass("leg");
 if (leg.transport === "foot") {
 var m = (typeof leg.distance_km === "number") ? " · " + Math.round(leg.distance_km * 1000) + " m" : "";
-$("<div>").addClass("legh").text("🚶 A piedi" + m).appendTo($leg);
+$("<div>").addClass("legh").text("A piedi" + m).appendTo($leg);
 } else {
 var head = "";
 if (leg.line) head += "Linea " + leg.line;
 if (leg.provider) head += (head ? " (" + leg.provider + ")" : leg.provider);
-if (leg.headsign) head += " → " + leg.headsign;
-if (!head) head = (leg.from || "") + (leg.to && leg.to !== leg.from ? " → " + leg.to : "");
-$("<div>").addClass("legh").text("🚌 " + (head || "Bus")).appendTo($leg);
+if (leg.headsign) head += " verso " + leg.headsign;
+if (!head) head = (leg.from || "") + (leg.to && leg.to !== leg.from ? " - " + leg.to : "");
+$("<div>").addClass("legh").text(head || "Bus").appendTo($leg);
 (leg.stops || []).forEach(function (s) {
 var $s = $("<div>").addClass("stop");
 $("<span>").addClass("sn").text(s.name || "").appendTo($s);

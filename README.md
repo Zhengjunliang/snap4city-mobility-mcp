@@ -134,8 +134,7 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
 
 The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically calls the remote `snap4agentic_advisor_native` tools (geocoding + routing) in Python over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
 
-Run **two processes** on the JupyterHub (or start both — plus the optional whatif-router — from a
-single terminal with `bash run-jupyterhub.sh`; see §11). First the **local MCP server** that serves
+Run **two processes** on the JupyterHub (three with the optional whatif-router; see §11). First the **local MCP server** that serves
 forward geocoding (referente's remote `address_search_location` is server-side broken, so we host
 our own tool wrapping the public km4city ServiceMap — see `docs/lessons.md` L28/L29). It only needs
 outbound HTTP to the public ServiceMap:
@@ -190,7 +189,6 @@ snap4city-mobility-mcp/
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
 ├── api.py                      # FastAPI bridge for the dashboard chat box (POST /advise; writes full JSON to outputs.txt)
-├── run-jupyterhub.sh           # one-shot JupyterHub launcher: mcp_server + bridge (+ optional whatif-router), clean Ctrl-C stop (§11)
 ├── frontend/                   # Snap4City dashboard front-end (widgetExternalContent chat box + widgetMap)
 ├── whatif-local/               # local whatif-router harness (optional, real PT lines) + the referente perf patch (see its README)
 ├── docs/
@@ -279,32 +277,13 @@ TBD — academic project.
 
 Run from a **JupyterHub terminal** inside the `s4c` conda env (Python 3.11). Two processes are always needed — the local geocode MCP server (`:8020`) and the advisor bridge (`:8010`) — plus an optional local whatif-router (`:8080`) for real public-transport lines.
 
-### Option A — one-shot launcher (recommended)
-
-Start everything from **one** terminal:
+Start each process in its **own terminal** (in the `s4c` conda env), the local MCP server first. **Always stop a process with `Ctrl-C`, never by just closing the tab** — a closed tab leaves Tomcat running as a zombie holding `:8080`, and the next boot then fails with `Address already in use` / `read lock ... failed`. If zombies pile up, sweep them and confirm the ports are free before restarting:
 
 ```bash
-bash run-jupyterhub.sh
+whatif-local/apache-tomcat-9.0.119/bin/catalina.sh stop 20 -force 2>/dev/null
+pkill -9 -f 'apache-tomcat-9.0.119'
+ss -ltn | grep -E ':8080|:8020|:8010' || echo "all ports free"
 ```
-
-- Launches `mcp_server` (`:8020`, background) + the bridge `uvicorn api:app` (`:8010`, foreground), and — if `whatif-local/whatif-router.war` is present — the whatif-router (`:8080`, background) too, wiring `S4C_WHATIF_ROUTER_URL` for you.
-- `Ctrl-C` stops all of them **cleanly** — the Tomcat stop writes MapDB's clean-shutdown flag, so the next boot doesn't hit the `Wrong index checksum` corruption.
-- Knobs: `USE_WHATIF=0` skips the router (use once referente loads the GTFS + patch online); `REBUILD_GRAPH=1` wipes `data/graph-cache` first to recover from a checksum-corruption error.
-
-> First whatif boot builds the graph-cache (minutes). foot/car routing + geocoding work immediately; the launcher prints a `>>> whatif PT router READY` banner in this same terminal once buses are available (or a `FAILED` banner pointing at `catalina.out` if the graph-cache is corrupt — restart with `REBUILD_GRAPH=1`). No second terminal needed.
-
-Self-check (separate terminal):
-
-```bash
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
-```
-
-Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).
-
-### Option B — manual (one process per terminal)
-
-Prefer to watch each process on its own? Start them in **separate terminals**, the local MCP server first.
 
 **Terminal 1 — local geocode MCP server** (forward geocode, wraps public km4city ServiceMap, `docs/lessons.md` L29). Must be up before the bridge:
 
@@ -320,11 +299,18 @@ Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127
 uvicorn api:app --host 0.0.0.0 --port 8010
 ```
 
-Self-check it as in Option A.
+Self-check (separate terminal):
+
+```bash
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+```
+
+Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).
 
 ### Optional — local whatif-router (real public-transport lines)
 
-`bus_route` calls the Snap4City What-If GraphHopper router at `https://www.snap4city.org/whatif-router/route` by default, but that online instance currently has **no Tuscany GTFS loaded** (returns a degraded walking line, `docs/lessons.md` L31). To test real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** and point `bus_route` at it over `localhost` (no tunnel — the router and `mcp_server` share the JupyterHub). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Option A starts this automatically; to run it standalone (a **third** terminal), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
+`bus_route` calls the Snap4City What-If GraphHopper router at `https://www.snap4city.org/whatif-router/route` by default, but that online instance currently has **no Tuscany GTFS loaded** (returns a degraded walking line, `docs/lessons.md` L31). To test real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** and point `bus_route` at it over `localhost` (no tunnel — the router and `mcp_server` share the JupyterHub). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Run it in a **third** terminal (start it FIRST — the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
 
 ```bash
 bash whatif-local/run-on-jupyterhub.sh   # installs Java8 + Tomcat9, fetches OSM+GTFS, deploys war, starts Tomcat (foreground)

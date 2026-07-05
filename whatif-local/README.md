@@ -62,13 +62,14 @@ referente 把 GTFS 放线上 + 合入 perf patch 后, 清掉 `S4C_WHATIF_ROUTER_
    `curl -s -X POST localhost:8010/advise -d '{"query":"da Duomo a Campo di Marte in autobus","history":[]}'`。
    `debug.log` 里 `bus_route took` 应 < 2s, instructions 含真公交段 (trip/agency/line/stop)。
 
-> **一键起全部**: 上三步 (mcp_server + bridge + router) 可用 repo 根 `bash run-jupyterhub.sh` 单终端拉起,
-> Ctrl-C 干净停 (含 `catalina.sh stop`, 写 MapDB clean flag 避免下条 checksum 坑)。见 `README.md` §11。
+> **停止一定 Ctrl-C** (前台 Tomcat 收到 SIGINT 走 `catalina.sh stop` → contextDestroyed 写 MapDB clean flag,
+> 避免下条 checksum 坑), **别直接关标签** (关标签不杀后台 JVM → 僵尸占 :8080, 下次 `Address already in use`)。
+> 三终端起法见 `README.md` §11。
 
 > **`Wrong index checksum, store was not closed properly`**: 上次 Tomcat 被硬杀 (kill -9 / OOM / 关终端)
 > 没写 MapDB clean-shutdown 标志 → 图缓存判为损坏 (patch 单例常驻, 只有 `catalina.sh stop` /
 > `PtWarmupListener.contextDestroyed` 才写标志)。修: `REBUILD_GRAPH=1 bash whatif-local/run-on-jupyterhub.sh`
-> (或手动 `rm -rf whatif-local/data/graph-cache/*`), 重建图数分钟。日后用 `run-jupyterhub.sh` 或
+> (或手动 `rm -rf whatif-local/data/graph-cache/*`), 重建图数分钟。日后用 Ctrl-C 或
 > `catalina.sh stop` 干净停即不复发。
 
 测完 referente 把数据/patch 上线后: 清 `S4C_WHATIF_ROUTER_URL` 回默认, 停 Tomcat。
