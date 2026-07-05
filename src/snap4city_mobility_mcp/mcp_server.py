@@ -45,11 +45,13 @@ HTTP_TIMEOUT_S = 40.0
 # by calling this endpoint with vehicle=bus, which returns a bus-road route as WKT. We wrap
 # it here (same local-server pattern as the geocode tool, L29) so forward bus routing is a
 # local MCP tool the client drives, never a raw HTTP call from the orchestrator.
-# S4C_WHATIF_ROUTER_URL overrides the base so bus_route can be pointed at a locally-run
-# whatif-router container (loaded with Tuscany GTFS, see whatif-local/) for end-to-end
-# testing before referente loads the data on the online instance; unset = online default.
+# S4C_WHATIF_ROUTER_URL overrides the base. The default points at the LOCALLY-run whatif-router
+# on the JupyterHub (loaded with Tuscany GTFS, see whatif-local/) because the online instance has
+# no GTFS yet and returns a walking degrade (L31/L34). REVERT this default to
+# "https://www.snap4city.org/whatif-router/route" once referente loads the GTFS + perf patch on the
+# online instance (or just set S4C_WHATIF_ROUTER_URL to it) — then the local Tomcat is unneeded.
 WHATIF_ROUTER_URL = os.environ.get(
-    "S4C_WHATIF_ROUTER_URL", "https://www.snap4city.org/whatif-router/route"
+    "S4C_WHATIF_ROUTER_URL", "http://localhost:8080/whatif-router/route"
 )
 
 mcp = FastMCP("snap4mobility-local")

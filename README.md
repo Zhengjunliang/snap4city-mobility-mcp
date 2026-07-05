@@ -310,7 +310,7 @@ Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`.
 
 ### Optional — local whatif-router (real public-transport lines)
 
-`bus_route` calls the Snap4City What-If GraphHopper router at `https://www.snap4city.org/whatif-router/route` by default, but that online instance currently has **no Tuscany GTFS loaded** (returns a degraded walking line, `docs/lessons.md` L31). To test real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** and point `bus_route` at it over `localhost` (no tunnel — the router and `mcp_server` share the JupyterHub). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Run it in a **third** terminal (start it FIRST — the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
+`bus_route` calls the Snap4City What-If GraphHopper router, defaulting to a **local** instance at `http://localhost:8080/whatif-router/route` (`mcp_server.py`'s `WHATIF_ROUTER_URL`) because the online `https://www.snap4city.org/whatif-router/route` has **no Tuscany GTFS loaded** and returns a degraded walking line (`docs/lessons.md` L31/L34). So for real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** — the router and `mcp_server` share the JupyterHub, so `bus_route` reaches it over `localhost` (no tunnel). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Run it in a **third** terminal (start it FIRST — the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
 
 ```bash
 bash whatif-local/run-on-jupyterhub.sh   # installs Java8 + Tomcat9, fetches OSM+GTFS, deploys war, starts Tomcat (foreground)
@@ -322,4 +322,4 @@ First boot builds the graph-cache (minutes); wait for `PtWarmupListener: PT rout
 export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
 ```
 
-Once referente loads the GTFS + merges the perf patch on the online instance, drop `S4C_WHATIF_ROUTER_URL` to fall back to the default and stop Tomcat.
+Once referente loads the GTFS + merges the perf patch on the online instance, revert `mcp_server.py`'s `WHATIF_ROUTER_URL` default to the online URL (or set `S4C_WHATIF_ROUTER_URL` to it) and stop Tomcat.
