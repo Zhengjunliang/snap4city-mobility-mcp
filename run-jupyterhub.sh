@@ -25,6 +25,12 @@ cd "$HERE"
 LOGDIR="$HERE/.run-logs"; mkdir -p "$LOGDIR"
 WAR="$HERE/whatif-local/whatif-router.war"
 TOMCAT_DIR="$HERE/whatif-local/apache-tomcat-9.0.119"
+# Marker for "the whatif-router was started but not yet stopped cleanly". Created on every whatif
+# boot, removed only after a successful 'catalina.sh stop' (which flushes MapDB's clean-shutdown
+# flag). If it survives into the next boot, the last run was hard-killed (kill -9 / closed tab /
+# JupyterHub culling the container) and the graph-cache is dirty -> auto-rebuild instead of failing
+# with "Wrong index checksum". Lives under data/ (gitignored) so it never enters git.
+UNCLEAN_LOCK="$HERE/whatif-local/data/.whatif-unclean.lock"
 
 USE_WHATIF="${USE_WHATIF:-auto}"
 if [ "$USE_WHATIF" = "auto" ]; then
@@ -42,18 +48,32 @@ cleanup() {
   [ -n "$WATCH_PID" ]   && kill "$WATCH_PID" 2>/dev/null
   [ -n "$UVICORN_PID" ] && kill "$UVICORN_PID" 2>/dev/null
   [ -n "$MCP_PID" ]     && kill "$MCP_PID" 2>/dev/null
-  # clean Tomcat shutdown -> writes MapDB clean flag -> no checksum corruption next boot
+  # clean Tomcat shutdown -> writes MapDB clean flag -> no checksum corruption next boot. Only clear
+  # the unclean-lock on a successful stop, so a hard kill (this trap never runs) leaves it and the
+  # next boot auto-rebuilds.
   if [ "$USE_WHATIF" = "1" ] && [ -x "$TOMCAT_DIR/bin/catalina.sh" ]; then
-    "$TOMCAT_DIR/bin/catalina.sh" stop 20 -force >/dev/null 2>&1
+    if "$TOMCAT_DIR/bin/catalina.sh" stop 20 -force >/dev/null 2>&1; then
+      rm -f "$UNCLEAN_LOCK"
+    fi
   fi
 }
 trap cleanup EXIT INT TERM
 
 if [ "$USE_WHATIF" = "1" ]; then
   echo "== [1/3] whatif-router (Tomcat :8080, background) =="
+  # Auto-recover from a dirty graph-cache: if the previous run left the unclean-lock (hard-killed
+  # before catalina.sh stop could flush MapDB's clean flag), rebuild the cache this boot so the PT
+  # router loads instead of failing with "Wrong index checksum". A clean Ctrl-C removes the lock, so
+  # a normal stop/start stays fast — no manual REBUILD_GRAPH=1 after a JupyterHub cull / closed tab.
+  WHATIF_REBUILD="${REBUILD_GRAPH:-0}"
+  if [ -f "$UNCLEAN_LOCK" ]; then
+    echo ">>> previous whatif-router run did not stop cleanly -> auto-rebuilding graph-cache (a few min)"
+    WHATIF_REBUILD=1
+  fi
+  mkdir -p "$(dirname "$UNCLEAN_LOCK")"; : > "$UNCLEAN_LOCK"
   # truncate the log so the readiness watcher below can't match a 'PT router ready.' from a prior run
   [ -f "$CATALINA_OUT" ] && : > "$CATALINA_OUT"
-  WHATIF_DAEMON=1 REBUILD_GRAPH="${REBUILD_GRAPH:-0}" bash whatif-local/run-on-jupyterhub.sh
+  WHATIF_DAEMON=1 REBUILD_GRAPH="$WHATIF_REBUILD" bash whatif-local/run-on-jupyterhub.sh
   export S4C_WHATIF_ROUTER_URL="http://localhost:8080/whatif-router/route"
   # Background watcher: whatif builds the graph in the background (minutes, often with a silent log),
   # so poll catalina.out and print ONE clear banner into this terminal the moment PT is ready (or
