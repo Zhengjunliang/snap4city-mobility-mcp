@@ -56,6 +56,13 @@ html, body { height: 100%; margin: 0; }
 .adv .park .pi .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .adv .park .pi .pf { color: #7fe0a0; white-space: nowrap; }
 .adv .park .pi .pf.na { color: #9aa6b8; }
+.adv .msg.journey { background: #2a2436; border: 1px solid #ff7f00; }
+.adv .journey .jh { font-weight: bold; margin-bottom: 4px; }
+.adv .journey .leg { margin: 4px 0; }
+.adv .journey .legh { font-weight: bold; padding: 2px 0; }
+.adv .journey .stop { display: flex; justify-content: space-between; gap: 10px; padding: 1px 0 1px 14px; }
+.adv .journey .stop .sn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adv .journey .stop .st { color: #ffb15c; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -95,7 +102,7 @@ var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", displa
 // its mode color; there is no primary/alternate dimming. The color value fed to a leg MUST
 // be an array - a single string makes the line invisible. (Line width is left alone: the
 // widgetMap may not support a width field and L30 warns unsupported fields crash it.)
-var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ffa500" };
+var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 // ---- Chat UI ------------------------------------------------------------
@@ -217,6 +224,56 @@ return buildTraj(route, color, origin, destination);
 });
 trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
 }
+// ---- Public-transport journey: fermate + orari list ---------------------
+// The bus route's walk->ride->walk legs (data.routes[mode=public_transport].legs, or the
+// top-level data.legs when PT is the fastest route). Each bus leg carries line/provider/
+// headsign + stops [{name, time}] (from the backend group_arc_legs); foot legs carry only a
+// distance. Returns null when there is no PT route with legs.
+function journeyLegs(data) {
+var routes = data.routes || [];
+for (var i = 0; i < routes.length; i++) {
+if (routes[i].mode === "public_transport" && routes[i].legs && routes[i].legs.length) return routes[i].legs;
+}
+if (data.mode === "public_transport" && data.legs && data.legs.length) return data.legs;
+return null;
+}
+// GTFS stop time "06:23:00" -> "06:23" (keep HH:MM; anything else passes through; null -> "").
+function fmtStopTime(t) {
+if (typeof t !== "string" || !t) return "";
+return /^\d{1,2}:\d{2}:\d{2}$/.test(t) ? t.slice(0, 5) : t;
+}
+// Compact fermate + orari list under the reply (bus theme, orange border). Rendered ONLY when a
+// leg actually carries stops - with no Toscana GTFS the router degrades to a walking line whose
+// single bus leg has no stops (from/to are street names), so the box is skipped rather than
+// shown empty. Text goes through .text() (no injection), same pattern as renderParking.
+function renderJourney(legs) {
+if (!legs || !legs.some(function (l) { return l.stops && l.stops.length; })) return;
+var $m = $("<div>").addClass("msg bot journey");
+$("<div>").addClass("jh").text("Fermate e orari:").appendTo($m);
+legs.forEach(function (leg) {
+var $leg = $("<div>").addClass("leg");
+if (leg.transport === "foot") {
+var m = (typeof leg.distance_km === "number") ? " · " + Math.round(leg.distance_km * 1000) + " m" : "";
+$("<div>").addClass("legh").text("🚶 A piedi" + m).appendTo($leg);
+} else {
+var head = "";
+if (leg.line) head += "Linea " + leg.line;
+if (leg.provider) head += (head ? " (" + leg.provider + ")" : leg.provider);
+if (leg.headsign) head += " → " + leg.headsign;
+if (!head) head = (leg.from || "") + (leg.to && leg.to !== leg.from ? " → " + leg.to : "");
+$("<div>").addClass("legh").text("🚌 " + (head || "Bus")).appendTo($leg);
+(leg.stops || []).forEach(function (s) {
+var $s = $("<div>").addClass("stop");
+$("<span>").addClass("sn").text(s.name || "").appendTo($s);
+$("<span>").addClass("st").text(fmtStopTime(s.time)).appendTo($s);
+$leg.append($s);
+});
+}
+$m.append($leg);
+});
+$("#advChat").append($m);
+$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
+}
 // ---- Parking near the destination (car routes) --------------------------
 // Compact list under the reply: name + distance + free spaces ("post. n/d" when live
 // availability is not loaded server-side - the agreed degraded case). Always renders when
@@ -290,6 +347,7 @@ addMsg("✗ " + (response.error || "richiesta fallita"), "err");
 history = (response && response.messages) || history;  // carry multi-turn state
 addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
+renderJourney(journeyLegs(data));
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
 if (routes.length) {

@@ -31,11 +31,15 @@ if [ "$USE_WHATIF" = "auto" ]; then
   if [ -f "$WAR" ]; then USE_WHATIF=1; else USE_WHATIF=0; fi
 fi
 
+CATALINA_OUT="$TOMCAT_DIR/logs/catalina.out"
+
 MCP_PID=""
 UVICORN_PID=""
+WATCH_PID=""
 cleanup() {
   echo
   echo "== stopping all =="
+  [ -n "$WATCH_PID" ]   && kill "$WATCH_PID" 2>/dev/null
   [ -n "$UVICORN_PID" ] && kill "$UVICORN_PID" 2>/dev/null
   [ -n "$MCP_PID" ]     && kill "$MCP_PID" 2>/dev/null
   # clean Tomcat shutdown -> writes MapDB clean flag -> no checksum corruption next boot
@@ -47,10 +51,29 @@ trap cleanup EXIT INT TERM
 
 if [ "$USE_WHATIF" = "1" ]; then
   echo "== [1/3] whatif-router (Tomcat :8080, background) =="
+  # truncate the log so the readiness watcher below can't match a 'PT router ready.' from a prior run
+  [ -f "$CATALINA_OUT" ] && : > "$CATALINA_OUT"
   WHATIF_DAEMON=1 REBUILD_GRAPH="${REBUILD_GRAPH:-0}" bash whatif-local/run-on-jupyterhub.sh
   export S4C_WHATIF_ROUTER_URL="http://localhost:8080/whatif-router/route"
-  echo "   note: first boot builds the graph-cache (minutes). Wait for 'PT router ready.' before"
-  echo "         testing public transport:  tail -f $TOMCAT_DIR/logs/catalina.out"
+  # Background watcher: whatif builds the graph in the background (minutes, often with a silent log),
+  # so poll catalina.out and print ONE clear banner into this terminal the moment PT is ready (or
+  # failed) — no need to open a second terminal to tail the log.
+  (
+    while true; do
+      if grep -q "PT router ready\." "$CATALINA_OUT" 2>/dev/null; then
+        echo ">>> whatif PT router READY — public-transport (bus) queries now work."
+        break
+      fi
+      if grep -qE "warmup failed|Wrong index checksum" "$CATALINA_OUT" 2>/dev/null; then
+        echo ">>> whatif PT router FAILED to warm up — foot/car still work; for buses see $CATALINA_OUT"
+        echo ">>> (likely a corrupted graph-cache — restart with:  REBUILD_GRAPH=1 bash run-jupyterhub.sh )"
+        break
+      fi
+      sleep 3
+    done
+  ) &
+  WATCH_PID=$!
+  echo "   building graph in background (minutes) — a 'whatif PT router READY' line will appear below when done."
 else
   echo "== [1/3] whatif-router SKIPPED (no local war / USE_WHATIF=0) — bus_route uses the online default =="
 fi
@@ -60,6 +83,7 @@ python -m snap4city_mobility_mcp.mcp_server >"$LOGDIR/mcp_server.log" 2>&1 &
 MCP_PID=$!
 
 echo "== [3/3] advisor bridge uvicorn (:8010, foreground) — Ctrl-C stops everything =="
+echo "         (foot/car routing + geocoding are ready now; buses wait for the READY line above)"
 uvicorn api:app --host 0.0.0.0 --port 8010 &
 UVICORN_PID=$!
 wait "$UVICORN_PID"
