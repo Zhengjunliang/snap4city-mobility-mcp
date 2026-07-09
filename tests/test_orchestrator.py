@@ -313,7 +313,8 @@ async def test_execute_public_transport_routes_via_bus_route(make_client, make_r
     transit-blind MCP routing; a returned bus journey becomes a drawable PT route."""
     bus_journey = {"journey": {"routes": [{
         "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38,
-        "arc": [{"transport": "bus", "transport_provider": "public", "desc": "nd"}],
+        "arc": [{"transport": "bus", "transport_provider": "at - Firenze urbano",
+                 "desc": "linea 57 da PORTE NUOVE BELFIORE", "line": "57"}],
     }]}}
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
@@ -446,8 +447,9 @@ async def test_execute_foot_only_skips_parking(make_client, make_result):
     assert out["parking"] == []
 
 
-def test_extract_data_drops_foot_only_pt():
-    """PT degraded to a walking-only journey (no transit leg) → no bus route, no error."""
+def test_extract_data_drops_foot_only_pt_when_real_foot_present():
+    """PT degraded to a walking-only journey (no transit leg): with a genuine foot route in
+    the same run it is a duplicate → dropped, no bus route, no error."""
     results = [
         _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("public_transport", route={
@@ -457,6 +459,24 @@ def test_extract_data_drops_foot_only_pt():
     ]
     data = _extract_data(results)
     assert [r["mode"] for r in data["routes"]] == ["foot_shortest"]
+    assert data["duration"] == "00:20:00"
+    assert "route_error" not in data
+
+
+def test_extract_data_relabels_foot_only_pt_as_walk_when_only_result():
+    """Explicit bus request degraded to walking (short trip, walking beats any bus, L39):
+    surfaced as a foot route — drawable walking line + real walk duration — instead of
+    being dropped; respond still gets the pt_degraded_to_foot hint and says so."""
+    results = [
+        _routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,1 1)", "distance": 1.328, "time": "0:16:00",
+            "arc": [{"transport": "foot", "desc": "a piedi 1328 m", "distance": 1.328}],
+        }),
+    ]
+    data = _extract_data(results)
+    assert [r["mode"] for r in data["routes"]] == ["foot_shortest"]
+    assert data["mode"] == "foot_shortest"
+    assert data["distance_km"] == 1.328 and data["duration"] == "0:16:00"
     assert "route_error" not in data
 
 

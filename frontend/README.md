@@ -63,5 +63,8 @@ and `messages[-1].content` is the Italian reply.
 
 - The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).
 - Multi-turn: the front-end keeps `response.messages` and sends it back as `history`.
-- Public transport (`bus`) is not wired yet — backend PT routing returns empty server-side;
-  foot works, car is supported next.
+- Public transport (`bus`) is wired via the backend `bus_route` tool (What-If GraphHopper,
+  `docs/lessons.md` L19/L34). A walking-only itinerary (short trip — walking beats any bus,
+  L39) comes back relabeled as a foot route, so the map draws a fast green walking line.
+  For a real bus route the map still re-routes `type:"bus"` itself against the online
+  whatif-router (slow until the referente deploys the perf patch + GTFS, L39).

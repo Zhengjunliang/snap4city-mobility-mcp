@@ -27,6 +27,7 @@ import time
 from datetime import datetime
 from functools import partial
 from typing import Any, TypedDict
+from zoneinfo import ZoneInfo
 
 from fastmcp import Client
 from langgraph.graph import END, StateGraph
@@ -421,7 +422,10 @@ async def execute(
             "start_longitude": origin[0],
             "end_latitude": dest[1],
             "end_longitude": dest[0],
-            "startdatetime": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+            # Pinned to the network's timezone: the servlet parses this as a LOCAL
+            # datetime in its own zone, so a naive now() from a UTC process would query
+            # the GTFS timetable 2h off (wrong service window on time-sensitive trips).
+            "startdatetime": datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%dT%H:%M"),
         }
         start = time.perf_counter()
         result = await exec_tool(lc, "bus_route", args)
@@ -592,6 +596,7 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     """
     route_error: str | None = None
     by_vehicle: dict[str, dict[str, Any]] = {}
+    pt_walk: dict[str, Any] | None = None
     for entry in results:
         if entry.get("name") != "routing":
             continue
@@ -602,13 +607,6 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             journey = result["journey"]
             first = (journey.get("routes") or [{}])[0]
             routetype = _routetype_of(entry)
-            if routetype == "public_transport" and _pt_is_foot_only(result):
-                # Degraded to a walking-only journey: not a real PT option, so don't
-                # surface a (foot-duplicate) bus line. No route_error either — it
-                # "succeeded", just isn't public transport. Logged so this silent drop is
-                # distinguishable from a timeout/empty error when diagnosing a missing PT line.
-                logger.debug("PT route dropped: foot-only degraded journey (no transit leg)")
-                continue
             route = {
                 "mode": routetype,
                 "wkt": first.get("wkt"),  # full LINESTRING, not truncated
@@ -620,11 +618,24 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "source_node": journey.get("source_node"),
                 "destination_node": journey.get("destination_node"),
             }
+            if routetype == "public_transport" and _pt_is_foot_only(result):
+                # Walking-only journey: not a real PT option (respond gets the
+                # pt_degraded_to_foot hint and says so), but the walk itself is real —
+                # keep it as a foot candidate so an explicit bus request still gets a
+                # drawable walking line instead of nothing (L39).
+                logger.debug("PT route degraded: foot-only journey (no transit leg)")
+                route["mode"] = "foot_shortest"
+                pt_walk = route
+                continue
             by_vehicle[_VEHICLE.get(routetype or "", routetype or "")] = route
         elif "error" in result and route_error is None:
             # First error wins = the mode the user actually asked for (modes run in
             # request order), not a later fallback's.
             route_error = result["error"]
+    if pt_walk is not None and "foot" not in by_vehicle:
+        # Only when no real foot route exists (explicit-bus request); in a multi-mode
+        # run the genuine foot_shortest result wins and the degraded PT walk is a dup.
+        by_vehicle["foot"] = pt_walk
     if not by_vehicle:
         return {"route_error": route_error} if route_error else {}
     routes = sorted(by_vehicle.values(), key=_route_minutes)

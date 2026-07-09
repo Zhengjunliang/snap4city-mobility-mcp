@@ -165,26 +165,10 @@ def test_wkt_length_km():
     assert _wkt_length_km("not a linestring") is None
 
 
-def test_bus_arcs_degrade_falls_back_to_streets():
-    # No GTFS PT ride (online instance without Tuscany data): walking-only instructions must
-    # still yield synthetic bus arcs from the street names, not an empty/foot-only journey (L31).
-    first = {
-        "instructions": [
-            {"text": "Turn right onto Via della Scala", "street_name": "Via della Scala", "leg": None},
-            {"text": "Continue", "street_name": "", "leg": None},
-            {"text": "Turn left onto Via dei Martelli", "street_name": "Via dei Martelli"},
-        ]
-    }
-    arc = _bus_arcs(first)
-    assert [a["desc"] for a in arc] == ["Via della Scala", "Via dei Martelli"]
-    assert all(a == {"transport": "bus", "transport_provider": "public", "desc": a["desc"]} for a in arc)
-
-
-def test_bus_arcs_degrade_with_walk_distances_still_bus_not_foot_only():
-    # Regression guard: walking instructions now populate foot arcs, so the fallback must be
-    # gated on "no PT ride seen", NOT "no arc produced". A degrade where the walk steps carry
-    # distances would make an `if arc:` gate return a foot-only journey -> _pt_is_foot_only
-    # drops the whole route online. The synthetic-bus fallback must still win here.
+def test_bus_arcs_walk_only_yields_foot_arcs():
+    # No PT ride in the itinerary (router has no GTFS, or — GTFS loaded — walking beats any
+    # bus on a short trip, L39): honest foot arcs only, NEVER synthetic bus arcs. Downstream
+    # _pt_is_foot_only then flags the journey and it is presented as a walk, not a fake bus.
     first = {
         "instructions": [
             {"text": "Turn right onto Via della Scala", "street_name": "Via della Scala", "distance": 200.0, "time": 144000, "leg": None},
@@ -192,10 +176,12 @@ def test_bus_arcs_degrade_with_walk_distances_still_bus_not_foot_only():
         ]
     }
     arc = _bus_arcs(first)
-    assert arc and all(a["transport"] == "bus" for a in arc)  # never foot-only
-    assert [a["desc"] for a in arc] == ["Via della Scala", "Viale Belfiore"]
+    assert arc == [
+        {"transport": "foot", "transport_provider": None, "desc": "a piedi 500 m", "distance": 0.5}
+    ]
 
 
-def test_bus_arcs_empty_instructions_yield_placeholder():
-    arc = _bus_arcs({"instructions": []})
-    assert arc == [{"transport": "bus", "transport_provider": "public", "desc": "nd"}]
+def test_bus_arcs_empty_instructions_yield_no_arcs():
+    # Nothing to walk, nothing to ride: empty arc list (group_arc_legs/_pt_is_foot_only
+    # treat it as foot-only), no placeholder invented.
+    assert _bus_arcs({"instructions": []}) == []

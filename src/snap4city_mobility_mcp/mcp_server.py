@@ -160,19 +160,16 @@ def _bus_arcs(first: dict[str, Any]) -> list[dict[str, Any]]:
     name the leg by its true line/endpoints and list its stops. The walk arcs before/between/
     after rides make the trip read like a door-to-door journey.
 
-    When the router has no Tuscany GTFS it returns walking-only instructions (the online
-    degrade, L31): no pt leg is ever seen, so we fall back to one synthetic bus arc per main
-    street, keeping the route shown as a bus route rather than dropped as a foot-only journey.
-    The fallback is gated on "no pt leg seen" (`saw_pt`), NOT "no arc produced" — walk arcs now
-    populate the list even in the degrade, so an `if arc:` gate would wrongly return a foot-only
-    journey and _pt_is_foot_only would drop the whole route.
+    A walking-only response (no pt leg: either the router has no GTFS, or — with GTFS loaded —
+    walking Pareto-dominates any bus for a short trip, L39) yields honest foot arcs. The client
+    (_pt_is_foot_only) detects that and presents the journey as "no convenient direct bus,
+    here is the walk" instead of a fake bus route.
 
     Consecutive rides by the same operator merge into one leg in group_arc_legs (its grouping
     key is (transport, provider)); transfers between two lines of the same operator are not yet
     split out. Single-line urban trips (the common Florence case) are unaffected.
     """
     arcs: list[dict[str, Any]] = []
-    saw_pt = False
     walk_m = 0.0
 
     def flush_walk() -> None:
@@ -193,7 +190,6 @@ def _bus_arcs(first: dict[str, Any]) -> list[dict[str, Any]]:
         legmap = leg.get("map") if isinstance(leg, dict) else None
         if isinstance(legmap, dict) and legmap.get("type") == "pt":
             flush_walk()
-            saw_pt = True
             line = legmap.get("route_name")
             operator = legmap.get("agency_name") or "public"
             headsign = legmap.get("trip_headsign")
@@ -225,19 +221,7 @@ def _bus_arcs(first: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(d, (int, float)):
                 walk_m += d
     flush_walk()
-    if saw_pt:
-        return arcs
-    # No GTFS PT ride in the response (online instance without Tuscany data): keep the legacy
-    # behaviour — one synthetic bus arc per main street so the road line is still shown as a
-    # bus route rather than dropped as a foot-only degrade (L31). Capped to keep it concise.
-    streets: list[str] = []
-    for ins in first.get("instructions") or []:
-        name = ins.get("street_name") if isinstance(ins, dict) else None
-        if isinstance(name, str) and name.strip() and name not in streets:
-            streets.append(name.strip())
-    return [
-        {"transport": "bus", "transport_provider": "public", "desc": s} for s in streets[:10]
-    ] or [{"transport": "bus", "transport_provider": "public", "desc": "nd"}]
+    return arcs
 
 
 def _normalize_feature(feature: dict[str, Any]) -> dict[str, Any]:
@@ -326,15 +310,16 @@ async def bus_route(
     The referente remote `routing` tool's public_transport mode never returns transit
     (L19); this wraps the What-If `vehicle=bus` endpoint the Gea-Night dashboard uses and
     returns a routing-shaped {"journey": {"routes": [...]}} so the client renders/narrates
-    it like any route. With Tuscany GTFS loaded the route carries an ordered walk -> ride ->
-    walk arc list (real line/operator/stops, see _bus_arcs); with no GTFS it degrades to one
-    synthetic `bus` arc per street so it is still kept, not dropped as foot-only (L31).
+    it like any route. The route carries an ordered walk -> ride -> walk arc list (real
+    line/operator/stops, see _bus_arcs); a walking-only itinerary (no GTFS, or walking beats
+    any bus on a short trip, L39) yields honest foot arcs the client presents as a walk.
     Returns {"error": ...} on any failure.
 
     `distance` is the door-to-door geometry length (from the WKT, since paths[0].distance
-    counts only walking-access metres). `time` (a "H:MM:SS" ride-time estimate = walking +
-    in-vehicle, excluding platform wait) is surfaced ONLY when a real GTFS ride is present;
-    the raw GraphHopper paths[0].time is never used (it is walking-pace / semantically mixed).
+    counts only walking-access metres). `time` is a "H:MM:SS" estimate summed from the
+    instructions (walking + in-vehicle `travelTime`, excluding platform wait) — real for a
+    GTFS ride and equally real for a pure walk; the raw GraphHopper paths[0].time is never
+    used (it is walking-pace / semantically mixed).
     """
     params = {
         "vehicle": "bus",
@@ -365,14 +350,13 @@ async def bus_route(
     if distance_km is None:
         dist = first.get("distance")
         distance_km = round(dist / 1000, 3) if isinstance(dist, (int, float)) else None
-    # Journey arcs: real transit legs (line/operator/stops) when the router has Tuscany GTFS,
-    # else a synthetic bus arc per street when it degrades to a road line (see _bus_arcs).
+    # Journey arcs: real transit legs (line/operator/stops) when the itinerary rides a bus,
+    # plain foot arcs when it is walking-only (see _bus_arcs).
     arc = _bus_arcs(first)
     route: dict[str, Any] = {"wkt": wkt, "distance": distance_km, "arc": arc}
-    # A real GTFS ride (a bus arc carrying a `line`) yields a trustworthy walk+ride duration;
-    # on the no-GTFS degrade (synthetic street arcs, no line) we have no timetable, so no time.
-    if any(a.get("transport") == "bus" and a.get("line") for a in arc):
-        route["time"] = _fmt_hms(_journey_duration_ms(first))
+    duration_ms = _journey_duration_ms(first)
+    if duration_ms > 0:
+        route["time"] = _fmt_hms(duration_ms)
     return {"journey": {"routes": [route]}}
 
 
