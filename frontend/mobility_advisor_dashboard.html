@@ -107,6 +107,12 @@ var gpsDenied = false;  // remembered PERMISSION_DENIED: skip further prompts th
 // Always calls cb exactly once: {lat, lng} on success, null on ANY failure (no API,
 // remembered denial, iframe permissions-policy block, timeout). enableHighAccuracy off +
 // maximumAge 60s: a fresh-ish city-level fix per send is enough for nearest-place picking.
+// A prefetch at load (bottom of this script) raises the permission prompt BEFORE the first
+// send: getCurrentPosition's timeout can fire while the prompt is still open, so without the
+// prefetch the first turn races the user's Allow click and goes out with gps null.
+// Failures log to the IFRAME console (select the widget iframe in DevTools to see them):
+// err.code 1 = denied by user or by a missing allow="geolocation" on the parent iframe,
+// 2 = position unavailable, 3 = timeout.
 function getGps(cb) {
 if (gpsDenied || !navigator.geolocation) { cb(null); return; }
 try {
@@ -114,9 +120,13 @@ navigator.geolocation.getCurrentPosition(function (pos) {
 cb({ lat: pos.coords.latitude, lng: pos.coords.longitude });
 }, function (err) {
 if (err && err.code === 1) gpsDenied = true;  // PERMISSION_DENIED (user or iframe policy)
+if (window.console) console.warn("[advisor] gps unavailable, code=" + (err && err.code) + " " + (err && err.message));
 cb(null);
-}, { timeout: 5000, maximumAge: 60000, enableHighAccuracy: false });
-} catch (e) { cb(null); }
+}, { timeout: 10000, maximumAge: 60000, enableHighAccuracy: false });
+} catch (e) {
+if (window.console) console.warn("[advisor] geolocation threw (permissions-policy?): " + e);
+cb(null);
+}
 }
 // ---- Chat UI ------------------------------------------------------------
 function addMsg(text, kind) {
@@ -317,6 +327,9 @@ $("#advInput").focus();
 $("#advSend").on("click", send);
 $("#advInput").on("keydown", function (e) { if (e.key === "Enter") send(); });
 $("#advInput").focus();
+// Prefetch: raise the permission prompt now and warm the position cache, so the FIRST
+// send doesn't race the Allow click (see getGps). Result is discarded on purpose.
+getGps(function (gps) { if (window.console) console.log("[advisor] gps prefetch: " + (gps ? "ok" : "unavailable")); });
 });
 </script>
 </body>

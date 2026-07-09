@@ -342,6 +342,7 @@ async def execute(
     """
     slots = state.get("slots") or {}
     user_gps = state.get("user_gps") or None
+    logger.debug("execute user_gps=%s", user_gps)
     results: list[dict[str, Any]] = []
     # Forward geocoding goes to our local MCP server (referente's is broken, L29); routing,
     # reverse geocode and near-search stay on the remote client. Tests pass only `client`,

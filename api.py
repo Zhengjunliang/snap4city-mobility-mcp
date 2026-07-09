@@ -30,7 +30,10 @@ from pydantic import BaseModel
 
 from snap4city_mobility_mcp.orchestrator import run_advisor
 
-logger = logging.getLogger(__name__)
+# Named under the package tree ON PURPOSE: _reset_debug_log attaches the per-turn
+# debug.log handler to the "snap4city_mobility_mcp" logger, so bridge-level lines
+# (received/sanitized gps) land in debug.log too. A bare __name__ ("api") would not.
+logger = logging.getLogger("snap4city_mobility_mcp.api")
 
 OUTPUTS = pathlib.Path("outputs.txt")  # full-output audit log, written in the cwd
 _PKG_LOGGER = "snap4city_mobility_mcp"
@@ -118,8 +121,13 @@ async def advise(req: AdviseRequest) -> dict:
     Never raises to the client: an infra failure (MCP/LLM unreachable) comes back as the
     JSend-style error shape run_advisor itself uses, so the front-end can render it."""
     _reset_debug_log()  # fresh debug.log for this turn (before run_advisor emits any DEBUG)
+    gps = _sanitize_gps(req.gps)
+    # First line of every turn's debug.log: what the widget sent vs what survived
+    # sanitization — the one fact needed to split a "GPS didn't work" report into
+    # front-end (raw null/garbage) vs back-end (sanitized away / ignored downstream).
+    logger.debug("advise turn: gps raw=%r sanitized=%r", req.gps, gps)
     try:
-        response = await run_advisor(req.query, req.history or [], gps=_sanitize_gps(req.gps))
+        response = await run_advisor(req.query, req.history or [], gps=gps)
     except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
         logger.exception("advise failed")
         response = {"status": "error", "error": f"{type(e).__name__}: {e}", "messages": req.history or []}
