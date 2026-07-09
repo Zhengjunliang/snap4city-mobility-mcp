@@ -39,8 +39,9 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <style>
-.adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
-.adv #advChat { flex: 1; overflow-y: auto; min-height: 120px; padding-right: 4px; }
+.adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; display: flex; flex-direction: column; position: absolute; top: 0; right: 0; bottom: 0; left: 0; box-sizing: border-box; }
+.adv h3 { margin: 0 0 8px; font-size: 15px; color: #f5c518; }
+.adv #advChat { flex: 1; overflow-y: auto; min-height: 0; padding-right: 4px; }
 .adv .msg { margin: 6px 0; padding: 7px 10px; border-radius: 10px; font-size: 13px; line-height: 1.35; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
 .adv .msg.user { background: #1f2a44; border: 1px solid #f5c518; color: #f5c518; margin-left: auto; }
 .adv .msg.bot { background: #28324d; border: 1px solid #3a4564; }
@@ -49,10 +50,13 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 .adv #advInput { flex: 1; box-sizing: border-box; padding: 8px; border: none; border-radius: 4px; font-size: 13px; }
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
+.adv .msg.thinking { color: #9aa6b8; font-style: italic; animation: advPulse 1.2s ease-in-out infinite; }
+@keyframes advPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 </style>
 </head>
 <body>
 <div class="adv">
+<h3>Mobility Advisor</h3>
 <div id="advChat"></div>
 <div class="row">
 <input id="advInput" type="text" placeholder='es. "da Piazza del Duomo a Santa Croce a piedi"' autocomplete="off">
@@ -249,6 +253,8 @@ if (!query) return;
 addMsg(query, "user");
 $("#advInput").val("");
 $("#advSend").prop("disabled", true);
+// Transient "thinking" bubble shown while the bridge computes; removed in always().
+var $thinking = addMsg("Sto pensando…", "bot thinking");
 $.ajax({
 url: BRIDGE_BASE + "/advise",
 type: "POST",
@@ -277,6 +283,7 @@ drawParkingPins(data.parking);
 }).fail(function (xhr, status) {
 addMsg("✗ bridge non raggiungibile (" + status + "). Controlla BRIDGE_BASE / il bridge.", "err");
 }).always(function () {
+$thinking.remove();
 $("#advSend").prop("disabled", false);
 $("#advInput").focus();
 });

@@ -310,13 +310,13 @@ Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`.
 
 ### Optional — local whatif-router (real public-transport lines)
 
-`bus_route` calls the Snap4City What-If GraphHopper router, defaulting to a **local** instance at `http://localhost:8080/whatif-router/route` (`mcp_server.py`'s `WHATIF_ROUTER_URL`) because the online `https://www.snap4city.org/whatif-router/route` has **no Tuscany GTFS loaded** and returns a degraded walking line (`docs/lessons.md` L31/L34). So for real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** — the router and `mcp_server` share the JupyterHub, so `bus_route` reaches it over `localhost` (no tunnel). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Run it in a **third** terminal (start it FIRST — the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
+`bus_route` calls the Snap4City What-If GraphHopper router, defaulting to a **local** instance at `http://localhost:8080/whatif-router/route` (`mcp_server.py`'s `WHATIF_ROUTER_URL`) because the online `https://www.snap4city.org/whatif-router/route` has **no Tuscany GTFS loaded** and returns a degraded walking line (`docs/lessons.md` L31/L34). So for real public transport, self-host a whatif-router loaded with Toscana GTFS **on the same JupyterHub** — the router and `mcp_server` share the JupyterHub, so `bus_route` reaches it over `localhost` (no tunnel). Full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Start it FIRST (the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
 
 ```bash
-bash whatif-local/run-on-jupyterhub.sh   # installs Java8 + Tomcat9, fetches OSM+GTFS, deploys war, starts Tomcat (foreground)
+bash whatif-local/run-on-jupyterhub.sh   # installs Java8 + Tomcat9, fetches OSM+GTFS, deploys war, starts Tomcat as a detached daemon
 ```
 
-First boot builds the graph-cache (minutes); wait for `PtWarmupListener: PT router ready.`, then leave it running. In the `mcp_server` terminal, point `bus_route` at it **before** starting the server:
+First boot builds the graph-cache (minutes); the script waits for `PtWarmupListener: PT router ready.`. Tomcat runs detached (setsid): closing the terminal does not stop it — manage it with the `status` / `logs` / `stop` subcommands (`stop` shuts down gracefully and preserves the graph-cache; a hard kill corrupts it). In the `mcp_server` terminal, point `bus_route` at it **before** starting the server:
 
 ```bash
 export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route

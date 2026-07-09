@@ -7,23 +7,32 @@
 #    ~16MB, self-contained — carries the PT-singleton + warmup fix and all GraphHopper deps).
 #   Drag it into the Jupyter file browser, renamed to whatif-router.war.
 #
-# Then, from the repo (s4c conda env active):
-#   bash whatif-local/run-on-jupyterhub.sh
+# Usage (from the repo, s4c conda env active):
+#   bash whatif-local/run-on-jupyterhub.sh [start|run|stop|status|logs]
 #
-# It installs Java 8, downloads Tomcat 9, fetches the OSM+GTFS data, deploys the war, and starts
-# Tomcat in the foreground. First boot builds the graph-cache (minutes) + warms the PT router;
-# leave it running in this terminal. In a second terminal point mcp_server at it:
+#   start   (default) Full setup (Java 8, Tomcat 9, OSM+GTFS data, deploy war), then start Tomcat
+#           as a DETACHED daemon (setsid, own session): closing this terminal does NOT touch the
+#           JVM, so bus_route keeps working and the graph-cache cannot be corrupted by a closed
+#           tab. Waits for 'PtWarmupListener: PT router ready.' in the log (first boot builds the
+#           graph-cache, minutes) — but the wait is only cosmetic, the daemon is already up.
+#   run     Same setup, Tomcat in the FOREGROUND (debug). Stop it with Ctrl-C ONLY — closing the
+#           terminal hard-kills the JVM before MapDB's clean-shutdown flag is written -> next
+#           boot fails with 'Wrong index checksum' and rebuilds the graph (minutes).
+#   stop    Graceful shutdown: catalina.sh stop, waits up to 60s for the JVM to exit. This is the
+#           path that flushes the GTFS store and writes MapDB's clean-shutdown flag. Never
+#           kill -9 the JVM.
+#   status  pid liveness + HTTP probe of http://localhost:8080/whatif-router/.
+#   logs    tail -f Tomcat's catalina.out.
+#
+# Then point mcp_server at it (second terminal):
 #   export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
 #   python -m snap4city_mobility_mcp.mcp_server
 #
 # Env knobs:
-#   WHATIF_DAEMON=1   start Tomcat in the background (catalina.sh start) and return, instead of
-#                     foreground. The standard flow runs foreground (this terminal shows the
-#                     'PT router ready.' line and Ctrl-C stops it cleanly).
 #   REBUILD_GRAPH=1   wipe data/graph-cache/ before boot. Use this to recover from a
 #                     'Wrong index checksum, store was not closed properly' error, which means a
-#                     previous run was hard-killed (kill -9 / OOM / terminal closed) before the PT
-#                     singleton could write MapDB's clean-shutdown flag. Rebuild takes minutes.
+#                     previous JVM was hard-killed (kill -9 / OOM) before the PT singleton could
+#                     write MapDB's clean-shutdown flag. Rebuild takes minutes.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"          # whatif-local/
@@ -32,11 +41,64 @@ DATA="$HERE/data"
 WAR="$HERE/whatif-router.war"
 TOMCAT_VER="9.0.119"
 TOMCAT_DIR="$HERE/apache-tomcat-$TOMCAT_VER"
+CATALINA_OUT="$TOMCAT_DIR/logs/catalina.out"
+export CATALINA_PID="$TOMCAT_DIR/tomcat.pid"   # catalina.sh start writes it; stop waits on it
+
+CMD="${1:-start}"
+
+tomcat_running() {
+  [ -f "$CATALINA_PID" ] && kill -0 "$(cat "$CATALINA_PID")" 2>/dev/null
+}
+
+case "$CMD" in
+  stop)
+    if ! tomcat_running; then
+      rm -f "$CATALINA_PID"
+      echo "not running (no live pid at $CATALINA_PID)."
+      echo "if an old instance still holds :8080, SIGTERM it (graceful, runs the shutdown hook):"
+      echo "  pkill -f 'catalina.base=$TOMCAT_DIR'"
+      exit 0
+    fi
+    echo "== stopping Tomcat gracefully (waits up to 60s; flushes GTFS store + MapDB clean flag) =="
+    # no -force: force = kill -9, which is exactly what corrupts the graph-cache.
+    # '|| true': on timeout catalina.sh exits non-zero — we report it ourselves below.
+    "$TOMCAT_DIR/bin/catalina.sh" stop 60 || true
+    if tomcat_running; then
+      echo "!! still running after 60s (graph build in progress?). Retry later; do NOT kill -9." >&2
+      exit 1
+    fi
+    echo "== stopped cleanly — next start loads the graph-cache in seconds =="
+    exit 0
+    ;;
+  status)
+    if tomcat_running; then
+      echo "running (pid $(cat "$CATALINA_PID"))"
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:8080/whatif-router/" || true)"
+      echo "http probe on /whatif-router/: $code (200 = deployed; PT readiness: see 'logs')"
+    else
+      echo "not running"
+    fi
+    exit 0
+    ;;
+  logs)
+    [ -f "$CATALINA_OUT" ] || { echo "no log yet at $CATALINA_OUT — start Tomcat first." >&2; exit 1; }
+    exec tail -f "$CATALINA_OUT"
+    ;;
+  start|run) ;;                                 # fall through to setup below
+  *)
+    echo "usage: $0 [start|run|stop|status|logs]" >&2
+    exit 1
+    ;;
+esac
 
 echo "== 0. checks =="
 if [ ! -f "$WAR" ]; then
   echo "!! missing $WAR" >&2
   echo "   Upload the prebuilt war here first (rename to whatif-router.war). See header." >&2
+  exit 1
+fi
+if tomcat_running; then
+  echo "!! Tomcat already running (pid $(cat "$CATALINA_PID")) — use '$0 stop' first." >&2
   exit 1
 fi
 
@@ -101,16 +163,43 @@ export GH_GTFS_FILES="$DATA/at.gtfs,$DATA/gest.gtfs"
 export CATALINA_OPTS="-Xmx12g -Xms2g"
 
 echo "      endpoint: http://localhost:8080/whatif-router/route"
-if [ "${WHATIF_DAEMON:-0}" = "1" ]; then
-  # Background mode: start as a daemon and return. Logs go to
-  # $TOMCAT_DIR/logs/catalina.out. The caller is responsible for a clean 'catalina.sh stop'
-  # (which writes MapDB's clean-shutdown flag and prevents the checksum corruption on next boot).
-  echo "== 5. starting Tomcat (background daemon). First boot builds the graph-cache (minutes),"
-  echo "      then 'PtWarmupListener: PT router ready.' in logs/catalina.out. =="
-  "$TOMCAT_DIR/bin/catalina.sh" start
-else
-  echo "== 5. starting Tomcat (foreground). First boot builds the graph-cache (minutes),"
-  echo "      then 'PtWarmupListener: PT router ready.' — leave this terminal running. =="
+if [ "$CMD" = "run" ]; then
+  echo "== 5. starting Tomcat (FOREGROUND, debug). First boot builds the graph-cache (minutes),"
+  echo "      then 'PtWarmupListener: PT router ready.'. Stop with Ctrl-C ONLY — closing the"
+  echo "      terminal hard-kills the JVM and corrupts the graph-cache. =="
   echo
   exec "$TOMCAT_DIR/bin/catalina.sh" run
 fi
+
+# start (default): detached daemon. setsid puts the JVM in its own session, so closing this
+# terminal (pty SIGHUP / process-group kill) can never reach it — the only ways it stops are
+# '$0 stop' (graceful -> contextDestroyed -> MapDB clean flag) or an OOM/explicit kill.
+echo "== 5. starting Tomcat (DETACHED daemon — safe to close this terminal) =="
+mkdir -p "$TOMCAT_DIR/logs"
+touch "$CATALINA_OUT"
+OFFSET="$(stat -c%s "$CATALINA_OUT")"          # only scan log lines from this boot onward
+setsid "$TOMCAT_DIR/bin/catalina.sh" start < /dev/null
+echo "      pid file: $CATALINA_PID | log: $CATALINA_OUT"
+echo "      waiting for 'PT router ready.' (first boot builds the graph-cache, minutes;"
+echo "      Ctrl-C or closing this terminal only stops the wait, NOT the daemon)..."
+for i in $(seq 1 900); do
+  boot_log="$(tail -c +"$((OFFSET + 1))" "$CATALINA_OUT")"
+  if printf '%s' "$boot_log" | grep -q "PT router ready."; then
+    echo "== PT router ready — endpoint: http://localhost:8080/whatif-router/route =="
+    echo "   manage with: $0 status | logs | stop"
+    exit 0
+  fi
+  if printf '%s' "$boot_log" | grep -q "Wrong index checksum"; then
+    echo "!! graph-cache is corrupted (previous JVM was hard-killed)." >&2
+    echo "   Recover: $0 stop && REBUILD_GRAPH=1 $0 start   (rebuild takes minutes)" >&2
+    exit 1
+  fi
+  if ! tomcat_running; then
+    echo "!! Tomcat exited during startup — inspect: $0 logs" >&2
+    exit 1
+  fi
+  sleep 2
+done
+echo "!! timed out after 30min still waiting for 'PT router ready.' — daemon is still running;" >&2
+echo "   watch '$0 logs' (graph build is silent, check data/graph-cache/ file growth)." >&2
+exit 1
