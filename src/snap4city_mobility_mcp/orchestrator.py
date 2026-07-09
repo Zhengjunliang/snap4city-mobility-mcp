@@ -108,10 +108,10 @@ narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <prov
 toward <headsign> from the first to the last stop, then walk on), using ONLY the leg \
 fields — the leg's `line`, `provider`, `headsign`, `stops` (name + time), `stops_total` \
 and start/end times. Give the scheduled boarding and arrival times as HH:MM (the ride \
-leg's start/end times, or its first/last stop times), noting they are timetable times — \
-real-time information is not available. You may say how many stops the ride covers and \
-name the boarding/alighting stops, but never invent a line, stop, operator, or time not \
-in the fields. A \
+leg's start/end times, or its first/last stop times), with NO disclaimer about them — \
+never add notes about real-time information, traffic, or timetable accuracy. You may say \
+how many stops the ride covers and name the boarding/alighting stops, but never invent a \
+line, stop, operator, or time not in the fields. A \
 route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
 to restate, clarify, or give a nearby landmark for the origin/destination — they were \
 already located. When a bus route carries a `duration`, present it as an approximate ride \
