@@ -4,10 +4,10 @@ referente's remote `address_search_location` returns a broken result set (a quer
 "chiesa ..., Firenze" comes back as 100 Spanish/Greek/Belgian hits and zero Tuscan;
 see docs/lessons.md L28/L29). So forward geocoding is served here instead, by wrapping
 the *public* km4city ServiceMap API (servicemap.disit.org — the same index the native
-Snap4City What-If autocomplete uses, which returns clean Florence hits for the queries
-the MCP tool misses). The tool returns the *same* GeoJSON FeatureCollection shape the
-remote tool did, so the client's existing 2-pass / bbox-filter / pick-coord logic is
-reused unchanged (mcp_tools._geocode_address_first et al.).
+Snap4City What-If autocomplete uses, which returns clean hits for the queries the MCP
+tool misses). The tool returns the *same* GeoJSON FeatureCollection shape the remote
+tool did, so the client's existing 2-pass / pick-coord logic is reused unchanged
+(mcp_tools._geocode_address_first et al.).
 
 This server is generic on purpose (named `mcp_server`, not `geocode_server`): only the
 geocode tool lives here today, but more local tools can be added later.
@@ -20,7 +20,9 @@ S4C_LOCAL_MCP_URL (orchestrator._local_config), defaulting to http://127.0.0.1:8
 import logging
 import math
 import os
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import FastMCP
@@ -28,15 +30,11 @@ from fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 # Public km4city ServiceMap "Smart City API". The text/POI full-text search is the base
-# path; the address-focused geocoder is the /location/ sub-path. Both return GeoJSON and
-# accept selection=<lat>;<lng> + maxDists=<km> to bias results toward an area (a soft
-# bias, not a hard filter: far Tuscan towns can still come back, so the client keeps its
-# own Tuscany bbox filter).
+# path; the address-focused geocoder is the /location/ sub-path. Both return GeoJSON.
+# No selection/maxDists bias is sent: probed 2026-07-09, the parameter has zero effect on
+# text-search ordering (byte-identical output with/without), so proximity ranking is done
+# client-side (orchestrator._pick_coord haversine against the user's GPS).
 SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1"
-# Florence centre, used as the relevance bias for every search (this advisor is
-# Florence-centric; the client bbox covers all of Tuscany).
-FLORENCE_SELECTION = "43.7731;11.2558"
-SEARCH_MAX_DISTS_KM = "30"
 HTTP_TIMEOUT_S = 40.0
 
 # Snap4City What-If GraphHopper router. The referente remote `routing` tool's
@@ -57,13 +55,34 @@ WHATIF_ROUTER_URL = os.environ.get(
 mcp = FastMCP("snap4mobility-local")
 
 
+def _rome_local_iso(ts: Any) -> Any:
+    """Rewrite a router timestamp to Europe/Rome local time (ISO with offset).
+
+    The router serializes stop/leg times as GraphHopper `Instant.toString()` — UTC with a
+    trailing Z (e.g. "2026-07-06T06:23:00Z") — while the GTFS timetable is semantically
+    Rome local time, so quoting the raw value to the user is 1-2h off. Anything that
+    doesn't parse as an offset-aware ISO datetime passes through unchanged.
+    """
+    if not isinstance(ts, str) or not ts:
+        return ts
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts
+    if dt.tzinfo is None:  # naive: zone unknowable, don't guess a shift
+        return ts
+    return dt.astimezone(ZoneInfo("Europe/Rome")).isoformat()
+
+
 def _pt_stops(legmap: dict[str, Any]) -> list[dict[str, Any]]:
-    """Ordered [{name, time}] for one PT leg's stop list.
+    """Ordered [{name, time}] for one PT leg's stop list, times in Rome local.
 
     A GraphHopper GTFS transit leg nests its stops as
     leg.map.stop.myArrayList[].map with stop_name / stop_arrivalTime (observed shape,
     whatif-local/test-output.json: line 57 PORTE NUOVE BELFIORE -> ACC. DEL CIMENTO ARTOM).
-    Anything else (no GTFS, malformed) yields an empty list.
+    Times are converted from the router's UTC instants to Europe/Rome (_rome_local_iso)
+    so the narrated orari match the local timetable. Anything else (no GTFS, malformed)
+    yields an empty list.
     """
     stop = legmap.get("stop")
     items = stop.get("myArrayList") if isinstance(stop, dict) else None
@@ -72,7 +91,7 @@ def _pt_stops(legmap: dict[str, Any]) -> list[dict[str, Any]]:
         for it in items:
             m = it.get("map") if isinstance(it, dict) else None
             if isinstance(m, dict) and m.get("stop_name"):
-                out.append({"name": m["stop_name"], "time": m.get("stop_arrivalTime")})
+                out.append({"name": m["stop_name"], "time": _rome_local_iso(m.get("stop_arrivalTime"))})
     return out
 
 
@@ -259,8 +278,6 @@ async def _servicemap_search(
         "format": "json",
         "lang": lang,
         "maxResults": str(maxresults),
-        "selection": FLORENCE_SELECTION,
-        "maxDists": SEARCH_MAX_DISTS_KM,
     }
     try:
         # follow_redirects: the full-text base (no trailing slash) answers a 302 to the
@@ -287,12 +304,13 @@ async def address_search_location(
     logic: str = "or",
     maxresults: int = 100,
 ) -> dict[str, Any]:
-    """Forward-geocode a place name to a GeoJSON FeatureCollection (Florence-biased).
+    """Forward-geocode a place name to a GeoJSON FeatureCollection.
 
     Drop-in for the remote tool of the same name: the client calls it with
     {search, excludePOI, lang, logic}. `logic` is accepted for signature compatibility but
-    unused (the ServiceMap full-text search has no AND/OR logic parameter). Results are
-    biased to Florence via selection/maxDists; the client applies the Tuscany bbox filter.
+    unused (the ServiceMap full-text search has no AND/OR logic parameter). Results come
+    back in the server's text-relevance order; proximity/city preference is applied
+    client-side (orchestrator._pick_coord / mcp_tools._narrow_by_city).
     """
     return await _servicemap_search(search, excludePOI=excludePOI, lang=lang, maxresults=maxresults)
 

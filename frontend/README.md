@@ -59,6 +59,24 @@ and `messages[-1].content` is the Italian reply.
 > server-proxy or a same-origin proxy before wiring the dashboard end-to-end, minding HTTPS
 > mixed-content / CORS. CORS in `api.py` is dev-permissive (`*`) and must be tightened.
 
+## GPS (near-me)
+
+Each send calls `navigator.geolocation.getCurrentPosition` (5 s timeout, 60 s cache, low
+accuracy) and POSTs the fix as `gps: {lat, lng}` — `null` on denial, unsupported API, or
+timeout, and the backend then behaves exactly as before (asks for the origin when it is
+missing). A `PERMISSION_DENIED` is remembered for the session so the user is not
+re-prompted every turn.
+
+Two environment requirements, both **outside this file's control**:
+
+- **Secure context**: geolocation only works on HTTPS pages (the dashboard is HTTPS, ok).
+- **Iframe permission**: the widget runs in the dashboard iframe; if the parent iframe
+  lacks `allow="geolocation"` the prompt never appears and `getCurrentPosition` fails with
+  code 1 — the widget silently degrades to the no-GPS flow. Whether Snap4City's
+  widgetExternalContent iframes carry that permission is a platform setting: test with
+  DevTools (run `navigator.permissions.query({name:'geolocation'})` in the iframe context)
+  and ask the referente to add it if blocked.
+
 ## Notes
 
 - The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).

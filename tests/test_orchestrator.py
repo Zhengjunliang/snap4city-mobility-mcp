@@ -113,8 +113,8 @@ class _RaisingLLM:
 
 async def test_understand_parses_slots(make_llm):
     llm = make_llm([_slots_response(
-        '{"request_type":"journey","info_kind":"","origin_text":"Duomo",'
-        '"destination_text":"Santa Croce","mode":"foot_shortest"}'
+        '{"request_type":"journey","origin_text":"Duomo",'
+        '"destination_text":"Santa Croce","destination_category":"","mode":"foot_shortest"}'
     )])
     out = await understand(
         {"messages": [{"role": "user", "content": "from Duomo to Santa Croce on foot"}]}, llm=llm
@@ -124,13 +124,10 @@ async def test_understand_parses_slots(make_llm):
     assert out["slots"]["mode"] == "foot_shortest"
 
 
-def test_request_to_intent_maps_both_axes():
-    """The two-axis classification folds into the internal `intent` vocabulary."""
+def test_request_to_intent():
     assert _request_to_intent({"request_type": "journey"}) == "route"
-    assert _request_to_intent({"request_type": "transit_info", "info_kind": "lines"}) == "tpl_lines"
-    assert _request_to_intent({"request_type": "transit_info", "info_kind": "timeline"}) == "tpl_timeline"
-    assert _request_to_intent({"request_type": "transit_info", "info_kind": ""}) == "other"  # unsupported
     assert _request_to_intent({"request_type": "other"}) == "other"
+    assert _request_to_intent({}) == "other"
 
 
 def test_extract_slots_schema_requires_all_fields():
@@ -138,14 +135,12 @@ def test_extract_slots_schema_requires_all_fields():
     it was optional. All slots must stay required ('' marks an absent one)."""
     params = _EXTRACT_SLOTS_SCHEMA["function"]["parameters"]
     assert set(params["required"]) == {
-        "request_type", "info_kind", "origin_text", "destination_text", "mode",
-        "agency_text", "line_text", "stop_text",
+        "request_type", "origin_text", "destination_text", "destination_category", "mode",
     }
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
-    assert "" in params["properties"]["info_kind"]["enum"]  # '' = not a transit_info request
 
 
-# --- _pick_coord (L17) -------------------------------------------------------
+# --- _pick_coord (L17 + GPS-nearest) ------------------------------------------
 
 def test_pick_coord_rejects_labels_with_extra_tokens():
     # "PIAZZA DUOMO DI PRIZIO STEFANO & C. S.A.S." (a company, L17) contains the
@@ -158,6 +153,18 @@ def test_pick_coord_rejects_labels_with_extra_tokens():
     assert _pick_coord(fc, "Piazza Duomo") == [11.2560, 43.7731]
 
 
+def test_pick_coord_gps_picks_nearest_candidate():
+    """Two equally label-matching squares in different towns: with the user's GPS the
+    nearest one wins; without it the server's first (best-score) hit wins as before."""
+    fc = _fc_with_addresses(
+        (10.2270, 43.9580, "PIAZZA DEL DUOMO"),   # Pietrasanta
+        (11.2560, 43.7731, "PIAZZA DEL DUOMO"),   # Florence
+    )
+    florence_gps = {"lat": 43.7731, "lng": 11.2558}
+    assert _pick_coord(fc, "Piazza Duomo", gps=florence_gps) == [11.2560, 43.7731]
+    assert _pick_coord(fc, "Piazza Duomo") == [10.2270, 43.9580]
+
+
 # --- execute -----------------------------------------------------------------
 
 async def test_execute_route_success(make_client, make_result):
@@ -166,7 +173,9 @@ async def test_execute_route_success(make_client, make_result):
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # routing
     ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    # City-named searches resolve on the address pass alone (named-city subset), so one
+    # geocode call per endpoint; a bare place name would trigger the POI fallback pass too.
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "foot_shortest"}
     out = await execute({"slots": slots}, client=client)
     assert out["unsupported"] is False
     names = [e["name"] for e in out["tool_results"]]
@@ -185,16 +194,97 @@ async def test_execute_unsupported_intent(make_client):
     assert client.calls == []
 
 
-async def test_execute_dispatches_tpl_intents(make_client, make_result):
+async def test_execute_no_gps_missing_origin_unsupported(make_client):
+    """No origin text and no GPS → nothing can cover the origin: unsupported, no calls
+    (respond then asks for the starting point)."""
+    client = make_client([])
+    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": ""}
+    out = await execute({"slots": slots}, client=client)
+    assert out["unsupported"] is True
+    assert client.calls == []
+
+
+async def test_execute_gps_default_origin(make_client, make_result):
+    """No origin text + GPS → the origin IS the GPS point (no origin geocode); it is
+    reverse-geocoded once (success → audited) so respond can say 'dalla tua posizione'."""
+    rev = {"result": [{"number": "3", "address": "VIA ZARA", "municipality": "FIRENZE"}]}
     client = make_client([
-        make_result(structured={"agencies": [
-            {"name": "Autolinee Toscane - Urbano Area Metropolitana Fiorentina", "uri": "http://a/888-48"},
-        ]}),
-        make_result(structured=[{"shortName": "6"}]),
+        make_result(structured=rev),                                  # coordinates_to_address
+        make_result(structured=_feature_collection(11.26, 43.76)),   # geocode dest (address pass)
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass (no city named)
+        make_result(structured=_journey()),                           # routing
     ])
-    out = await execute({"slots": {"intent": "tpl_lines", "agency_text": ""}}, client=client)
+    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
     assert out["unsupported"] is False
-    assert [n for n, _ in client.calls] == ["tpl_agencies", "tpl_lines"]
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["coordinates_to_address", "address_search_location", "routing"]
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["startlatitude"] == 43.7731 and route_args["startlongitude"] == 11.2558
+    assert out["endpoints"]["origin"] == {"lat": 43.7731, "lng": 11.2558}
+
+
+async def test_execute_gps_default_origin_reverse_failure_not_audited(make_client, make_result):
+    """A failed reverse geocode must NOT enter the audit (it would trip respond's error
+    rule for a trip that is fine); the route still runs from the GPS point."""
+    client = make_client([
+        make_result(structured={"error": "boom"}),                    # coordinates_to_address fails
+        make_result(structured=_feature_collection(11.26, 43.76)),   # geocode dest (address pass)
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "routing"]
+    assert out["endpoints"]["origin"] == {"lat": 43.7731, "lng": 11.2558}
+
+
+async def test_execute_category_destination_uses_near_tool(make_client, make_result):
+    """A generic-category destination + GPS → service_search_near_gps_position around the
+    GPS point; the nearest service (features[0], server distance-sorted) becomes the
+    destination. No destination geocode call is made."""
+    pharmacy = _parking_search(("Farmacia Moro", 11.2546, 43.7735))  # same envelope shape
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),   # geocode origin
+        make_result(structured=pharmacy),                             # near search, first rung
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "farmacia",
+             "destination_category": "Pharmacy", "mode": "foot_shortest"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "service_search_near_gps_position", "routing"]
+    near_args = json.loads(out["tool_results"][1]["args"])
+    assert near_args["categories"] == "Pharmacy"
+    assert near_args["latitude"] == 43.7731 and near_args["longitude"] == 11.2558
+    assert near_args["maxdistance"] == 0.5  # first rung of the widening ladder
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["endlatitude"] == 43.7735 and route_args["endlongitude"] == 11.2546
+    assert out["endpoints"]["destination"] == {"lat": 43.7735, "lng": 11.2546}
+
+
+async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, make_result):
+    """All near-search rungs empty (bad category / nothing within 10 km) → only the last
+    empty attempt is audited and the destination degrades to the plain text geocode."""
+    empty = {"result": [[], {"Services": {"features": []}}]}
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),   # geocode origin
+        make_result(structured=empty),                                # near rung 0.5
+        make_result(structured=empty),                                # near rung 2
+        make_result(structured=empty),                                # near rung 10
+        make_result(structured=_feature_collection(11.26, 43.76)),   # dest geocode (address pass)
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "farmacia",
+             "destination_category": "Pharmacy", "mode": "foot_shortest"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    assert len([n for n, _ in client.calls if n == "service_search_near_gps_position"]) == 3
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "service_search_near_gps_position",
+                     "address_search_location", "routing"]
+    assert out["endpoints"]["destination"] == {"lat": 43.76, "lng": 11.26}
 
 
 async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_result):
@@ -204,7 +294,7 @@ async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_
         make_result(structured=_journey(routes=[])),                 # foot_quiet → empty routes error
         make_result(structured=_journey()),                          # foot_shortest → success
     ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "foot_quiet"}
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "foot_quiet"}
     out = await execute({"slots": slots}, client=client)
     routings = [e for e in out["tool_results"] if e["name"] == "routing"]
     assert len(routings) == 2
@@ -230,7 +320,7 @@ async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result
         make_result(structured=stale),                               # car #3
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (fetched concurrently, then discarded)
     ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": "car"}
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
     assert len([n for n, _ in client.calls if n == "routing"]) == 3  # ladder only, no 4th probe
     assert "route_error" in _extract_data(out["tool_results"])
@@ -299,7 +389,7 @@ async def test_execute_unspecified_mode_routes_foot_car_only(make_client, make_r
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
         make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
     ])
-    slots = {"intent": "route", "origin_text": "Duomo", "destination_text": "Santa Croce", "mode": ""}
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
     assert routetypes == ["foot_shortest", "car"]  # no public_transport by default
@@ -321,7 +411,7 @@ async def test_execute_public_transport_routes_via_bus_route(make_client, make_r
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=bus_journey),                         # bus_route (local tool)
     ])
-    slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "public_transport"}
+    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "public_transport"}
     out = await execute({"slots": slots}, client=client)
     # PT went to bus_route, not MCP routing; the audit entry is still tagged public_transport.
     assert client.calls[-1][0] == "bus_route"
@@ -358,11 +448,11 @@ def test_extract_parking_distance_sort_and_haversine():
     """The search has no free-spaces, so _extract_parking sorts by distance (Haversine from
     dest, not the envelope's own distance field) and leaves free_spaces None."""
     dest = {"lat": 43.770, "lng": 11.250}
-    results = [_parking_entry(
+    entry = _parking_entry(
         ("far", 11.270, 43.790),
         ("near", 11.2505, 43.7705),
-    )]
-    parking = _extract_parking(results, dest)
+    )
+    parking = _extract_parking(entry, dest)
     assert [p["name"] for p in parking] == ["near", "far"]
     assert all(p["free_spaces"] is None for p in parking)
     assert all(isinstance(p["distance_km"], float) for p in parking)
@@ -372,23 +462,23 @@ def test_extract_parking_distance_sort_and_haversine():
 def test_extract_parking_caps_and_handles_empty():
     dest = {"lat": 43.77, "lng": 11.25}
     many = _parking_entry(*[(f"P{i}", 11.25, 43.77 + i * 0.001) for i in range(12)])
-    assert len(_extract_parking([many], dest)) == mcp_tools.PARKING_MAX
-    assert _extract_parking([_parking_entry()], dest) is None      # empty features
-    assert _extract_parking([{"name": "routing", "result": {}}], dest) is None  # no parking entry
+    assert len(_extract_parking(many, dest)) == mcp_tools.PARKING_MAX
+    assert _extract_parking(_parking_entry(), dest) is None      # empty features
+    assert _extract_parking({"name": "routing", "result": {}}, dest) is None  # unparseable entry
 
 
-def test_parse_parking_features_reads_nested_service_envelope():
+def test_parse_service_features_reads_nested_service_envelope():
     """Defensive: the parser reads the live result[1].Services nesting and a Service wrapper."""
     nested = {"Service": {"features": [
         {"geometry": {"coordinates": [11.25, 43.77]},
          "properties": {"serviceName": "Garage X", "serviceuri": "http://x"}},
     ]}}
-    spots = mcp_tools.parse_parking_features(nested)
+    spots = mcp_tools.parse_service_features(nested)
     assert spots == [{"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": None}]
-    assert mcp_tools.parse_parking_features({"error": "boom"}) == []
+    assert mcp_tools.parse_service_features({"error": "boom"}) == []
     # the live envelope shape (result -> [uris, {Services: {features}}])
     live = _parking_search(("P", 11.25, 43.77))
-    assert mcp_tools.parse_parking_features(live)[0]["name"] == "P"
+    assert mcp_tools.parse_service_features(live)[0]["name"] == "P"
 
 
 def test_read_parking_realtime():
@@ -425,7 +515,7 @@ async def test_execute_car_enriches_parking(make_client, make_result):
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search
         make_result(structured=_parking_realtime(42, 100)),          # P1 realtime enrichment
     ])
-    slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "car"}
+    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
     assert out["parking"][0]["name"] == "P1"
     assert out["parking"][0]["free_spaces"] == 42 and out["parking"][0]["total_spaces"] == 100
@@ -441,7 +531,7 @@ async def test_execute_foot_only_skips_parking(make_client, make_result):
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # routing (foot)
     ])
-    slots = {"intent": "route", "origin_text": "A", "destination_text": "B", "mode": "foot_shortest"}
+    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "foot_shortest"}
     out = await execute({"slots": slots}, client=client)
     assert not any(n == "service_search_near_gps_position" for n, _ in client.calls)
     assert out["parking"] == []
@@ -562,7 +652,7 @@ async def test_respond_no_mode_on_route_error(make_llm):
 
 
 async def test_respond_no_mode_outside_route():
-    """Non-route intents (unsupported/tpl) must never get a mode field (rule 8)."""
+    """Non-route intents (unsupported) must never get a mode field (rule 8)."""
     state = {
         "intent": "other",
         "messages": [{"role": "user", "content": "ciao"}],
@@ -586,6 +676,23 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
     reply = out["response"]["messages"][-1]["content"]
     assert "partenza" in reply and "destinazione" in reply
     assert "punto-punto" not in reply
+
+
+async def test_respond_gps_covers_origin_asks_destination_only():
+    """With GPS on state a blank origin is covered (it defaults to the user's position),
+    so the ask targets ONLY the destination."""
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "voglio andare a piedi"}],
+        "tool_results": [],
+        "unsupported": True,
+        "slots": {"intent": "route", "origin_text": "", "destination_text": ""},
+        "user_gps": {"lat": 43.7731, "lng": 11.2558},
+    }
+    out = await respond(state, llm=_RaisingLLM())
+    reply = out["response"]["messages"][-1]["content"]
+    assert "destinazione" in reply
+    assert "partenza" not in reply
 
 
 def test_results_view_hint_separates_service_error_from_ztl():

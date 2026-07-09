@@ -2,10 +2,12 @@
 
 The dashboard chat box (frontend/mobility_advisor_dashboard.html) can't reach the
 JupyterHub-only Llama4 + MCP server from the browser, so this thin HTTP layer wraps
-run_advisor: POST /advise {query, history} -> the same widget JSON run_advisor returns
-(status/request_type/data/messages), passed through verbatim (no extra fields, project
-rule 8). The reply is messages[-1].content (OpenAI standard); multi-turn state is the
-returned messages, sent back as `history` on the next turn.
+run_advisor: POST /advise {query, history, gps} -> the same widget JSON run_advisor
+returns (status/request_type/data/messages), passed through verbatim (no extra fields,
+project rule 8). The reply is messages[-1].content (OpenAI standard); multi-turn state
+is the returned messages, sent back as `history` on the next turn. `gps` is the
+browser geolocation {lat, lng} or null; it is sanitized here (never rejected) so a
+buggy widget degrades to the no-GPS flow instead of failing the turn.
 
 Run on the JupyterHub (where Llama4 + the MCP server are reachable), reached from the
 browser same-origin through jupyter-server-proxy (see frontend/README.md):
@@ -19,6 +21,7 @@ Diagnostics: each /advise turn OVERWRITES both files so they hold only the lates
 """
 import json
 import logging
+import math
 import pathlib
 
 from fastapi import FastAPI
@@ -77,6 +80,29 @@ app.add_middleware(
 class AdviseRequest(BaseModel):
     query: str
     history: list[dict] | None = None
+    gps: dict | None = None  # browser geolocation {lat, lng}, null when unavailable/denied
+
+
+def _sanitize_gps(raw: dict | None) -> dict[str, float] | None:
+    """Validated {lat, lng} from the request's gps field, or None.
+
+    Anything not a finite in-range coordinate pair — wrong types, |lat| > 90,
+    |lng| > 180, or exactly (0, 0) (null island, the classic uninitialized value) —
+    becomes None: the turn must degrade to the no-GPS flow, never 422."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        lat, lng = float(raw.get("lat")), float(raw.get("lng"))
+    except (TypeError, ValueError):
+        logger.debug("gps ignored (non-numeric): %r", raw)
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lng)):
+        logger.debug("gps ignored (non-finite): %r", raw)
+        return None
+    if abs(lat) > 90 or abs(lng) > 180 or (lat == 0.0 and lng == 0.0):
+        logger.debug("gps ignored (out of range / null island): %r", raw)
+        return None
+    return {"lat": lat, "lng": lng}
 
 
 @app.get("/health")
@@ -93,7 +119,7 @@ async def advise(req: AdviseRequest) -> dict:
     JSend-style error shape run_advisor itself uses, so the front-end can render it."""
     _reset_debug_log()  # fresh debug.log for this turn (before run_advisor emits any DEBUG)
     try:
-        response = await run_advisor(req.query, req.history or [])
+        response = await run_advisor(req.query, req.history or [], gps=_sanitize_gps(req.gps))
     except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
         logger.exception("advise failed")
         response = {"status": "error", "error": f"{type(e).__name__}: {e}", "messages": req.history or []}

@@ -31,6 +31,13 @@ PARKING (car routes): data.parking lists free car parks near the destination; we
 list under the reply and plot each on the map via the widgetMap "addSelectorPin" event (one per
 serviceUri, Snap4City's own pin pattern). The pin payload + clear event are real-machine-calibrated
 against the PA.php parking dashboard (L30); the list always renders even if the pins balk.
+GPS (near-me): each send fetches the browser geolocation (getCurrentPosition, 5s timeout, 60s
+cache) and POSTs it as `gps: {lat, lng}` (null on denial/unsupported/blocked). The backend uses
+it to start the trip from the user's position when no origin is given and to pick the nearest
+geocode/service candidate. A permission denial is remembered for the session (no re-prompt).
+NOTE: this widget runs in the dashboard iframe - if the parent iframe lacks allow="geolocation"
+(a Snap4City platform setting, ask the referente) the permission prompt never appears and every
+turn silently degrades to the no-GPS flow (the advisor then asks for the origin explicitly).
 Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 -->
 <html lang="en">
@@ -95,6 +102,22 @@ var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", displa
 var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
+var gpsDenied = false;  // remembered PERMISSION_DENIED: skip further prompts this session
+// ---- Browser geolocation -------------------------------------------------
+// Always calls cb exactly once: {lat, lng} on success, null on ANY failure (no API,
+// remembered denial, iframe permissions-policy block, timeout). enableHighAccuracy off +
+// maximumAge 60s: a fresh-ish city-level fix per send is enough for nearest-place picking.
+function getGps(cb) {
+if (gpsDenied || !navigator.geolocation) { cb(null); return; }
+try {
+navigator.geolocation.getCurrentPosition(function (pos) {
+cb({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+}, function (err) {
+if (err && err.code === 1) gpsDenied = true;  // PERMISSION_DENIED (user or iframe policy)
+cb(null);
+}, { timeout: 5000, maximumAge: 60000, enableHighAccuracy: false });
+} catch (e) { cb(null); }
+}
 // ---- Chat UI ------------------------------------------------------------
 function addMsg(text, kind) {
 var $m = $("<div>").addClass("msg " + kind).text(text);
@@ -255,11 +278,13 @@ $("#advInput").val("");
 $("#advSend").prop("disabled", true);
 // Transient "thinking" bubble shown while the bridge computes; removed in always().
 var $thinking = addMsg("Sto pensando…", "bot thinking");
+// GPS first (cb fires exactly once, null on any failure), then POST the turn with it.
+getGps(function (gps) {
 $.ajax({
 url: BRIDGE_BASE + "/advise",
 type: "POST",
 contentType: "application/json",
-data: JSON.stringify({ query: query, history: history }),
+data: JSON.stringify({ query: query, history: history, gps: gps }),
 dataType: "json"
 }).done(function (response) {
 if (response && response.status === "error") {
@@ -286,6 +311,7 @@ addMsg("✗ bridge non raggiungibile (" + status + "). Controlla BRIDGE_BASE / i
 $thinking.remove();
 $("#advSend").prop("disabled", false);
 $("#advInput").focus();
+});
 });
 }
 $("#advSend").on("click", send);

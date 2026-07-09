@@ -3,8 +3,8 @@
 This module implements no tools: they live on referente's remote
 snap4agentic_advisor_native server. Here we only connect to it and run the graph's
 tool calls via client.call_tool, unwrapping the response and smoothing km4city's
-known quirks. The flows (route + tpl_*) drive their tool chains in Python; no LLM
-ever picks a tool.
+known quirks. The route flow drives its tool chain in Python; no LLM ever picks a
+tool.
 
 The dashboard's intranet IP is reachable directly from the JupyterHub, so
 DASHBOARD_URL defaults to it; override with S4C_DASHBOARD_URL if the dashboard is
@@ -13,9 +13,9 @@ rewrite the internal IP to DASHBOARD_URL.
 
 exec_tool is the single execution seam and never raises: every failure comes back as
 {"error": ...} so the graph can recover. routing goes through routing_with_retry
-(km4city envelope quirks), address_search_location through geocode_with_retry (2-pass
-address/POI, Tuscany bbox pin, retry for the flaky zero-region window); other tools
-pass straight through _unwrap.
+(km4city envelope quirks), address_search_location through _geocode_address_first
+(2-pass address/POI, named-city preference); other tools pass straight through
+_unwrap.
 """
 import asyncio
 import json
@@ -36,13 +36,6 @@ logger = logging.getLogger(__name__)
 ROUTING_STALE_RETRIES = 2
 ROUTING_STALE_RETRY_DELAY_S = 6.0
 
-# km4city's geocoder is no longer region-locked: its index now also covers Valencia and
-# southern France, so a fuzzy Florence query can rank Spanish streets first ("Piazza del
-# Duomo, Firenze" once returned 100 foreign hits and zero Tuscan). We pin results to a
-# Tuscany bbox client-side and geocode in two passes, addresses first then POIs
-# (_geocode_address_first). Bounds cover the whole region, not just Florence.
-TUSCANY_BBOX = {"min_lng": 9.6, "max_lng": 12.5, "min_lat": 42.2, "max_lat": 44.5}
-
 # The intranet dashboard IP is reachable directly from the JupyterHub, so it's the
 # default. Override via S4C_DASHBOARD_URL if the dashboard is exposed elsewhere.
 DASHBOARD_URL = os.environ.get("S4C_DASHBOARD_URL", "http://192.168.1.117:8000")
@@ -55,15 +48,10 @@ NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 EXPOSED_TOOLS = (
     "address_search_location",
     "bus_route",  # local: public-transport (bus) route via the What-If router (mcp_server.py, L19/L29)
-    "coordinates_to_address",  # reverse geocode (GPS point -> address); foundation for near-me
+    "coordinates_to_address",  # reverse geocode: labels a GPS-defaulted origin for the reply
     "routing",
-    "service_search_near_gps_position",  # find car parks near the destination (car routes)
+    "service_search_near_gps_position",  # nearest-category POIs: car parks + "farmacia più vicina" destinations
     "service_info_dev",  # latest realtime free-spaces for a car park (serviceUri + time window)
-    "tpl_agencies",
-    "tpl_lines",
-    "tpl_routes_by_line",
-    "tpl_stops_by_route",
-    "tpl_stop_timeline",
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
@@ -207,19 +195,6 @@ async def routing_with_retry(
     return {"journey": journey}
 
 
-def _in_tuscany(coords: Any) -> bool:
-    """True when a GeoJSON `[lng, lat]` pair falls inside the Tuscany bbox."""
-    if not (isinstance(coords, (list, tuple)) and len(coords) >= 2):
-        return False
-    lng, lat = coords[0], coords[1]
-    if not (isinstance(lng, (int, float)) and isinstance(lat, (int, float))):
-        return False
-    return (
-        TUSCANY_BBOX["min_lng"] <= lng <= TUSCANY_BBOX["max_lng"]
-        and TUSCANY_BBOX["min_lat"] <= lat <= TUSCANY_BBOX["max_lat"]
-    )
-
-
 # Italian function words carry no signal when matching a feature label or city against
 # the user's place text ("Piazza del Duomo" vs "PIAZZA DUOMO").
 _LABEL_STOPWORDS = frozenset(
@@ -235,19 +210,13 @@ def _label_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"\w+", flat.casefold()) if t not in _LABEL_STOPWORDS}
 
 
-# The advisor is Florence-centric: a bare "Piazza Duomo" must resolve in Florence even
-# though exact address matches exist in other Tuscan towns (Castelnuovo di Garfagnana,
-# Pietrasanta). A city the user names explicitly always beats the default.
-DEFAULT_CITY_TOKENS = frozenset({"firenze"})
-
-
 def _narrow_by_city(features: list[dict[str, Any]], search: str) -> list[dict[str, Any]] | None:
-    """City-confident subset of `features` (score order kept), or None.
+    """Named-city subset of `features` (score order kept), or None.
 
     A feature's city counts as named when all its tokens appear in the search text
-    ("via Roma, Pietrasanta"). A named city beats the Florence default. None means no
-    feature belongs to a named city or Florence, and the caller decides the next step
-    (next geocode pass, then the raw in-bbox list).
+    ("via Roma, Pietrasanta"). None means the user named no city (or no feature belongs
+    to it), and the caller decides the next step (next geocode pass, then the raw list —
+    where GPS proximity ranking in orchestrator._pick_coord takes over).
     """
     want = _label_tokens(search)
 
@@ -255,46 +224,11 @@ def _narrow_by_city(features: list[dict[str, Any]], search: str) -> list[dict[st
         return _label_tokens(str((f.get("properties") or {}).get("city") or ""))
 
     named = [f for f in features if (ct := city_toks(f)) and ct <= want]
-    if named:
-        return named
-    florence = [f for f in features if city_toks(f) == DEFAULT_CITY_TOKENS]
-    return florence or None
+    return named or None
 
 
-def _filter_geocode_to_tuscany(payload: Any, search: str) -> Any:
-    """Keep only Tuscany-area features from a geocode result.
-
-    Since the geocoder is no longer region-locked, a fuzzy Florence query can rank
-    Spanish streets first. We drop out-of-region features but keep score order, so
-    execute still reads the best in-region hit from the first feature. An empty
-    in-region set becomes an actionable {"error": ...} that respond explains to the
-    user. Non-FeatureCollection payloads (e.g. a backend error) pass straight through.
-    """
-    if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
-        return payload
-    features = payload.get("features")
-    if not isinstance(features, list):
-        return payload
-    kept = [f for f in features if _in_tuscany((f.get("geometry") or {}).get("coordinates"))]
-    if not kept:
-        if logger.isEnabledFor(logging.DEBUG):
-            sample = [
-                {
-                    "city": (f.get("properties") or {}).get("city"),
-                    "coordinates": (f.get("geometry") or {}).get("coordinates"),
-                }
-                for f in features[:3]
-            ]
-            logger.debug(
-                "geocode %r: %d raw hits, none in Tuscany bbox; first raw hits: %s",
-                search, len(features), json.dumps(sample),
-            )
-        return {"error": f"no Tuscany-area match for {search!r}, try a more specific address"}
-    return {**payload, "features": kept, "count": len(kept)}
-
-
-# The geocoder defaults to lang="en"/logic="or". This project is Italy/Florence-only, so
-# bias it to Italian: better ranking and labels that match the Italian search text in
+# The geocoder defaults to lang="en"/logic="or". km4city is an Italian dataset, so bias
+# it to Italian: better ranking and labels that match the Italian search text in
 # _pick_coord/_narrow_by_city. logic stays "or" (broad) by default; flip GEOCODE_LOGIC to
 # "and" (stricter) and A/B it via scripts/probe_geocode.py before committing the change.
 GEOCODE_LANG = "it"
@@ -302,49 +236,43 @@ GEOCODE_LOGIC = "or"
 
 
 async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
-    """Two-pass geocode: addresses first, POIs as fallback, city-confident hits first.
+    """Two-pass geocode: addresses first, POIs as fallback, named-city hits first.
 
     With POIs included the server can rank a fuzzy catalogue hit above the real place
     (once a company 1.1 km west of "Piazza Duomo"), while pure address entries
-    (excludePOI=true) sit on the routable street graph. But exact address matches exist
-    all over Tuscany ("PIAZZA DUOMO" in Castelnuovo di Garfagnana and Pietrasanta
-    outranked Florence), so a pass only wins outright when it has features in the city
-    the user named (or Florence, the default). Ladder, all pinned to the Tuscany bbox:
-      1. address pass, named-city/Florence subset
-      2. POI pass, named-city/Florence subset (stations/landmarks are POI-only)
-      3. whole-Tuscany address hits
-      4. whole-Tuscany POI hits / {"error": ...}
+    (excludePOI=true) sit on the routable street graph. Exact address matches for a
+    common name exist in many towns, so a pass only wins outright when it has features
+    in the city the user named. Ladder:
+      1. address pass, named-city subset
+      2. POI pass, named-city subset (stations/landmarks are POI-only)
+      3. address hits (no city named — GPS-nearest picking happens in _pick_coord)
+      4. POI hits / {"error": ...}
     """
     search = str(args.get("search", ""))
-    addresses = None  # rung 3: in-bbox address hits without city confidence
+    addresses = None  # rung 3: address hits without a named city
     try:
-        first = _filter_geocode_to_tuscany(
-            _unwrap(await client.call_tool(
-                "address_search_location",
-                {**args, "excludePOI": True, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
-            )),
-            search,
-        )
+        first = _unwrap(await client.call_tool(
+            "address_search_location",
+            {**args, "excludePOI": True, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
+        ))
         if isinstance(first, dict) and first.get("type") == "FeatureCollection":
             narrowed = _narrow_by_city(first["features"], search)
             if narrowed is not None:
                 logger.debug("geocode %r: address pass hit (excludePOI=true)", search)
                 return {**first, "features": narrowed, "count": len(narrowed)}
-            addresses = first
+            if first["features"]:
+                addresses = first
         logger.debug("geocode %r: address pass not city-confident, trying the POI pass", search)
     except Exception as e:
         logger.debug("geocode %r: address pass failed (%s), trying the POI pass", search, e)
     try:
-        pois = _filter_geocode_to_tuscany(
-            _unwrap(await client.call_tool(
-                "address_search_location",
-                {**args, "excludePOI": False, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
-            )),
-            search,
-        )
+        pois = _unwrap(await client.call_tool(
+            "address_search_location",
+            {**args, "excludePOI": False, "lang": GEOCODE_LANG, "logic": GEOCODE_LOGIC},
+        ))
     except Exception:
         if addresses is not None:
-            logger.debug("geocode %r: POI pass failed, keeping whole-Tuscany address hits", search)
+            logger.debug("geocode %r: POI pass failed, keeping address hits", search)
             return addresses
         raise  # nothing left to try; exec_tool's outer handler turns this into {"error": ...}
     if isinstance(pois, dict) and pois.get("type") == "FeatureCollection":
@@ -353,35 +281,10 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
             logger.debug("geocode %r: POI pass hit", search)
             return {**pois, "features": narrowed, "count": len(narrowed)}
         if addresses is not None:
-            logger.debug("geocode %r: no city-confident hit anywhere, keeping whole-Tuscany address hits", search)
+            logger.debug("geocode %r: no named-city hit anywhere, keeping address hits", search)
             return addresses
         return pois
     return addresses if addresses is not None else pois
-
-
-# The geocoder is non-deterministic over time: the same query returns 100 in-region
-# hits one moment and 100% foreign hits (zero Tuscan) the next ("Università ... Morgagni"
-# failed mid-chat yet geocoded fine minutes later when probed directly). The 2-pass +
-# bbox filter recovers whenever any Tuscan hit comes back, so the only failure is the
-# transient zero-Tuscan window; a bounded retry usually clears it.
-GEOCODE_FLAKY_RETRIES = 2
-GEOCODE_FLAKY_RETRY_DELAY_S = 1.5
-_GEOCODE_TRANSIENT_HINT = "no Tuscany-area match"
-
-
-async def geocode_with_retry(client: Client, args: dict[str, Any]) -> Any:
-    """`_geocode_address_first` with bounded retries for the flaky zero-region window."""
-    result = await _geocode_address_first(client, args)
-    for attempt in range(1, GEOCODE_FLAKY_RETRIES + 1):
-        if not (isinstance(result, dict) and _GEOCODE_TRANSIENT_HINT in str(result.get("error", ""))):
-            break
-        logger.debug(
-            "geocode %r: transient zero-region result, retry %d/%d",
-            args.get("search"), attempt, GEOCODE_FLAKY_RETRIES,
-        )
-        await asyncio.sleep(GEOCODE_FLAKY_RETRY_DELAY_S)
-        result = await _geocode_address_first(client, args)
-    return result
 
 
 # Llama4 has a modest context window and degrades (hallucinates, or its backend 500s)
@@ -497,17 +400,19 @@ def _find_feature_list(obj: Any) -> list | None:
     return None
 
 
-def parse_parking_features(result: Any) -> list[dict[str, Any]]:
-    """Normalize a service_search_near_gps_position result into parking dicts.
+def parse_service_features(result: Any) -> list[dict[str, Any]]:
+    """Normalize a service_search_near_gps_position result into service dicts.
 
-    The backend envelope is "an array of URIs, raw grouped GeoJSON, and flattened GeoJSON"
-    (probe-native-tools.json); the live shape nests the features under result[1].Services
-    (see _find_feature_list). Each item yields {name, lat, lng, uri, free_spaces} with
-    missing fields as None — realtime free-spaces is currently empty server-side (parking
-    `realtimeAttributes`/`realtime` come back {}, lessons L21/L22), so free_spaces is None
-    in practice and the feature degrades to locations-only; the key lookup stays for when
-    the backend starts loading occupancy. Distance is computed later by the caller (which
-    knows the destination). Returns [] on error / unrecognized shape."""
+    Used for every nearest-category search: car parks near the destination AND a
+    category destination ("farmacia più vicina"). The backend envelope is "an array of
+    URIs, raw grouped GeoJSON, and flattened GeoJSON" (probe-native-tools.json); the live
+    shape nests the features under result[1].Services (see _find_feature_list), already
+    sorted by distance from the search point. Each item yields
+    {name, lat, lng, uri, free_spaces} with missing fields as None — free_spaces only
+    matters for car parks and is currently empty server-side (parking
+    `realtimeAttributes`/`realtime` come back {}, lessons L21/L22); the key lookup stays
+    for when the backend starts loading occupancy. Returns [] on error / unrecognized
+    shape."""
     if not isinstance(result, dict) or "error" in result:
         return []
     feats = _find_feature_list(result)
@@ -601,9 +506,9 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
                 streets.append(desc)
         return {"journey": {**base, "streets": streets}}
     if name == "service_search_near_gps_position":
-        spots = parse_parking_features(result)
+        spots = parse_service_features(result)
         if spots:
-            return {"count": len(spots), "parking": [
+            return {"count": len(spots), "services": [
                 {"name": s["name"], "free_spaces": s["free_spaces"]} for s in spots[:PARKING_MAX]
             ]}
     return result
@@ -638,7 +543,7 @@ async def exec_tool(
             return await routing_with_retry(client, route_args, attempts=routing_attempts)
 
         if name == "address_search_location":
-            return await geocode_with_retry(client, clean)
+            return await _geocode_address_first(client, clean)
 
         return _unwrap(await client.call_tool(name, clean))
     except Exception as e:
@@ -648,12 +553,11 @@ async def exec_tool(
 async def reverse_geocode(client: Client, lat: float, lng: float) -> Any:
     """Reverse geocode a GPS point to an address via the `coordinates_to_address` tool.
 
-    Foundation for a future near-me flow (browser GPS / map click -> coordinates -> the
-    street/POI there): the user's exact point is unambiguous, so this avoids the weak
-    forward-geocoding of a typed name (the native What-If widget is accurate for the same
-    reason). NOT wired into the route flow yet (no GPS capture, intent classification
-    unchanged). coordinates_to_address takes latitude/longitude as separate floats and
-    returns {"result": [{number, address, municipality, province, roadUri, ...}, ...]}
+    Used by the near-me flow: when the user gives no origin and the browser sent a GPS
+    position, execute defaults the origin to that point and calls this so respond can say
+    "dalla tua posizione (vicino a <address>)". coordinates_to_address takes
+    latitude/longitude as separate floats and returns
+    {"result": [{number, address, municipality, province, roadUri, ...}, ...]}
     (the address candidates at that point; the first is the km4city street-number match),
     or {"error": ...}."""
     return await exec_tool(client, "coordinates_to_address", {"latitude": lat, "longitude": lng})

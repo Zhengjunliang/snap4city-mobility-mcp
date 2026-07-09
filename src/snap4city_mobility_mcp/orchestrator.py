@@ -4,11 +4,14 @@ A natural-language query runs through a linear graph: understand -> execute ->
 respond -> END.
 
 - understand (LLM, forced tool call): extracts the request slots (intent, origin,
-  destination, mode) from the latest user turn, place text only. Follow-ups like
-  "那坐公交呢?" resolve against the conversation history.
-- execute (plain Python, no LLM): for a route intent, geocodes both endpoints then
-  calls routing with the requested mode. tpl_* intents go to the discovery chains
-  in tpl.py; "other" falls through to an "unsupported" reply.
+  destination, category, mode) from the latest user turn, place text only. Follow-ups
+  like "那坐公交呢?" resolve against the conversation history.
+- execute (plain Python, no LLM): for a route intent, resolves both endpoints then
+  calls routing with the requested mode. A missing origin defaults to the user's GPS
+  position (browser geolocation, threaded through run_advisor); a generic-category
+  destination ("farmacia più vicina") resolves via the nearest-service search; text
+  places geocode with GPS-nearest candidate picking. "other" falls through to an
+  "unsupported" reply.
 - respond (LLM, no tools): phrases a multilingual answer from the results and
   assembles the widget JSON (with the full route WKT and the updated messages).
 
@@ -48,52 +51,43 @@ from snap4city_mobility_mcp.mcp_tools import (
     _local_config,
     exec_tool,
     group_arc_legs,
-    parse_parking_features,
+    parse_service_features,
     read_parking_realtime,
+    reverse_geocode,
     slim_result_for_llm,
-)
-from snap4city_mobility_mcp.tpl import (
-    REQUIRED_SLOTS as TPL_REQUIRED_SLOTS,
-    TPL_INTENTS,
-    TPL_TOOL_NAMES,
-    extract_tpl_data,
-    run_tpl_flow,
-    slim_tpl_result,
-    tpl_template_answer,
 )
 
 logger = logging.getLogger(__name__)
 
 UNDERSTAND_SYSTEM = """\
-You are the intent-extraction stage of a Florence (Tuscany, Italy) public-mobility \
-advisor. Read the conversation and the user's LATEST message, then call \
-`extract_slots` exactly once. Classify request_type, info_kind, and mode per each \
-field's own description in the schema.
+You are the intent-extraction stage of an urban-mobility advisor. Read the \
+conversation and the user's LATEST message, then call `extract_slots` exactly once. \
+Classify request_type and mode per each field's own description in the schema.
 Rules:
 - Always fill EVERY field of `extract_slots` (use '' for a slot the user truly did \
 not give). Never drop the destination when the user named one.
 - Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
 coordinates — a separate tool geocodes places. Keep a city/town the user names \
-attached to its place text, but NEVER add a city the user did not say.
+attached to its place text, but NEVER add a city — or any place — the user did not say.
+- When the user gives NO origin ("portami al Duomo", "come arrivo in stazione?", \
+"da qui") leave origin_text '' — the system defaults to the user's own position. \
+Never invent an origin.
 - Ignore greetings and pleasantries ("ciao", "hello", "per favore") — they never \
 change the slots.
 - For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
 reuse the origin/destination from earlier in the conversation and change only what \
-the user changed (here mode → public_transport; for a transit_info follow-up, the \
-info_kind).
-- agency_text / line_text / stop_text stay '' unless the user asked about transport \
-lines, routes, stops, or timetables.
-- The service area is Tuscany only; do not invent places outside it.
+the user changed (here mode → public_transport). An origin the user never stated \
+stays '' on follow-ups too.
 <examples>
 "ciao, voglio andare da stazione di Rifredi a piazza Dalmazia a piedi" → request_type=journey, origin_text="stazione di Rifredi", destination_text="piazza Dalmazia", mode=foot_shortest (all other slots '')
 "da piazza Duomo a piazza Dalmazia in Firenze" → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze"
-"quali linee collegano Santa Maria Novella e il Duomo?" → request_type=journey, origin_text="Santa Maria Novella", destination_text="Duomo" (an origin→destination trip stays a journey even with transit words)
+"portami al Duomo" → request_type=journey, origin_text='', destination_text="Duomo"
+"dov'è la farmacia più vicina?" → request_type=journey, origin_text='', destination_text="farmacia", destination_category="Pharmacy"
 "e in bus?" (follow-up to the piazza Duomo → piazza Dalmazia trip) → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze", mode=public_transport
-"e le fermate della linea 6?" → request_type=transit_info, info_kind=stops, line_text="6"
 </examples>"""
 
 RESPOND_SYSTEM = """\
-You are a friendly Florence (Tuscany, Italy) mobility assistant. ALWAYS reply in the \
+You are a friendly urban-mobility assistant. ALWAYS reply in the \
 user's own language — if the user wrote Italian, reply in Italian; if \
 the language is unclear (e.g. a bare greeting), default to ITALIAN. Phrasing is yours: \
 natural and helpful, not robotic, \
@@ -113,8 +107,11 @@ if listed, are a nice touch. For a public-transport route whose RESULTS carry `l
 narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <provider> \
 toward <headsign> from the first to the last stop, then walk on), using ONLY the leg \
 fields — the leg's `line`, `provider`, `headsign`, `stops` (name + time), `stops_total` \
-and start/end times. You may say how many stops the ride covers and name the boarding/ \
-alighting stops, but never invent a line, stop, operator, or time not in the fields. A \
+and start/end times. Give the scheduled boarding and arrival times as HH:MM (the ride \
+leg's start/end times, or its first/last stop times), noting they are timetable times — \
+real-time information is not available. You may say how many stops the ride covers and \
+name the boarding/alighting stops, but never invent a line, stop, operator, or time not \
+in the fields. A \
 route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
 to restate, clarify, or give a nearby landmark for the origin/destination — they were \
 already located. When a bus route carries a `duration`, present it as an approximate ride \
@@ -131,7 +128,8 @@ more precise address); when geocoded addresses are present, mention how you read
 origin/destination so the user can spot a wrong match.
 - If a routing RESULTS item carries a `hint`, follow it for the alternative you \
 suggest — it already decided the right one: `car_pt_blocked_try_foot` = that mode is \
-likely blocked by Florence's ZTL/pedestrian core, so suggest going on foot or by \
+likely blocked by a restricted-traffic/pedestrian zone (e.g. an Italian city-centre \
+ZTL), so suggest going on foot or by \
 public transport; `service_empty_try_foot_or_later` = a service-side problem for that \
 mode (NOT a ZTL), so suggest walking (foot routes work) or trying again later; \
 `pt_degraded_to_foot` = the public-transport request returned a walking-only journey \
@@ -140,27 +138,23 @@ option, and if it is the only result say there is no direct public transport for
 trip and give the walking distance/time instead. With NO `hint`, never claim a \
 ZTL/pedestrian zone yourself.
 - If RESULTS has status "missing_place", ask the user for the field(s) listed in \
-`missing` (the origin/destination of a trip, or the line/stop of a public-transport \
-question) — do NOT say the request is unsupported.
-- For public-transport discovery RESULTS (agencies, lines, routes, stops, \
-timetables): present them as a compact list, say which agency you used, and add no \
-entries beyond those listed. When `count` exceeds the listed items, say how many exist \
-in total; stop lists cover only the first 2 routes (directions) of the line, so say so \
-when the route count is higher. If only an agency list came back (the requested agency \
-was not recognized), ask the user to pick one of those agencies.
-- For a stop timetable RESULT (`stop` + `lines` serving it): name the stop and list the \
-lines that serve it. If there is no `timetable`/`realtime` data, say the scheduled times \
-are not available right now — NEVER invent departure times. If the requested stop was not \
-found on the line, say so and suggest checking the stop name or the line.
-- When RESULTS includes a car-park entry (name `service_search_near_gps_position`, with a \
-`count` and per-spot `free_spaces`), add ONE short closing sentence about parking near the \
-destination — how many car parks are nearby and, if any `free_spaces` is a number > 0, that \
-there are free spots (else that live availability is not known right now). Do NOT list the \
-car-park names, addresses, or coordinates: the map already shows their pins. Keep it to that \
-single sentence.
+`missing` (the origin/destination of a trip); when "origin" is missing you may also \
+suggest sharing the position — do NOT say the request is unsupported.
+- When RESULTS includes a `coordinates_to_address` entry, the trip starts from the \
+user's current GPS position: say so ("dalla tua posizione", optionally "vicino a \
+<address>" using ONLY that entry's address). If the user gave no origin and there is \
+no such entry, say "dalla tua posizione attuale" without naming any street.
+- A `service_search_near_gps_position` entry whose `categories` is `Car_park` is \
+parking near the destination: add ONE short closing sentence — how many car parks are \
+nearby and, if any `free_spaces` is a number > 0, that there are free spots (else that \
+live availability is not known right now). Do NOT list the car-park names, addresses, \
+or coordinates: the map already shows their pins. Keep it to that single sentence.
+- A `service_search_near_gps_position` entry with any OTHER `categories` is how the \
+destination was resolved — the nearest place of that kind: name the found place (the \
+first listed service) naturally in the answer.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
-answer point-to-point trip questions (on foot, by car, or by public transport) and \
-public-transport discovery questions (lines, routes, stops, timetables) and invite \
+answer point-to-point trip questions (on foot, by car, or by public transport), \
+including trips to the nearest place of a kind ("la farmacia più vicina"), and invite \
 the user to rephrase."""
 
 # Not a real MCP tool: a function schema used only to force structured output
@@ -175,46 +169,33 @@ _EXTRACT_SLOTS_SCHEMA = {
             "properties": {
                 "request_type": {
                     "type": "string",
-                    "enum": ["journey", "transit_info", "other"],
-                    "description": "Classify by STRUCTURE, not vocabulary. 'journey' = the user wants to get from an origin to a destination (both named, or carried over from earlier in the chat) — use 'journey' even when transit words like bus/line/tram appear. 'transit_info' = a reference question about the transport network (which lines/routes/stops, or a stop timetable) with NO origin-destination trip. 'other' = neither.",
-                },
-                "info_kind": {
-                    "type": "string",
-                    "enum": ["lines", "routes", "stops", "timeline", ""],
-                    "description": "Only when request_type='transit_info' (else ''): 'lines' = which lines a network/agency runs; 'routes' = the routes of one line; 'stops' = the stops along a line; 'timeline' = the timetable at a stop.",
+                    "enum": ["journey", "other"],
+                    "description": "Classify by STRUCTURE, not vocabulary. 'journey' = the user wants to get somewhere: from an origin to a destination (named, carried over from earlier in the chat, or implicitly from their own position), including reaching the nearest place of some kind — use 'journey' even when transit words like bus/line/tram appear. 'other' = anything else (including network reference questions — which lines exist, stop timetables — that this advisor does not answer).",
                 },
                 "origin_text": {
                     "type": "string",
-                    "description": "Free-text origin place name, '' if absent.",
+                    "description": "Free-text origin place name exactly as the user said it; '' if absent (the system then starts from the user's own position).",
                 },
                 "destination_text": {
                     "type": "string",
-                    "description": "Free-text destination place name, '' if absent.",
+                    "description": "Free-text destination in the user's own words ('farmacia' counts), '' if absent.",
+                },
+                "destination_category": {
+                    "type": "string",
+                    "description": "Only when the destination is a GENERIC KIND of place rather than a named one ('la farmacia più vicina', 'un supermercato'): the matching English km4city service category, e.g. Pharmacy, Hospital, Supermarket, Museum, Hotel, Restaurant, Car_park, Fuel_station. '' when the destination is a named place.",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["car", "public_transport", "foot_quiet", "foot_shortest", ""],
                     "description": "Travel mode, '' if not specified. Map: walk / on foot → foot_shortest (a quiet or scenic walk → foot_quiet); drive / car → car; bus / tram / public transport / 公交 → public_transport.",
                 },
-                "agency_text": {
-                    "type": "string",
-                    "description": "Public transport agency the user named, '' if none.",
-                },
-                "line_text": {
-                    "type": "string",
-                    "description": "Public transport line short name (e.g. '6', 'T1'), '' if none.",
-                },
-                "stop_text": {
-                    "type": "string",
-                    "description": "Public transport stop name, '' if none.",
-                },
             },
             # Mark every field required: Llama4 only fills required params and
             # silently drops optional ones (one run extracted the origin but lost
             # the destination). An empty string '' marks a slot the user didn't give.
             "required": [
-                "request_type", "info_kind", "origin_text", "destination_text",
-                "mode", "agency_text", "line_text", "stop_text",
+                "request_type", "origin_text", "destination_text",
+                "destination_category", "mode",
             ],
         },
     },
@@ -223,36 +204,19 @@ _EXTRACT_SLOTS_SCHEMA = {
 
 class AdvisorState(TypedDict, total=False):
     messages: list[dict[str, Any]]  # chat history (system/user/assistant) for multi-turn
-    intent: str  # route | tpl_lines | tpl_routes | tpl_stops | tpl_timeline | other
-    slots: dict[str, Any]  # understand output (request_type, info_kind, intent, origin_text, ...)
+    intent: str  # route | other
+    slots: dict[str, Any]  # understand output (request_type, intent, origin_text, ...)
+    user_gps: dict[str, Any]  # browser GPS {lat,lng} (sanitized by api.py), absent/None without consent
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
-    endpoints: dict[str, Any]  # precise geocoded {origin, destination} {lat,lng} for the route
+    endpoints: dict[str, Any]  # precise resolved {origin, destination} {lat,lng} for the route
     parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
     response: dict[str, Any]  # widget JSON assembled by respond
 
 
-# The LLM classifies on two axes (request_type + info_kind); we fold that into the
-# single `intent` string the rest of the graph dispatches on.
-_INFO_KIND_TO_INTENT = {
-    "lines": "tpl_lines",
-    "routes": "tpl_routes",
-    "stops": "tpl_stops",
-    "timeline": "tpl_timeline",
-}
-
-
 def _request_to_intent(slots: dict[str, Any]) -> str:
-    """Map the two-axis classification to one internal `intent` string.
-
-    journey -> route; transit_info -> tpl_<info_kind> (blank info_kind -> other);
-    anything else -> other."""
-    rt = slots.get("request_type")
-    if rt == "journey":
-        return "route"
-    if rt == "transit_info":
-        return _INFO_KIND_TO_INTENT.get(slots.get("info_kind") or "", "other")
-    return "other"
+    """Map the LLM classification to the internal `intent` string the graph dispatches on."""
+    return "route" if slots.get("request_type") == "journey" else "other"
 
 
 async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
@@ -288,15 +252,28 @@ async def understand(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any
     return {"slots": slots, "intent": slots.get("intent", "other")}
 
 
-def _pick_coord(geocode: Any, search: str) -> list[float] | None:
+def _feature_coords(feature: dict[str, Any]) -> list[float] | None:
+    """A feature's [lng, lat] as floats, or None when the geometry is unusable."""
+    coords = (feature.get("geometry") or {}).get("coordinates")
+    if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        lng, lat = coords[0], coords[1]
+        if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
+            return [float(lng), float(lat)]
+    return None
+
+
+def _pick_coord(
+    geocode: Any, search: str, gps: dict[str, Any] | None = None
+) -> list[float] | None:
     """Best feature's [lng, lat] for `search` from a geocode result, or None.
 
     The server sometimes ranks a fuzzy POI hit above the real place (once a company
-    1.1 km west of "Piazza Duomo"), so we prefer the first feature whose address/name
-    tokens are all covered by the search text, and reject features with extra tokens.
-    When no label matches (e.g. stations, whose features carry no address) we keep the
-    server's first hit. exec_tool already pins results to Tuscany, so an empty or
-    non-FeatureCollection payload gives None here.
+    1.1 km west of "Piazza Duomo"), so the candidate pool prefers features whose
+    address/name tokens are all covered by the search text (rejecting extra-token
+    labels). When no label matches (e.g. stations, whose features carry no address)
+    the pool is the full list. With `gps` (the user's position) the nearest pool
+    candidate wins (haversine — the geocoder's own proximity bias is a no-op, probed
+    2026-07-09); without it, the pool's first (best-score) hit wins, as before.
     """
     if not isinstance(geocode, dict) or "error" in geocode:
         return None
@@ -304,27 +281,36 @@ def _pick_coord(geocode: Any, search: str) -> list[float] | None:
     if not (isinstance(features, list) and features):
         return None
     want = _label_tokens(search)
-    idx, best = 0, features[0]
+    pool = features
     if want:
-        for i, f in enumerate(features):
+        matching = []
+        for f in features:
             props = f.get("properties") or {}
             label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
             toks = _label_tokens(label)
             # Skip a label that is just the municipality ("FIRENZE"): it matches any
             # search ending in ", Firenze" but is never a useful pick.
             if toks and toks <= want and not toks <= _label_tokens(str(props.get("city") or "")):
-                idx, best = i, f
-                break
+                matching.append(f)
+        if matching:
+            pool = matching
+    best = None
+    if gps:
+        best_dist = None
+        for f in pool:
+            c = _feature_coords(f)
+            if c is None:
+                continue
+            dist = _haversine_km(gps["lat"], gps["lng"], c[1], c[0])
+            if best_dist is None or dist < best_dist:
+                best_dist, best = dist, f
+    if best is None:
+        best = pool[0]
     logger.debug(
-        "geocode %r picked feature #%d (address=%r)",
-        search, idx, (best.get("properties") or {}).get("address"),
+        "geocode %r picked feature (address=%r, gps=%s)",
+        search, (best.get("properties") or {}).get("address"), bool(gps),
     )
-    coords = (best.get("geometry") or {}).get("coordinates")
-    if isinstance(coords, (list, tuple)) and len(coords) >= 2:
-        lng, lat = coords[0], coords[1]
-        if isinstance(lng, (int, float)) and isinstance(lat, (int, float)):
-            return [float(lng), float(lat)]
-    return None
+    return _feature_coords(best)
 
 
 # A failed walking route is retried once with the other foot profile: the two
@@ -333,38 +319,52 @@ def _pick_coord(geocode: Any, search: str) -> list[float] | None:
 # alternative suggested by respond.
 _FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 
+# Nearest-category destination search: widening radius ladder (km) around the anchor
+# (the user's GPS, or the geocoded destination text without one). An empty rung means
+# "no such service within <radius>", so the next rung widens; all-empty falls back to
+# the plain text geocode. The near results come back distance-sorted with a `distance`
+# field (probed 2026-07-09), so [0] is the nearest.
+NEAREST_SERVICE_RADII_KM = (0.5, 2.0, 10.0)
+NEAREST_SERVICE_MAX = 10
+
 
 async def execute(
     state: AdvisorState, *, client: Client, local_client: Client | None = None
 ) -> dict[str, Any]:
     """Run the tool flow for the extracted intent (no LLM).
 
-    route: geocode both endpoints, then routing with the requested mode (plus a foot
-    profile retry). tpl_* intents go to tpl.run_tpl_flow. Every call is recorded in
-    tool_results so respond can mine the widget data. "other" or missing slots set
-    unsupported.
+    route: resolve both endpoints, then routing with the requested mode (plus a foot
+    profile retry). The origin defaults to the user's GPS position when no text was
+    given (reverse-geocoded once so respond can name it); a generic-category
+    destination resolves to the nearest service (see _nearest_service). Every call is
+    recorded in tool_results so respond can mine the widget data. "other" intent or
+    an unresolvable endpoint sets unsupported (respond asks for what's missing).
     """
     slots = state.get("slots") or {}
+    user_gps = state.get("user_gps") or None
     results: list[dict[str, Any]] = []
-    # Forward geocoding goes to our local MCP server (referente's is broken, L29); routing
-    # and tpl_* stay on the remote client. Tests pass only `client`, so lc falls back to it.
+    # Forward geocoding goes to our local MCP server (referente's is broken, L29); routing,
+    # reverse geocode and near-search stay on the remote client. Tests pass only `client`,
+    # so lc falls back to it.
     lc = local_client or client
 
-    if slots.get("intent") in TPL_INTENTS:
-        return await run_tpl_flow(client, slots)
     if slots.get("intent") != "route":
         return {"tool_results": results, "unsupported": True}
 
     origin_text = (slots.get("origin_text") or "").strip()
     dest_text = (slots.get("destination_text") or "").strip()
-    if not (origin_text and dest_text):
+    dest_category = (slots.get("destination_category") or "").strip()
+    # An endpoint is resolvable when the user gave text, or something covers it: GPS
+    # covers a missing origin; GPS anchors a text-less category destination. Mirrors
+    # _missing_route_slots so respond asks exactly for what execute refused on.
+    if not (origin_text or user_gps) or not (dest_text or (dest_category and user_gps)):
         return {"tool_results": results, "unsupported": True}
 
     async def _geocode(search: str) -> list[float] | None:
         args = {"search": search}
         result = await exec_tool(lc, "address_search_location", args)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
-        coord = _pick_coord(result, search)
+        coord = _pick_coord(result, search, gps=user_gps)
         if logger.isEnabledFor(logging.DEBUG):
             # The slim view drops coordinates, so log the picked one here.
             logger.debug(
@@ -375,8 +375,70 @@ async def execute(
             )
         return coord
 
-    origin = await _geocode(origin_text)
-    dest = await _geocode(dest_text)
+    async def _nearest_service(anchor: list[float], category: str) -> list[float] | None:
+        # Nearest service of `category` around anchor [lng, lat], widening the radius per
+        # rung. Only the deciding call enters the audit: the winning rung (respond names
+        # the found place from it), or the last empty one (so respond can explain a miss).
+        entry: dict[str, Any] | None = None
+        for radius in NEAREST_SERVICE_RADII_KM:
+            n_args = {
+                "latitude": anchor[1],
+                "longitude": anchor[0],
+                "categories": category,
+                "maxdistance": radius,
+                "maxresults": NEAREST_SERVICE_MAX,
+            }
+            result = await exec_tool(client, "service_search_near_gps_position", n_args)
+            entry = {"name": "service_search_near_gps_position", "args": json.dumps(n_args), "result": result}
+            spots = parse_service_features(result)
+            if spots:
+                results.append(entry)
+                nearest = spots[0]  # server returns distance-sorted features
+                logger.debug(
+                    "nearest %s within %s km: %r", category, radius, nearest.get("name")
+                )
+                if nearest.get("lat") is not None and nearest.get("lng") is not None:
+                    return [nearest["lng"], nearest["lat"]]
+                return None
+        if entry is not None:
+            results.append(entry)
+        logger.debug("nearest %s: no service within %s km", category, NEAREST_SERVICE_RADII_KM[-1])
+        return None
+
+    # --- origin: user text, else the GPS position itself (labelled via reverse geocode).
+    if origin_text:
+        origin = await _geocode(origin_text)
+    else:
+        origin = [user_gps["lng"], user_gps["lat"]]
+        rev_args = {"latitude": user_gps["lat"], "longitude": user_gps["lng"]}
+        rev = await reverse_geocode(client, user_gps["lat"], user_gps["lng"])
+        if isinstance(rev, dict) and "error" not in rev:
+            # Only a successful lookup enters the audit: respond keys "dalla tua
+            # posizione (vicino a ...)" off this entry, and a failure entry would
+            # trigger its error rule for a trip that is actually fine.
+            results.append({"name": "coordinates_to_address", "args": json.dumps(rev_args), "result": rev})
+
+    # --- destination: nearest-category service when asked, else plain text geocode.
+    dest = None
+    if dest_category:
+        geocoded = None
+        if user_gps:
+            anchor = [user_gps["lng"], user_gps["lat"]]
+        else:
+            # No GPS: anchor on the geocoded destination text ("farmacia, Pisa" lands in
+            # Pisa via the named-city ladder), then snap to the nearest real service.
+            geocoded = await _geocode(dest_text)
+            anchor = geocoded
+        if anchor is not None:
+            dest = await _nearest_service(anchor, dest_category)
+        if dest is None:
+            # Category miss (bad category name / nothing within the widest rung):
+            # degrade to the text geocode so the trip still resolves when possible.
+            # Without GPS the text was already geocoded above (never re-call it).
+            dest = geocoded if not user_gps else (await _geocode(dest_text) if dest_text else None)
+    else:
+        dest = await _geocode(dest_text)
+
     if origin is None or dest is None:
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
@@ -490,8 +552,10 @@ async def execute(
     if parking_entry is not None and car_ok:
         results.append(parking_entry)
         # Build the nearest-N list (parse + Haversine distance + sort), then enrich each with
-        # its live free-spaces (service_info_dev per spot, concurrently).
-        spots = _extract_parking(results, {"lat": dest[1], "lng": dest[0]})
+        # its live free-spaces (service_info_dev per spot, concurrently). The entry is passed
+        # directly (not scanned from results): a category-destination search logs an entry
+        # under the same tool name, and only this one is parking.
+        spots = _extract_parking(parking_entry, {"lat": dest[1], "lng": dest[0]})
         if spots:
             parking = await _enrich_parking(client, spots)
 
@@ -661,33 +725,31 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 
 def _extract_parking(
-    results: list[dict[str, Any]], dest: dict[str, Any] | None
+    entry: dict[str, Any], dest: dict[str, Any] | None
 ) -> list[dict[str, Any]] | None:
     """Mine the parking search entry into the widget payload.
 
-    dest is the geocoded destination {"lat","lng"} (from the endpoints). Each spot gets a
-    Haversine distance from dest (the search envelope is not relied on for distance — units
-    are unverified, L-style probe discipline). Sort: spots with a known free-space count
-    first (most free first), then by distance; spots with unknown free (realtime not loaded,
-    the agreed degraded case) sort after, nearest first. Capped to PARKING_MAX. None when
-    there is no parking entry or it is empty/errored (route still returned without it)."""
-    for entry in results:
-        if entry.get("name") != "service_search_near_gps_position":
-            continue
-        spots = parse_parking_features(entry.get("result"))
-        if not spots:
-            return None
-        for s in spots:
-            if dest and s.get("lat") is not None and s.get("lng") is not None:
-                s["distance_km"] = round(
-                    _haversine_km(dest["lat"], dest["lng"], s["lat"], s["lng"]), 3
-                )
-            else:
-                s["distance_km"] = None
+    entry is the Car_park search's audit entry (passed directly by execute — a
+    category-destination search logs an entry under the same tool name). dest is the
+    resolved destination {"lat","lng"} (from the endpoints). Each spot gets a Haversine
+    distance from dest (the search envelope is not relied on for distance — units are
+    unverified, L-style probe discipline). Sort: spots with a known free-space count
+    first (most free first), then by distance; spots with unknown free (realtime not
+    loaded, the agreed degraded case) sort after, nearest first. Capped to PARKING_MAX.
+    None when the entry is empty/errored (route still returned without it)."""
+    spots = parse_service_features(entry.get("result"))
+    if not spots:
+        return None
+    for s in spots:
+        if dest and s.get("lat") is not None and s.get("lng") is not None:
+            s["distance_km"] = round(
+                _haversine_km(dest["lat"], dest["lng"], s["lat"], s["lng"]), 3
+            )
+        else:
+            s["distance_km"] = None
 
-        spots.sort(key=_parking_sort_key)
-        return spots[:PARKING_MAX]
-    return None
+    spots.sort(key=_parking_sort_key)
+    return spots[:PARKING_MAX]
 
 
 def _template_answer(
@@ -697,23 +759,17 @@ def _template_answer(
     is unavailable."""
     if missing:
         labels = {
-            "origin": "il punto di partenza",
+            "origin": "il punto di partenza (o la tua posizione)",
             "destination": "la destinazione",
-            "line": "la linea (es. '6')",
-            "stop": "il nome della fermata",
         }
         asked = " e ".join(labels[m] for m in missing)
         return f"Mi serve ancora {asked} per rispondere."
     if unsupported:
         return (
             "Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto "
-            "o con i mezzi pubblici) e su linee, percorsi, fermate e orari del "
-            "trasporto pubblico, es. 'da Piazza Duomo a Santa Croce a piedi'."
-        )
-    if intent in TPL_INTENTS:
-        return (
-            tpl_template_answer(intent, data)
-            or "Mi dispiace, non ho trovato informazioni per questa richiesta."
+            "o con i mezzi pubblici), anche verso il luogo più vicino di un certo "
+            "tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla "
+            "farmacia più vicina'."
         )
     routes = data.get("routes") or []
     if len(routes) > 1:
@@ -742,21 +798,19 @@ def _template_answer(
     return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
 
 
-# Required slots per intent: route needs both places. The tpl table lives in tpl.py
-# (single source: run_tpl_flow skips its chain on the same keys).
-_REQUIRED_SLOTS: dict[str, tuple[tuple[str, str], ...]] = {
-    "route": (("origin", "origin_text"), ("destination", "destination_text")),
-    **TPL_REQUIRED_SLOTS,
-}
+def _missing_route_slots(slots: dict[str, Any], user_gps: Any) -> list[str]:
+    """Which route endpoints are unresolvable (mirrors execute's endpoint gate).
 
-
-def _missing_slots(intent: str, slots: dict[str, Any]) -> list[str]:
-    """Which required slots of `intent` the extraction left blank."""
-    return [
-        label
-        for label, key in _REQUIRED_SLOTS.get(intent, ())
-        if not (slots.get(key) or "").strip()
-    ]
+    GPS covers a missing origin; a category destination is resolvable with GPS even
+    without destination text."""
+    missing = []
+    if not (slots.get("origin_text") or "").strip() and not user_gps:
+        missing.append("origin")
+    if not (slots.get("destination_text") or "").strip() and not (
+        (slots.get("destination_category") or "").strip() and user_gps
+    ):
+        missing.append("destination")
+    return missing
 
 
 def _routing_hint(routetype: str | None, result: Any) -> str | None:
@@ -779,7 +833,8 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
         # Service-side failure for this mode, not a ZTL/pedestrian restriction.
         return "service_empty_try_foot_or_later"
     if "empty routes list" in err and routetype in ("car", "public_transport"):
-        # A car/PT route with no result is often Florence's ZTL/pedestrian core.
+        # A car/PT route with no result is often a restricted-traffic (ZTL) or
+        # pedestrian zone.
         return "car_pt_blocked_try_foot"
     return None
 
@@ -793,21 +848,17 @@ def _results_view(
     if unsupported:
         return {
             "status": "unsupported",
-            "supported": "point-to-point trips (foot, car, public transport) and "
-            "public-transport discovery (lines, routes, stops, timetables)",
+            "supported": "point-to-point trips (foot, car, public transport), "
+            "including trips to the nearest place of a kind (e.g. nearest pharmacy)",
         }
     view = []
     for e in results:
         name = e.get("name")
-        # Parking IS shown to the LLM (slimmed to count + per-spot free_spaces by
-        # slim_result_for_llm) so respond can add one brief availability sentence. The map
-        # still plots the pins (data.parking); the reply no longer lists spot names.
-        slim = (
-            slim_tpl_result(name, e.get("result"))
-            if name in TPL_TOOL_NAMES
-            else slim_result_for_llm(name, e.get("result"))
-        )
-        item = {"name": name, "result": slim}
+        # Near-search entries ARE shown to the LLM (slimmed to count + per-spot name/
+        # free_spaces by slim_result_for_llm): the parking one feeds the availability
+        # sentence, a category-destination one names the found place. The map still
+        # plots parking pins (data.parking); the reply no longer lists spot names.
+        item = {"name": name, "result": slim_result_for_llm(name, e.get("result"))}
         if name == "routing":
             # Surface which mode this attempt used: on failure the LLM can only
             # suggest a sensible alternative ("in auto non si può, prova a piedi")
@@ -819,6 +870,13 @@ def _results_view(
             hint = _routing_hint(routetype, e.get("result"))
             if hint:
                 item["hint"] = hint
+        elif name == "service_search_near_gps_position":
+            # Surface the searched category: the prompt tells parking (Car_park) apart
+            # from a nearest-category destination by this field.
+            try:
+                item["categories"] = json.loads(e.get("args") or "{}").get("categories")
+            except (json.JSONDecodeError, TypeError):
+                pass
         view.append(item)
     return {"status": "ok", "results": view}
 
@@ -834,7 +892,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     # line color). _extract_data already carries `mode` per route (and on the top-level
     # primary), read back from the routetype the route was computed with, so respond
     # adds nothing here. Pending referente confirmation of the widget data shape.
-    data = extract_tpl_data(intent, results) if intent in TPL_INTENTS else _extract_data(results)
+    data = _extract_data(results)
     # Hand the precise geocoded endpoints to the front-end (route intent only) so it can pin
     # the start/finish markers on the real address instead of the WKT road-snap point.
     endpoints = state.get("endpoints") or {}
@@ -849,12 +907,12 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     parking = state.get("parking")
     if intent == "route" and parking:
         data["parking"] = parking
-    # An intent execute refused means slot extraction left a required slot blank
-    # (a place for route, line/stop for tpl). respond then asks for it instead of
-    # claiming the request is unsupported.
+    # A route intent execute refused means an endpoint was unresolvable (no text and
+    # nothing covering it). respond then asks for it instead of claiming the request
+    # is unsupported; a GPS-covered origin is never asked for.
     missing = (
-        _missing_slots(intent, state.get("slots") or {})
-        if unsupported and intent in _REQUIRED_SLOTS
+        _missing_route_slots(state.get("slots") or {}, state.get("user_gps"))
+        if unsupported and intent == "route"
         else None
     ) or None
 
@@ -941,13 +999,19 @@ async def _session_deps() -> tuple[dict[str, Any], Llama4Client]:
     return _CFG, _LLM
 
 
-async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+async def run_advisor(
+    query: str,
+    history: list[dict[str, Any]] | None = None,
+    gps: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Multi-turn mobility advisor. Returns widget JSON including updated messages.
 
     Pass the previous turn's response["messages"] back as `history` to continue the
-    conversation (the dashboard front-end carries state this way). The MCP
-    Client is reconnected per turn (clean lifecycle, cheap intranet handshake); config
-    and LLM client persist for the whole process.
+    conversation (the dashboard front-end carries state this way). `gps` is the user's
+    sanitized {lat, lng} browser position (or None): it defaults a missing origin and
+    drives nearest-candidate picking. The MCP Client is reconnected per turn (clean
+    lifecycle, cheap intranet handshake); config and LLM client persist for the whole
+    process.
     """
     cfg, llm = await _session_deps()
     messages = list(history or [])
@@ -955,6 +1019,8 @@ async def run_advisor(query: str, history: list[dict[str, Any]] | None = None) -
     t0 = time.perf_counter()
     async with Client(cfg) as client, Client(_local_config()) as local_client:
         graph = _build_graph(client, llm, local_client)
-        out: AdvisorState = await graph.ainvoke({"messages": messages, "tool_results": []})
+        out: AdvisorState = await graph.ainvoke(
+            {"messages": messages, "tool_results": [], "user_gps": gps}
+        )
     logger.debug("advisor turn total %.1fs", time.perf_counter() - t0)
     return out.get("response", {"status": "error", "error": "no response produced", "messages": messages})

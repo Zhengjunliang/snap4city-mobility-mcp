@@ -10,12 +10,13 @@ User asks a trip question → a Langgraph **deterministic** graph (`understand �
 
 Working end-to-end on the **Snap4City JupyterHub** (browser login, intranet-direct MCP, no VPN/SSH tunnel). The remote referente MCP server is connected over HTTP Streamable, and the **Llama4 agentic LLM client** (`src/snap4city_mobility_mcp/llm.py`, endpoint `llama4-agentic-inference`) is live there.
 
-The deterministic advisor answers two families of question:
+The deterministic advisor answers **point-to-point trip questions** — on foot, by car, or by public transport — with GPS-aware endpoint resolution:
 
-- **Point-to-point routes** — on foot, by car, or by public transport (geocode both endpoints → `routing`).
-- **Public-transport discovery** — which lines an agency runs, the routes of a line, the stops on a route, and the lines serving a stop (the `tpl_*` chain in `src/snap4city_mobility_mcp/tpl.py`).
+- **Named places** geocode worldwide (no region lock); a city the user names always wins, and with the browser GPS available the candidate **nearest to the user** wins among equals.
+- **Missing origin** ("portami al Duomo") defaults to the **user's GPS position** (reverse-geocoded once so the reply can say *"dalla tua posizione"*); without GPS the advisor asks for the starting point.
+- **Generic-category destinations** ("la farmacia più vicina") resolve via the remote `service_search_near_gps_position` tool — the nearest service of that km4city category around the user (or around the named city without GPS).
 
-Known **server-side** limits (the client is correct — these are reported to the referente): `car` / `public_transport` routing returns an empty body for any origin/destination (`docs/lessons.md` L19), and a stop's scheduled `timetable` / `realtime` comes back empty (`docs/lessons.md` L21). Walking routes and the public-transport discovery chain work.
+Known **server-side** limit (the client is correct — reported to the referente): `public_transport` routing on the remote server never returns transit (`docs/lessons.md` L19) — the local `bus_route` tool covers it via the What-If GraphHopper router.
 
 ---
 
@@ -160,7 +161,7 @@ curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
   -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
 ```
 
-The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, nothing hardcoded); the route (`data.wkt`) is drawn on a sibling `widgetMap`. Follow-ups reuse history (e.g. *"e per una passeggiata tranquilla?"*), and public-transport discovery (tpl_*) queries are supported too (e.g. *"quali linee servono la fermata San Marco?"*). Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every bridge start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
+The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, nothing hardcoded); the route (`data.wkt`) is drawn on a sibling `widgetMap`. Follow-ups reuse history (e.g. *"e per una passeggiata tranquilla?"*). The dashboard front-end also sends the browser geolocation as `gps: {lat, lng}` (or `null`) with every turn — origin defaulting and nearest-candidate picking key off it. Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every bridge start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
 
 ```json
 {
@@ -174,7 +175,7 @@ The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, noth
 }
 ```
 
-The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (the dashboard front-end keeps it and sends it back as `history` each turn). Public-transport discovery (tpl_*) queries are also supported — `execute` runs the matching deterministic chain in `tpl.py` (e.g. *"quali linee servono la fermata San Marco?"*, *"orari della linea 6 alla fermata San Marco"*); only out-of-scope questions return an "unsupported" reply.
+The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `eta` + `duration` + source/destination node (the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (the dashboard front-end keeps it and sends it back as `history` each turn). Out-of-scope questions (including transport-network reference questions like line lists or timetables) return a friendly "unsupported" reply.
 
 > **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
 
@@ -201,7 +202,6 @@ snap4city-mobility-mcp/
         ├── mcp_tools.py           # client MCP layer: Client config, exec_tool, routing_with_retry, geocode helpers
         ├── mcp_server.py          # our own local MCP server: forward geocode tool wrapping the public km4city ServiceMap (referente's is broken, L29)
         ├── orchestrator.py        # deterministic Langgraph graph: understand → execute → respond; run_advisor
-        ├── tpl.py                 # deterministic public-transport (tpl_*) discovery chains: run_tpl_flow
         ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
         └── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
 ```
@@ -210,7 +210,7 @@ snap4city-mobility-mcp/
 
 ## 7. Tools consumed (remote) + one served locally
 
-The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth for routing, reverse geocoding, and the `tpl_*` chain; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`routing`, not `snap4agentic_advisor_native_routing`) — see `docs/lessons.md` L6.
+The remote `snap4agentic_advisor_native` server (referente-managed) is the source of truth for routing, reverse geocoding, and the nearest-service search; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`routing`, not `snap4agentic_advisor_native_routing`) — see `docs/lessons.md` L6.
 
 **Exception — forward geocoding is served locally.** The remote `address_search_location` is server-side broken (returns foreign hits / zero Tuscan for valid Florence queries, `docs/lessons.md` L28), so we host our own MCP server (`mcp_server.py`) wrapping the **public** km4city ServiceMap and connect to it as a **separate** single-server client (`S4C_LOCAL_MCP_URL`). Keeping it a separate client — rather than merging both into one config — preserves the remote tools' bare names (no prefix migration, L29). The geocode tool returns the same GeoJSON shape, so the client's geocode pipeline is unchanged.
 
@@ -230,7 +230,7 @@ asyncio.run(main())
 "
 ```
 
-Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor drives **7 tools**: `routing`, `coordinates_to_address`, and the five `tpl_*` from the remote server, plus `address_search_location` from the **local** server (`mcp_server.py`, the forward-geocode exception above). The deterministic `execute` node chains them in Python — `geocode → geocode → routing` for a trip (geocode on the local client, routing on the remote), and the `tpl_*` discovery chains in `tpl.py` for public-transport questions (the LLM never picks tools). `mcp_tools.exec_tool` executes each call.
+Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` and `/shortestpath` field-by-field notes — the underlying endpoints the remote tools wrap) is in §1 / §2 of the same file. The advisor drives **6 tools**: `routing`, `coordinates_to_address` (labels a GPS-defaulted origin), `service_search_near_gps_position` (car parks near the destination + nearest-category destinations) and `service_info_dev` (live parking free-spaces) from the remote server, plus `address_search_location` (forward geocode) and `bus_route` (public-transport routing via the What-If router) from the **local** server (`mcp_server.py`). The deterministic `execute` node chains them in Python — resolve origin (geocode, or the GPS point) → resolve destination (geocode, or nearest service by category) → routing per mode (the LLM never picks tools). `mcp_tools.exec_tool` executes each call.
 
 ---
 
@@ -291,7 +291,7 @@ ss -ltn | grep -E ':8080|:8020|:8010' || echo "all ports free"
 python -m snap4city_mobility_mcp.mcp_server
 ```
 
-Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127.0.0.1:8020/mcp`). Routing / reverse geocode / `tpl_*` still go to the referente remote server.
+Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127.0.0.1:8020/mcp`). Routing / reverse geocode / nearest-service search still go to the referente remote server.
 
 **Terminal 2 — advisor bridge (FastAPI)** (drives the LLM + remote MCP server, dashboard 联动):
 
@@ -304,6 +304,9 @@ Self-check (separate terminal):
 ```bash
 curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
   -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+# GPS-aware turns: origin defaults to the position, categories resolve to the nearest service
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"portami alla farmacia più vicina","history":[],"gps":{"lat":43.7731,"lng":11.2558}}'
 ```
 
 Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).

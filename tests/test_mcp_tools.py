@@ -1,8 +1,9 @@
 """Unit tests for the deterministic MCP layer (mcp_tools.py).
 
-Lean core suite: routing envelope shapes (L2/L3/L7/L8), the two-pass + bbox +
-flaky-retry geocode (L11/L17/L20), the LLM-context slimming (L12), and the
-contract that every exposed tool exists in the live probe.
+Lean core suite: routing envelope shapes (L2/L3/L7/L8), the two-pass geocode with
+named-city preference (L11/L17, worldwide since the Tuscany bbox removal), the
+nearest-service parsing, the LLM-context slimming (L12), and the contract that every
+exposed tool exists in the live probe.
 """
 import json
 import pathlib
@@ -17,6 +18,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     _unwrap,
     exec_tool,
     group_arc_legs,
+    parse_service_features,
     reverse_geocode,
     routing_with_retry,
     slim_result_for_llm,
@@ -67,58 +69,83 @@ async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch
     assert len(client.calls) == 3
 
 
-# --- exec_tool: geocode two-pass + bbox + flaky retry (L11/L17/L20) ----------
+# --- exec_tool: geocode two-pass + named-city preference (L11/L17) -----------
 
 def _feature(lng, lat, addr="x", city="FIRENZE"):
     return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
             "properties": {"address": addr, "city": city}}
 
 
-async def test_exec_tool_geocode_filters_to_tuscany(make_client, make_result):
-    """L11/L17: out-of-region (Valencia/France) hits are dropped; Tuscan ones kept.
-    The address pass (excludePOI=true) hits, so the POI pass is never sent."""
-    fc = {"type": "FeatureCollection", "count": 3, "features": [
-        _feature(-0.3068184, 39.59272, "Valencia"),   # Spain — drop
-        _feature(11.2560, 43.7714, "Firenze Duomo"),  # Tuscany — keep
-        _feature(4.531295, 44.212044, "France"),      # France — drop
+async def test_exec_tool_geocode_named_city_wins_first_pass(make_client, make_result):
+    """A city the user names narrows the address pass outright (no POI pass sent),
+    regardless of the server's score order."""
+    fc = {"type": "FeatureCollection", "count": 2, "features": [
+        _feature(11.2560, 43.7714, "VIA ROMA", "FIRENZE"),
+        _feature(10.2270, 43.9580, "VIA ROMA", "PIETRASANTA"),
     ]}
     client = make_client([make_result(structured=fc)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
+    out = await exec_tool(client, "address_search_location", {"search": "via Roma, Pietrasanta"})
     assert out["count"] == 1
-    assert out["features"][0]["properties"]["address"] == "Firenze Duomo"
+    assert out["features"][0]["properties"]["city"] == "PIETRASANTA"
     assert len(client.calls) == 1
     _, sent = client.calls[0]
     assert sent["excludePOI"] is True  # addresses first — POIs only as fallback (L17)
-    assert sent["lang"] == "it" and sent["logic"] == "or"  # Italy/Florence bias on every pass
+    assert sent["lang"] == "it" and sent["logic"] == "or"  # Italian-dataset bias on every pass
+
+
+async def test_exec_tool_geocode_no_city_keeps_all_hits_worldwide(make_client, make_result):
+    """No city named → no narrowing and no region filter: every hit (foreign included)
+    survives for the caller's GPS-nearest picking (_pick_coord). Both passes run
+    (the address pass is not city-confident), address hits win over POI ones."""
+    addresses = {"type": "FeatureCollection", "count": 3, "features": [
+        _feature(-0.3068184, 39.59272, "PIAZZA DUOMO", "VALENCIA"),
+        _feature(11.2560, 43.7714, "PIAZZA DUOMO", "FIRENZE"),
+        _feature(10.2270, 43.9580, "PIAZZA DUOMO", "PIETRASANTA"),
+    ]}
+    poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.0, 43.0, "poi hit", "PRATO")]}
+    client = make_client([make_result(structured=addresses), make_result(structured=poi)])
+    out = await exec_tool(client, "address_search_location", {"search": "piazza Duomo"})
+    assert out["count"] == 3  # nothing dropped — no Florence default, no bbox
+    assert [f["properties"]["city"] for f in out["features"]] == ["VALENCIA", "FIRENZE", "PIETRASANTA"]
+    assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 
 async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result):
-    """L17: address pass finds nothing in-region (stations/landmarks are POI-only)
-    → retried with excludePOI=false."""
-    spain = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}
+    """L17: address pass comes back empty (stations/landmarks are POI-only)
+    → the POI pass (excludePOI=false) provides the result."""
+    empty = {"type": "FeatureCollection", "count": 0, "features": []}
     poi = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2482, 43.8047)]}
-    client = make_client([make_result(structured=spain), make_result(structured=poi)])
+    client = make_client([make_result(structured=empty), make_result(structured=poi)])
     out = await exec_tool(client, "address_search_location", {"search": "stazione di Firenze Rifredi"})
     assert out["count"] == 1
     assert out["features"][0]["geometry"]["coordinates"] == [11.2482, 43.8047]
     assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
 
 
-async def test_exec_tool_geocode_retry_recovers(make_client, make_result, monkeypatch):
-    """L20: the flaky zero-Tuscany window clears on retry → the next attempt's Tuscan hit wins."""
-    async def _noop(*a, **k):
-        return None
+# --- parse_service_features (nearest-category search envelope) ----------------
 
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    miss = {"type": "FeatureCollection", "count": 1, "features": [_feature(-0.3068, 39.5927)]}  # Spain
-    hit = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714, "Duomo")]}
-    # attempt 1: address(miss) + POI(miss) → error; attempt 2: address(hit) → success, POI not sent
-    client = make_client([make_result(structured=miss), make_result(structured=miss),
-                          make_result(structured=hit)])
-    out = await exec_tool(client, "address_search_location", {"search": "Piazza del Duomo, Firenze"})
-    assert out["count"] == 1
-    assert out["features"][0]["properties"]["address"] == "Duomo"
-    assert len(client.calls) == 3  # failed attempt (2 passes) + recovered address pass (1)
+def test_parse_service_features_reads_nested_envelope():
+    """The live near-search envelope nests distance-sorted features under Services;
+    the parser keeps that order (the caller takes [0] as the nearest) and maps
+    name/coords/uri. free_spaces stays None for non-parking services."""
+    result = {"result": [["uri1", "uri2"], {"Services": {"type": "FeatureCollection", "features": [
+        {"geometry": {"type": "Point", "coordinates": [11.25459, 43.77349]},
+         "properties": {"name": "Farmacia ALL INSEGNA DEL MORO", "distance": "0.106",
+                        "serviceUri": "http://km4city/f1"}},
+        {"geometry": {"type": "Point", "coordinates": [11.25440, 43.77320]},
+         "properties": {"name": "Farmacia S. ANTONINO", "distance": "0.1128",
+                        "serviceUri": "http://km4city/f2"}},
+    ]}}]}
+    spots = parse_service_features(result)
+    assert [s["name"] for s in spots] == ["Farmacia ALL INSEGNA DEL MORO", "Farmacia S. ANTONINO"]
+    assert spots[0]["lng"] == 11.25459 and spots[0]["lat"] == 43.77349
+    assert spots[0]["uri"] == "http://km4city/f1"
+    assert spots[0]["free_spaces"] is None
+
+
+def test_parse_service_features_error_gives_empty():
+    assert parse_service_features({"error": "boom"}) == []
+    assert parse_service_features(None) == []
 
 
 # --- reverse_geocode (coordinates_to_address; near-me foundation) ------------
@@ -159,15 +186,16 @@ def test_slim_routing_drops_wkt_and_lists_streets():
 # --- group_arc_legs (walk -> ride -> walk from the bus_route arc list) --------
 
 def _multimodal_arcs():
-    """The arc list bus_route._bus_arcs produces for a GTFS ride: foot -> board -> alight -> foot."""
-    stops = [{"name": "PORTE NUOVE BELFIORE", "time": "2026-07-06T06:23:00Z"},
-             {"name": "ACC. DEL CIMENTO ARTOM", "time": "2026-07-06T06:34:28Z"}]
+    """The arc list bus_route._bus_arcs produces for a GTFS ride: foot -> board -> alight -> foot.
+    Times are Rome local with offset (mcp_server converts the router's UTC instants)."""
+    stops = [{"name": "PORTE NUOVE BELFIORE", "time": "2026-07-06T08:23:00+02:00"},
+             {"name": "ACC. DEL CIMENTO ARTOM", "time": "2026-07-06T08:34:28+02:00"}]
     return [
         {"transport": "foot", "transport_provider": None, "desc": "a piedi 100 m", "distance": 0.1},
         {"transport": "bus", "transport_provider": "at - Firenze urbano", "desc": "linea 57 da PORTE NUOVE BELFIORE",
-         "line": "57", "headsign": "CALENZANO UNIVERSITA'", "stops": stops, "start_datetime": "2026-07-06T06:23:00Z"},
+         "line": "57", "headsign": "CALENZANO UNIVERSITA'", "stops": stops, "start_datetime": "2026-07-06T08:23:00+02:00"},
         {"transport": "bus", "transport_provider": "at - Firenze urbano", "desc": "a ACC. DEL CIMENTO ARTOM",
-         "end_datetime": "2026-07-06T06:34:28Z"},
+         "end_datetime": "2026-07-06T08:34:28+02:00"},
         {"transport": "foot", "transport_provider": None, "desc": "a piedi 50 m", "distance": 0.05},
     ]
 
@@ -183,7 +211,7 @@ def test_group_arc_legs_walk_ride_walk():
     assert ride["headsign"] == "CALENZANO UNIVERSITA'"
     assert [s["name"] for s in ride["stops"]] == ["PORTE NUOVE BELFIORE", "ACC. DEL CIMENTO ARTOM"]
     assert ride["from"] == "linea 57 da PORTE NUOVE BELFIORE"
-    assert ride["start_datetime"] == "2026-07-06T06:23:00Z" and ride["end_datetime"] == "2026-07-06T06:34:28Z"
+    assert ride["start_datetime"] == "2026-07-06T08:23:00+02:00" and ride["end_datetime"] == "2026-07-06T08:34:28+02:00"
     assert walk_out["distance_km"] == 0.05
 
 

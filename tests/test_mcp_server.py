@@ -11,6 +11,7 @@ from snap4city_mobility_mcp.mcp_server import (
     _bus_arcs,
     _fmt_hms,
     _journey_duration_ms,
+    _rome_local_iso,
     _normalize_feature,
     _servicemap_search,
     _wkt_length_km,
@@ -74,6 +75,9 @@ async def test_search_excludepoi_true_hits_location_endpoint(monkeypatch):
     out = await _servicemap_search("via zara", excludePOI=True, lang="it", maxresults=100)
     assert captured["url"].endswith("/api/v1/location/")
     assert captured["params"]["search"] == "via zara"
+    # No proximity bias params: probed 2026-07-09, selection/maxDists have zero effect on
+    # text-search ordering — GPS-nearest picking is client-side (orchestrator._pick_coord).
+    assert "selection" not in captured["params"] and "maxDists" not in captured["params"]
     assert out["type"] == "FeatureCollection" and out["count"] == 1
 
 
@@ -146,9 +150,23 @@ def test_bus_arcs_multimodal_walk_ride_walk():
     # Line + boarding stop on the way in; alighting stop + headsign on the way out.
     assert "linea 57" in board["desc"] and "PORTE NUOVE BELFIORE" in board["desc"]
     assert "ACC. DEL CIMENTO ARTOM" in arc[2]["desc"] and "CALENZANO UNIVERSITA'" in arc[2]["desc"]
-    # Scheduled stop times ride along as leg start/end datetimes (the GTFS timetable).
-    assert board["start_datetime"] == "2026-07-06T06:23:00Z"
-    assert arc[2]["end_datetime"] == "2026-07-06T06:34:28Z"
+    # Scheduled stop times ride along as leg start/end datetimes, converted from the
+    # router's UTC instants to Rome local (July = CEST, +02:00) so narrated orari are right.
+    assert board["start_datetime"] == "2026-07-06T08:23:00+02:00"
+    assert arc[2]["end_datetime"] == "2026-07-06T08:34:28+02:00"
+    assert [s["time"] for s in board["stops"]] == [
+        "2026-07-06T08:23:00+02:00", "2026-07-06T08:24:00+02:00", "2026-07-06T08:34:28+02:00"
+    ]
+
+
+def test_rome_local_iso():
+    # Summer (CEST) and winter (CET) conversions from the router's UTC instants.
+    assert _rome_local_iso("2026-07-06T06:23:00Z") == "2026-07-06T08:23:00+02:00"
+    assert _rome_local_iso("2026-01-06T06:23:00Z") == "2026-01-06T07:23:00+01:00"
+    # Unparseable / naive / non-string values pass through untouched (no guessed shift).
+    assert _rome_local_iso("not a time") == "not a time"
+    assert _rome_local_iso("2026-07-06T06:23:00") == "2026-07-06T06:23:00"
+    assert _rome_local_iso(None) is None
 
 
 def test_journey_duration_and_fmt():
