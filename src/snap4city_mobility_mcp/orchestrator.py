@@ -107,9 +107,11 @@ if listed, are a nice touch. For a public-transport route whose RESULTS carry `l
 narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <provider> \
 toward <headsign> from the first to the last stop, then walk on), using ONLY the leg \
 fields — the leg's `line`, `provider`, `headsign`, `stops` (name + time), `stops_total` \
-and start/end times. Give the scheduled boarding and arrival times as HH:MM (the ride \
-leg's start/end times, or its first/last stop times), with NO disclaimer about them — \
-never add notes about real-time information, traffic, or timetable accuracy. You may say \
+and start/end times. Give the scheduled boarding and arrival times (the ride leg's \
+start/end times, or its first/last stop times); write every time you mention as plain \
+HH:MM (never seconds or dates) and each distance once, in km. NO disclaimers — never \
+comment on real-time information, traffic, dates, data validity, or timetable accuracy. \
+You may say \
 how many stops the ride covers and name the boarding/alighting stops, but never invent a \
 line, stop, operator, or time not in the fields. A \
 route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
@@ -361,10 +363,16 @@ async def execute(
     if not (origin_text or user_gps) or not (dest_text or (dest_category and user_gps)):
         return {"tool_results": results, "unsupported": True}
 
-    async def _geocode(search: str) -> list[float] | None:
+    async def _geocode(search: str, anchor: dict[str, Any] | None = None) -> list[float] | None:
+        # `anchor` disambiguates same-name streets across towns (with no named city and
+        # no GPS, the server's first hit once put a Florence trip's "via Pisana" in
+        # Lucca): the pool candidate nearest to it wins. The destination anchors on the
+        # resolved origin (endpoints of one trip are usually neighbours), the origin on
+        # the user's GPS; a city the user named still dominates either (the feature pool
+        # was already narrowed upstream, mcp_tools._narrow_by_city).
         args = {"search": search}
         result = await exec_tool(lc, "address_search_location", args)
-        coord = _pick_coord(result, search, gps=user_gps)
+        coord = _pick_coord(result, search, gps=anchor)
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
         if logger.isEnabledFor(logging.DEBUG):
             # The slim view drops coordinates, so log the picked one here.
@@ -408,7 +416,7 @@ async def execute(
 
     # --- origin: user text, else the GPS position itself (labelled via reverse geocode).
     if origin_text:
-        origin = await _geocode(origin_text)
+        origin = await _geocode(origin_text, user_gps)
     else:
         origin = [user_gps["lng"], user_gps["lat"]]
         rev_args = {"latitude": user_gps["lat"], "longitude": user_gps["lng"]}
@@ -420,6 +428,8 @@ async def execute(
             results.append({"name": "coordinates_to_address", "args": json.dumps(rev_args), "result": rev})
 
     # --- destination: nearest-category service when asked, else plain text geocode.
+    # Its geocodes anchor on the resolved origin (see _geocode), falling back to GPS.
+    dest_anchor = {"lat": origin[1], "lng": origin[0]} if origin is not None else user_gps
     dest = None
     if dest_category:
         geocoded = None
@@ -428,7 +438,7 @@ async def execute(
         else:
             # No GPS: anchor on the geocoded destination text ("farmacia, Pisa" lands in
             # Pisa via the named-city ladder), then snap to the nearest real service.
-            geocoded = await _geocode(dest_text)
+            geocoded = await _geocode(dest_text, dest_anchor)
             anchor = geocoded
         if anchor is not None:
             dest = await _nearest_service(anchor, dest_category)
@@ -436,9 +446,9 @@ async def execute(
             # Category miss (bad category name / nothing within the widest rung):
             # degrade to the text geocode so the trip still resolves when possible.
             # Without GPS the text was already geocoded above (never re-call it).
-            dest = geocoded if not user_gps else (await _geocode(dest_text) if dest_text else None)
+            dest = geocoded if not user_gps else (await _geocode(dest_text, dest_anchor) if dest_text else None)
     else:
-        dest = await _geocode(dest_text)
+        dest = await _geocode(dest_text, dest_anchor)
 
     if origin is None or dest is None:
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains

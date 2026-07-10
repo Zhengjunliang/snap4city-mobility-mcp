@@ -4,7 +4,8 @@ The dashboard chat box (frontend/mobility_advisor_dashboard.html) can't reach th
 JupyterHub-only Llama4 + MCP server from the browser, so this thin HTTP layer wraps
 run_advisor: POST /advise {query, history, gps} -> the same widget JSON run_advisor
 returns (status/request_type/data/messages), passed through verbatim (no extra fields,
-project rule 8). The reply is messages[-1].content (OpenAI standard); multi-turn state
+project rule 8), streamed with whitespace heartbeats in front of the JSON so proxy
+read timeouts don't cut long turns (see advise()). The reply is messages[-1].content (OpenAI standard); multi-turn state
 is the returned messages, sent back as `history` on the next turn. `gps` is the
 browser geolocation {lat, lng} or null; it is sanitized here (never rejected) so a
 buggy widget degrades to the no-GPS flow instead of failing the turn.
@@ -19,6 +20,7 @@ Diagnostics: each /advise turn OVERWRITES both files so they hold only the lates
 (easy to inspect "why this query did X"): tool-level DEBUG -> debug.log, full output JSON
 -> outputs.txt (both in the cwd). Inspect them on the JupyterHub when a turn draws no route.
 """
+import asyncio
 import json
 import logging
 import math
@@ -26,6 +28,7 @@ import pathlib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from snap4city_mobility_mcp.orchestrator import run_advisor
@@ -37,6 +40,13 @@ logger = logging.getLogger("snap4city_mobility_mcp.api")
 
 OUTPUTS = pathlib.Path("outputs.txt")  # full-output audit log, written in the cwd
 _PKG_LOGGER = "snap4city_mobility_mcp"
+
+# /advise heartbeat cadence (seconds): must sit well below the ~60 s read timeout of
+# the proxy chain fronting jupyter-server-proxy (snap4city.org), which otherwise cuts
+# public-transport turns that exceed it (~70 s while the online whatif-router runs
+# unpatched — the browser then shows "bridge non raggiungibile" for a turn that in
+# fact completed). See advise() for how the heartbeat stays invisible to clients.
+HEARTBEAT_S = 10.0
 
 
 def _reset_debug_log() -> None:
@@ -115,21 +125,39 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/advise")
-async def advise(req: AdviseRequest) -> dict:
-    """One advisor turn. Returns run_advisor's widget JSON verbatim.
+async def advise(req: AdviseRequest) -> StreamingResponse:
+    """One advisor turn. Streams run_advisor's widget JSON verbatim.
 
-    Never raises to the client: an infra failure (MCP/LLM unreachable) comes back as the
-    JSend-style error shape run_advisor itself uses, so the front-end can render it."""
+    The body is single-space heartbeats (one every HEARTBEAT_S while the advisor
+    computes) followed by the JSON. Leading whitespace is legal JSON, so any client
+    that buffers the body and then parses it (the widget's $.ajax, curl, requests)
+    sees the exact same payload as before — while the proxies in front see bytes
+    flowing and stop cutting long turns at their read timeout (see HEARTBEAT_S).
+    Never errors to the client: an infra failure (MCP/LLM unreachable) comes back as
+    the JSend-style error shape run_advisor itself uses, so the front-end renders it."""
     _reset_debug_log()  # fresh debug.log for this turn (before run_advisor emits any DEBUG)
     gps = _sanitize_gps(req.gps)
     # First line of every turn's debug.log: what the widget sent vs what survived
     # sanitization — the one fact needed to split a "GPS didn't work" report into
     # front-end (raw null/garbage) vs back-end (sanitized away / ignored downstream).
     logger.debug("advise turn: gps raw=%r sanitized=%r", req.gps, gps)
-    try:
-        response = await run_advisor(req.query, req.history or [], gps=gps)
-    except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
-        logger.exception("advise failed")
-        response = {"status": "error", "error": f"{type(e).__name__}: {e}", "messages": req.history or []}
-    _log_turn(response)  # overwrite outputs.txt with this turn's full JSON
-    return response
+
+    async def _turn() -> dict:
+        try:
+            return await run_advisor(req.query, req.history or [], gps=gps)
+        except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
+            logger.exception("advise failed")
+            return {"status": "error", "error": f"{type(e).__name__}: {e}", "messages": req.history or []}
+
+    async def _body():
+        task = asyncio.create_task(_turn())
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_S)
+            if done:
+                break
+            yield b" "
+        response = task.result()  # _turn never raises (its except returns the error shape)
+        _log_turn(response)  # overwrite outputs.txt with this turn's full JSON
+        yield json.dumps(response, ensure_ascii=False).encode("utf-8")
+
+    return StreamingResponse(_body(), media_type="application/json")

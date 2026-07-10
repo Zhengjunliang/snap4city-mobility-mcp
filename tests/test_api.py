@@ -4,6 +4,7 @@ run_advisor is monkeypatched (no LLM/MCP): the tests assert what the bridge forw
 (query, history, sanitized gps) and that the widget JSON comes back untouched (rule 8).
 api.py lives at the repo root (not in the src package), so the root goes on sys.path.
 """
+import asyncio
 import pathlib
 import sys
 
@@ -74,3 +75,22 @@ def test_advise_returns_widget_json_verbatim(monkeypatch):
     client, _ = _client_with_captured_run(monkeypatch, response=payload)
     r = client.post("/advise", json={"query": "q", "history": []})
     assert r.json() == payload  # passthrough, no extra fields (rule 8)
+
+
+def test_advise_slow_turn_streams_heartbeats_then_json(monkeypatch):
+    """A turn slower than HEARTBEAT_S gets whitespace heartbeats in front of the JSON:
+    still valid JSON for any buffering client, but the proxy chain sees flowing bytes
+    (its ~60 s read timeout was cutting long public-transport turns)."""
+    payload = {"status": "success", "messages": []}
+
+    async def slow_run_advisor(query, history=None, gps=None):
+        await asyncio.sleep(0.05)
+        return payload
+
+    monkeypatch.setattr(api, "run_advisor", slow_run_advisor)
+    monkeypatch.setattr(api, "_reset_debug_log", lambda: None)
+    monkeypatch.setattr(api, "_log_turn", lambda r: None)
+    monkeypatch.setattr(api, "HEARTBEAT_S", 0.01)
+    r = TestClient(api.app).post("/advise", json={"query": "q", "history": []})
+    assert r.text.startswith(" ")  # at least one heartbeat was emitted
+    assert r.json() == payload     # leading whitespace is still valid JSON

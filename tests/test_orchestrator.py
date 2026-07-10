@@ -264,6 +264,27 @@ async def test_execute_category_destination_uses_near_tool(make_client, make_res
     assert out["endpoints"]["destination"] == {"lat": 43.7735, "lng": 11.2546}
 
 
+async def test_execute_dest_geocode_anchors_to_origin(make_client, make_result):
+    """Same-name streets in different towns, no named city, no GPS: the destination
+    candidate nearest the resolved ORIGIN wins, not the server's first hit (live-tested:
+    "via Pisana 166" from a Florence origin got routed to Lucca's VIA PISANA, 65 km)."""
+    dest_fc = _fc_with_addresses(
+        (10.4901, 43.8424, "VIA PISANA"),  # Lucca — the server's first hit
+        (11.2216, 43.7747, "VIA PISANA"),  # Florence — nearest to the origin
+    )
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # origin (city-named, 1 call)
+        make_result(structured=dest_fc),                             # dest address pass
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+        make_result(structured=_journey()),                          # routing
+    ])
+    slots = {"intent": "route", "origin_text": "via Mortuli 40, Firenze",
+             "destination_text": "via Pisana 166", "mode": "foot_shortest"}
+    out = await execute({"slots": slots}, client=client)
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["endlatitude"] == 43.7747 and route_args["endlongitude"] == 11.2216
+
+
 async def test_execute_far_gps_named_city_still_routes(make_client, make_result):
     """A user physically far from the data region (live-tested from Brescia, ~211 km) who
     names an in-region city ("..., Firenze") gets a normal route: distance from the user's
