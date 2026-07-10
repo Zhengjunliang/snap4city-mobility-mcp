@@ -51,14 +51,17 @@ HTTP_TIMEOUT_S = 40.0
 # by calling this endpoint with vehicle=bus, which returns a bus-road route as WKT. We wrap
 # it here (same local-server pattern as the geocode tool, L29) so forward bus routing is a
 # local MCP tool the client drives, never a raw HTTP call from the orchestrator.
-# S4C_WHATIF_ROUTER_URL overrides the base. The default points at the LOCALLY-run whatif-router
-# on the JupyterHub (loaded with Tuscany GTFS, see whatif-local/) because the online instance has
-# no GTFS yet and returns a walking degrade (L31/L34). REVERT this default to
-# "https://www.snap4city.org/whatif-router/route" once referente loads the GTFS + perf patch on the
-# online instance (or just set S4C_WHATIF_ROUTER_URL to it) — then the local Tomcat is unneeded.
+# S4C_WHATIF_ROUTER_URL overrides the base. The default is the ONLINE instance: referente
+# loaded the Tuscany GTFS on it (2026-07-10), so it returns real transit and the local Tomcat
+# harness (whatif-local/) is no longer needed — point the env var back at
+# "http://localhost:8080/whatif-router/route" only to test a locally-run router. The online
+# instance does NOT run the pt-router-singleton perf patch yet, so every PT request reloads
+# the graph (~30-40s measured); BUS_ROUTE_TIMEOUT_S covers that instead of the generic
+# HTTP_TIMEOUT_S. Tighten it back to the generic timeout once referente merges the patch.
 WHATIF_ROUTER_URL = os.environ.get(
-    "S4C_WHATIF_ROUTER_URL", "http://localhost:8080/whatif-router/route"
+    "S4C_WHATIF_ROUTER_URL", "https://www.snap4city.org/whatif-router/route"
 )
+BUS_ROUTE_TIMEOUT_S = 120.0
 
 mcp = FastMCP("snap4mobility-local")
 
@@ -357,7 +360,7 @@ async def bus_route(
         params["startDatetime"] = startdatetime
     try:
         async with httpx.AsyncClient(follow_redirects=True) as h:
-            resp = await h.get(WHATIF_ROUTER_URL, params=params, timeout=HTTP_TIMEOUT_S)
+            resp = await h.get(WHATIF_ROUTER_URL, params=params, timeout=BUS_ROUTE_TIMEOUT_S)
             resp.raise_for_status()
             body = resp.json()
     except Exception as e:  # noqa: BLE001 - surface any failure as a routing error

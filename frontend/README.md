@@ -85,4 +85,5 @@ Two environment requirements, both **outside this file's control**:
   `docs/lessons.md` L19/L34). A walking-only itinerary (short trip — walking beats any bus,
   L39) comes back relabeled as a foot route, so the map draws a fast green walking line.
   For a real bus route the map still re-routes `type:"bus"` itself against the online
-  whatif-router (slow until the referente deploys the perf patch + GTFS, L39).
+  whatif-router. The GTFS is deployed online (2026-07-10) so the line draws, but each
+  request takes ~30-40 s until the referente merges the perf patch (L39).
