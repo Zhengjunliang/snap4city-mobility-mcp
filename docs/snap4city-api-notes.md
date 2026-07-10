@@ -37,11 +37,11 @@ Backend base URL: `https://www.snap4city.org/superservicemap/api/v1/` (what the 
 
 ### Binding gotchas
 
-- **Not region-locked**: the index now holds Valencia (ES) / southern France / Maastricht (NL) entries, so `"...Firenze"` can return 100 out-of-region hits and zero Tuscan. There is no geo-constraint parameter, so the advisor pins results to a Tuscany bbox client-side ([mcp_tools._filter_geocode_to_tuscany](../src/snap4city_mobility_mcp/mcp_tools.py)).
+- **Not region-locked**: the index now holds Valencia (ES) / southern France / Maastricht (NL) entries, so `"...Firenze"` can return 100 out-of-region hits and zero Tuscan. There is no geo-constraint parameter; the client picks the GPS-nearest candidate ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)) and a 150 km coverage sentinel (`GEOCODE_FAR_LIMIT_KM`, L41) rejects far-away noise when the user's GPS is known. Usable data is effectively Tuscany-only (live-tested: no Brescia/Milan streets anywhere, L41).
 - **POIs outrank the real place**: with `excludePOI=false`, `"Piazza del Duomo"` returns the `PRIZIO STEFANO` company before the actual square. The advisor geocodes in two passes (`excludePOI=true` first, POI fallback only when the address pass has no in-region hit, [mcp_tools._geocode_address_first](../src/snap4city_mobility_mcp/mcp_tools.py)), then picks the first feature whose label tokens are a subset of the search tokens ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)).
-- **Same-name towns**: `"Piazza Duomo"` also matches squares in Castelnuovo / Pietrasanta (90 km away). A city-name ladder (named city, then Florence default, then all Tuscany) narrows it ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)).
+- **Same-name towns**: `"Piazza Duomo"` also matches squares in Castelnuovo / Pietrasanta (90 km away). A city the user names wins ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)); otherwise the GPS-nearest candidate does.
 - **Pure-noise input gives HTTP 500**, not an empty FeatureCollection. Callers must tolerate 5xx, and an empty / `[]` result is not a clean "no match" signal.
-- **Backend is non-deterministic over time**: the same string can return all-foreign one minute and the correct Tuscan hit the next. A bounded retry fires only when the bbox filter leaves zero Tuscan hits.
+- **Backend is non-deterministic over time**: the same string can return all-foreign one minute and the correct Tuscan hit the next. (The old bbox-keyed retry went away with the bbox filter; the GPS far-sentinel is the remaining guard, L41.)
 
 ---
 
@@ -107,25 +107,24 @@ Source: `GET http://192.168.1.117:8000/apps.json` → `Client(cfg)` → `list_to
 
 Names appear **without server prefix** under a single-server config (as we use). FastMCP only prefixes when merging multiple servers. So `address_search_location`, not `snap4agentic_advisor_native_address_search_location` (see the `project-referente-endpoint` memory).
 
-### Tools the advisor drives (7)
+### Tools the advisor drives
+
+Remote (referente server); forward geocoding and `bus_route` instead go to the LOCAL MCP server (mcp_server.py, L28/L29/L19):
 
 | Tool | Required input | Notable optional | Purpose |
 |---|---|---|---|
-| `address_search_location` | `search` (str) | `excludePOI` (default true), `maxresults`, `logic`, `lang` | Address / POI → GeoJSON FeatureCollection (§1) |
 | `routing` | `startlatitude` + `startlongitude` + `endlatitude` + `endlongitude` (float) | `routetype` (default `car`; no bicycle), `startdatetime` | Best route between two GPS points (§2) |
-| `tpl_agencies` | — | — | List of public-transport agencies `{name, uri}` |
-| `tpl_lines` | `agency` (URI) | — | Lines of an agency |
-| `tpl_routes_by_line` | `line` (URI or shortName) | `agency` | Routes of a line; item keys `route` / `wktGeometry` |
-| `tpl_stops_by_route` | `route` (URI) | — | Stops of a route; GeoJSON nested under `BusStops` |
-| `tpl_stop_timeline` | `stop` (service URI) | — | Lines serving a stop (+ timetable/realtime, empty live) |
+| `coordinates_to_address` | `latitude` + `longitude` | — | Reverse geocode; labels a GPS-defaulted origin for the reply |
+| `service_search_near_gps_position` | `latitude` + `longitude` | `categories`, `maxdistance` (km), `maxresults` | Nearest-category POIs: car parks + "farmacia più vicina" destinations |
+| `service_info_dev` | `serviceUri` | `fromTime` | Latest realtime free-spaces for a car park |
 
-Both routing/geocoding accept an optional `authentication` (Bearer); the probe surfaced no token requirement, so the advisor omits it (public km4city backend). The `tpl_*` chain is driven deterministically by [tpl.run_tpl_flow](../src/snap4city_mobility_mcp/tpl.py).
+Both routing/geocoding accept an optional `authentication` (Bearer); the probe surfaced no token requirement, so the advisor omits it (public km4city backend).
 
 ### Other native tools (not used by the orchestrator)
 
-- **Geocoding / geometry**: `coordinates_to_address`, `get_municipality_boundary`, `distance_from_coordinates`, `wkt_to_geojson`, `geojson_to_wkt`, `point_within_polygon`
-- **Service / IoT search**: `service_search_near_gps_position`, `service_search_near_service`, `service_search_within_gps_area`, `service_search_within_polygon`, `service_search_along_path`, `service_info`, `service_info_dev`, `get_service_categories`
-- **Transport areas**: `transport_routes_search_near_gps_position` / `_within_gps_area` / `_within_wkt_area`, `tpl_routes_by_stop`
+- **Geocoding / geometry**: `address_search_location` (server-side broken, L28 — the advisor uses its local equivalent), `get_municipality_boundary`, `distance_from_coordinates`, `wkt_to_geojson`, `geojson_to_wkt`, `point_within_polygon`
+- **Service / IoT search**: `service_search_near_service`, `service_search_within_gps_area`, `service_search_within_polygon`, `service_search_along_path`, `service_info`, `get_service_categories`
+- **Transport discovery** (tpl feature removed from the advisor 2026-07): `tpl_agencies`, `tpl_lines`, `tpl_routes_by_line`, `tpl_stops_by_route`, `tpl_stop_timeline`, `tpl_routes_by_stop`, `transport_routes_search_near_gps_position` / `_within_gps_area` / `_within_wkt_area`
 
 ### `routing` failure shapes observed
 
@@ -133,16 +132,7 @@ Both routing/geocoding accept an optional `authentication` (Bearer); the probe s
 - **Shape B (km4city envelope, negative code)**: `journey.routes` possibly empty + `response.error_code = "-N"` (`-1` wrapper internal, `-2` route not found).
 - **Shape C (empty routes, success envelope)**: `error_code = "0"` but `journey.routes = []` (the graph search found no path, e.g. car in a pedestrian zone). Surfaced as `"no route found (empty routes list)"`.
 
-### TPL chain: live shapes (2026-06-12)
-
-A raw walk of the full chain on the JupyterHub found:
-
-- **No single "Autolinee Toscane" / `AtF` / `ATAF` agency.** The example URI in the `tpl_lines` tool description (`.../resource/AtF`) **does not exist** in the live `tpl_agencies` list (54 agencies). The brand is split into ~40 sub-networks; Florence city = `Autolinee Toscane - Urbano Area Metropolitana Fiorentina` → `…_Agency_888-48` (with it, `line="6"` → 22 routes; ExtraUrbano Arezzo → `[]`).
-- `tpl_routes_by_line.line` accepts a bare shortName (`"6"`). Item keys: `firstBusStop, lastBusStop, line, route, routeName, wktGeometry`; route URI is **`route`**, geometry is **`wktGeometry`** (not `wkt`).
-- `tpl_stops_by_route` returns `[service-URI array, {"BusStops": {"features": [...]}}]`: GeoJSON nested under `BusStops` (no top-level `type`); each feature carries stop `name` / `serviceUri` / coordinates under `properties`.
-- `tpl_stop_timeline` returns `{"BusStop": {features:[...]}, "busLines": {results:{bindings:[...]}}, "realtime": {}, "timetable": {}}`: it gives the stop + serving lines, but `realtime` / `timetable` came back **empty** (no datetime param; scheduled times appear unavailable server-side). `respond` reports the serving lines and says times are unavailable, never inventing them.
-
 ### Open questions (carry forward to referente)
 
-- Why are `tpl_stop_timeline.timetable` / `.realtime` empty? Is there a date/time parameter or a different tool for actual departure times, or is the GTFS schedule simply not loaded?
 - Will referente fix the car / public_transport empty-body bug? `routing` returns `{"error": ""}` for car (even a drivable non-ZTL destination) and public_transport (even with `startdatetime`), while foot_* work. This is server-side.
+- SuperServiceMap (his backend, `www.snap4city.org/superservicemap/api/v1`): ranking is broken ("via zara firenze" ranks a Maastricht bus stop first, the L28 failure mode), federated `/shortestpath` 500s, and Brescia city has no data despite the GardaLake federation (Sirmione only). Which regions are actually supported, and will the ranking be fixed? (Client can switch via `S4C_SERVICEMAP_BASE` once it is.)

@@ -264,6 +264,25 @@ async def test_execute_category_destination_uses_near_tool(make_client, make_res
     assert out["endpoints"]["destination"] == {"lat": 43.7735, "lng": 11.2546}
 
 
+async def test_execute_gps_far_candidate_becomes_geocode_error(make_client, make_result):
+    """Coverage sentinel: with GPS, a nearest geocode candidate still >150 km away is
+    text noise from outside the data coverage (live-tested: a Brescia street returned
+    Tuscan fuzzy hits) → the audit entry becomes an explicit error, no routing runs."""
+    client = make_client([
+        make_result(structured=_feature_collection(10.18, 45.52)),  # origin near the user
+        make_result(structured=_feature_collection(11.26, 43.76)),  # dest addr pass: only far hits
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+    ])
+    slots = {"intent": "route", "origin_text": "stazione, Firenze", "destination_text": "via Forcello 16a", "mode": ""}
+    # user in Brescia; the only "via Forcello" candidates are in Tuscany (~180 km away)
+    out = await execute({"slots": slots, "user_gps": {"lat": 45.5308, "lng": 10.1828}}, client=client)
+    assert out["unsupported"] is False
+    dest_entry = out["tool_results"][-1]
+    assert dest_entry["name"] == "address_search_location"
+    assert "km" in dest_entry["result"]["error"]
+    assert not any(n == "routing" for n, _ in client.calls)
+
+
 async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, make_result):
     """All near-search rungs empty (bad category / nothing within 10 km) → only the last
     empty attempt is audited and the destination degrades to the plain text geocode."""

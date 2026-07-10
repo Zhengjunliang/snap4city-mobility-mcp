@@ -34,7 +34,15 @@ logger = logging.getLogger(__name__)
 # No selection/maxDists bias is sent: probed 2026-07-09, the parameter has zero effect on
 # text-search ordering (byte-identical output with/without), so proximity ranking is done
 # client-side (orchestrator._pick_coord haversine against the user's GPS).
-SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1"
+# DELIBERATELY the single-region Tuscany index, not the federated SuperServiceMap
+# (https://www.snap4city.org/superservicemap/api/v1) that referente's stack uses: the SSM
+# does carry more regions (Antwerp/Helsinki/València/GardaLake), but its ranking is broken
+# — probed 2026-07-09, "via zara firenze" ranks a Maastricht bus stop first (the L28
+# failure mode this local tool exists to escape). Override via S4C_SERVICEMAP_BASE once
+# referente fixes the SSM ranking and multi-region routing.
+SERVICEMAP_BASE = os.environ.get(
+    "S4C_SERVICEMAP_BASE", "https://servicemap.disit.org/WebAppGrafo/api/v1"
+)
 HTTP_TIMEOUT_S = 40.0
 
 # Snap4City What-If GraphHopper router. The referente remote `routing` tool's

@@ -460,7 +460,7 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
 def slim_result_for_llm(name: str, result: Any) -> Any:
     """Compact a tool result for the LLM context. Full fidelity stays in the audit;
     this only shrinks what the model re-reads each turn. Errors and unknown shapes
-    (TPL lists, etc.) pass through unchanged.
+    pass through unchanged.
 
     Raw coordinates are withheld on purpose: the respond LLM once used geocode
     coordinates to fabricate a distance/ETA estimate when routing had failed, and with
