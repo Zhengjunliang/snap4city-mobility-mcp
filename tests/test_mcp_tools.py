@@ -56,6 +56,18 @@ async def test_routing_empty_routes_shape_c(make_client, make_result):
     assert out["error"] == "no route found (empty routes list)"
 
 
+async def test_routing_zero_distance_shape_d(make_client, make_result):
+    # Shape D (live 2026-07-10): car returned a real WKT but distance=0 / time=00:00:00
+    # / eta=call time. Presenting it would tell the user "0 km, arriving now" — fail it.
+    env = {
+        "journey": {"routes": [{"distance": 0, "eta": "08:12:21", "time": "00:00:00",
+                                "wkt": "LINESTRING(1 2,3 4)"}]},
+        "response": {"error_code": "0", "error_message": "successful"},
+    }
+    out = await routing_with_retry(make_client([make_result(structured=env)]), _ROUTE_ARGS)
+    assert out["error"] == "routing failed: zero-distance route (server-side data bug)"
+
+
 async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch):
     # L3/L8: bare {"error": ""} — stale ladder runs 3 attempts, then surfaces empty-body error.
     async def _noop(*a, **k):

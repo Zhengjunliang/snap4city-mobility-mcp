@@ -850,8 +850,9 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
     err = result.get("error")
     if not isinstance(err, str):
         return None
-    if "empty response from routing service" in err:
-        # Service-side failure for this mode, not a ZTL/pedestrian restriction.
+    if "empty response from routing service" in err or "zero-distance route" in err:
+        # Service-side failure for this mode (empty body, or a bogus 0-km route with
+        # real geometry — shape D), not a ZTL/pedestrian restriction.
         return "service_empty_try_foot_or_later"
     if "empty routes list" in err and routetype in ("car", "public_transport"):
         # A car/PT route with no result is often a restricted-traffic (ZTL) or

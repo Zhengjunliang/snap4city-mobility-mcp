@@ -589,6 +589,13 @@ def test_extract_data_relabels_foot_only_pt_as_walk_when_only_result():
     assert "route_error" not in data
 
 
+def test_routing_hint_zero_distance_is_service_side():
+    """A shape-D zero-distance car route is a server data bug, not a ZTL: the hint must
+    steer respond to 'service problem, try foot/later', never to the ZTL phrasing."""
+    err = {"error": "routing failed: zero-distance route (server-side data bug)"}
+    assert _routing_hint("car", err) == "service_empty_try_foot_or_later"
+
+
 def test_routing_hint_flags_foot_only_pt():
     foot_only = {"journey": {"routes": [{"arc": [{"transport": "foot"}]}]}}
     real_pt = {"journey": {"routes": [{"arc": [{"transport": "foot"}, {"transport": "bus"}]}]}}

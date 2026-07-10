@@ -131,8 +131,10 @@ Both routing/geocoding accept an optional `authentication` (Bearer); the probe s
 - **Shape A (top-level empty wrap)**: `{"error": ""}`, no `journey`. Causes: a short-window cold-start stale (transient, clears ≥ 5 s later), or a stable server-side wrapper bug (car-in-ZTL, and in fact all car / public_transport requests; retries don't clear).
 - **Shape B (km4city envelope, negative code)**: `journey.routes` possibly empty + `response.error_code = "-N"` (`-1` wrapper internal, `-2` route not found).
 - **Shape C (empty routes, success envelope)**: `error_code = "0"` but `journey.routes = []` (the graph search found no path, e.g. car in a pedestrian zone). Surfaced as `"no route found (empty routes list)"`.
+- **Shape D (zero-distance route with real geometry)**: success envelope, `routes[0]` carries a plausible multi-point WKT but `distance = 0`, `time = "00:00:00"`, `eta` = the call time (live 2026-07-10, `routetype=car`, short intra-Florence OD). Surfaced as `"routing failed: zero-distance route (server-side data bug)"` with the `service_empty_try_foot_or_later` hint.
 
 ### Open questions (carry forward to referente)
 
+- `routing` (car) can return a **zero-distance route**: real WKT polyline but `distance=0`, `time=00:00:00`, `eta` = call time (shape D above, 2026-07-10). Same family as the empty-body bug? Client fails the mode rather than telling the user "0 km".
 - Will referente fix the car / public_transport empty-body bug? `routing` returns `{"error": ""}` for car (even a drivable non-ZTL destination) and public_transport (even with `startdatetime`), while foot_* work. This is server-side.
 - SuperServiceMap (his backend, `www.snap4city.org/superservicemap/api/v1`): ranking is broken ("via zara firenze" ranks a Maastricht bus stop first, the L28 failure mode), federated `/shortestpath` 500s, and Brescia city has no data despite the GardaLake federation (Sirmione only). Which regions are actually supported, and will the ranking be fixed? (Client can switch via `S4C_SERVICEMAP_BASE` once it is.)

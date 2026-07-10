@@ -192,6 +192,13 @@ async def routing_with_retry(
     # for car-in-pedestrian-zone, src == dst, etc., with no 4xx.
     if not journey.get("routes"):
         return {"error": "no route found (empty routes list)"}
+    # Failure shape D: a route with geometry but zero/missing distance and time (live
+    # 2026-07-10: car returned distance=0, time=00:00:00, eta=call time, plus a real
+    # 31-point WKT). A genuine src==dst comes back as empty routes (shape C), so a
+    # zero-distance route WITH geometry is bogus server data — presenting it would tell
+    # the user "0 km / arriving now". Fail the mode instead; respond suggests another.
+    if not (journey["routes"][0] or {}).get("distance"):
+        return {"error": "routing failed: zero-distance route (server-side data bug)"}
     return {"journey": journey}
 
 
