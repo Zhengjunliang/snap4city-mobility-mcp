@@ -327,14 +327,6 @@ _FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
 NEAREST_SERVICE_RADII_KM = (0.5, 2.0, 10.0)
 NEAREST_SERVICE_MAX = 10
 
-# Data-coverage sentinel: km4city's index is Tuscany-centric, so a place that isn't in
-# the data (a Brescia street, live-tested 2026-07-09) still returns 100 fuzzy Tuscan
-# hits, and GPS-nearest picking would route the user to text noise 200 km away. With a
-# GPS position, a nearest candidate still farther than this is treated as "no match
-# near you" (an honest geocode error respond explains) instead of a bogus destination.
-# 150 km comfortably covers any real in-region trip (Florence→Grosseto ≈ 130 km).
-GEOCODE_FAR_LIMIT_KM = 150.0
-
 
 async def execute(
     state: AdvisorState, *, client: Client, local_client: Client | None = None
@@ -373,18 +365,6 @@ async def execute(
         args = {"search": search}
         result = await exec_tool(lc, "address_search_location", args)
         coord = _pick_coord(result, search, gps=user_gps)
-        if coord is not None and user_gps:
-            far_km = _haversine_km(user_gps["lat"], user_gps["lng"], coord[1], coord[0])
-            if far_km > GEOCODE_FAR_LIMIT_KM:
-                # Coverage sentinel (see GEOCODE_FAR_LIMIT_KM): the audit entry becomes an
-                # explicit error so respond says "not found near you" — instead of the LLM
-                # reading 100 fuzzy far-away features and improvising suggestions from them.
-                result = {
-                    "error": f"no match for {search!r} within {int(GEOCODE_FAR_LIMIT_KM)} km "
-                    f"of the user's position (nearest candidate ~{int(far_km)} km away, "
-                    "likely outside the service data coverage)"
-                }
-                coord = None
         results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
         if logger.isEnabledFor(logging.DEBUG):
             # The slim view drops coordinates, so log the picked one here.
