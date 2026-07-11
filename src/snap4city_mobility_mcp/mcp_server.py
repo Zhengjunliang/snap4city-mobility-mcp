@@ -52,11 +52,11 @@ HTTP_TIMEOUT_S = 40.0
 # it here (same local-server pattern as the geocode tool, L29) so forward bus routing is a
 # local MCP tool the client drives, never a raw HTTP call from the orchestrator.
 # S4C_WHATIF_ROUTER_URL overrides the base. The default is the ONLINE instance: referente
-# loaded the Tuscany GTFS on it (2026-07-10), so it returns real transit and the local Tomcat
-# harness (whatif-local/) is no longer needed — point the env var back at
-# "http://localhost:8080/whatif-router/route" only to test a locally-run router. The online
-# instance does NOT run the pt-router-singleton perf patch yet, so every PT request reloads
-# the graph (~30-40s measured); BUS_ROUTE_TIMEOUT_S covers that instead of the generic
+# loaded the Tuscany GTFS on it (2026-07-10), so it returns real transit and self-hosting a
+# router is no longer needed — set the env var to "http://localhost:8080/whatif-router/route"
+# only to test a locally-built router (e.g. the perf patch in whatif-local/patches/). The
+# online instance does NOT run the pt-router-singleton perf patch yet, so every PT request
+# reloads the graph (~30-40s measured); BUS_ROUTE_TIMEOUT_S covers that instead of the generic
 # HTTP_TIMEOUT_S. Tighten it back to the generic timeout once referente merges the patch.
 WHATIF_ROUTER_URL = os.environ.get(
     "S4C_WHATIF_ROUTER_URL", "https://www.snap4city.org/whatif-router/route"

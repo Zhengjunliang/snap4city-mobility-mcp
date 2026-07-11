@@ -191,7 +191,7 @@ snap4city-mobility-mcp/
 ├── README.md                   # this file
 ├── api.py                      # FastAPI bridge for the dashboard chat box (POST /advise; writes full JSON to outputs.txt)
 ├── frontend/                   # Snap4City dashboard front-end (widgetExternalContent chat box + widgetMap)
-├── whatif-local/               # local whatif-router harness (optional, real PT lines) + the referente perf patch (see its README)
+├── whatif-local/               # referente whatif-router perf patch (patches/) + apply/test notes (see its README)
 ├── docs/
 │   ├── lessons.md              # architectural traps (km4city / runtime)
 │   └── snap4city-api-notes.md  # field-by-field observations of the real API
@@ -277,12 +277,10 @@ TBD — academic project.
 
 Run from a **JupyterHub terminal** inside the `s4c` conda env (Python 3.11). Two processes are needed — the local geocode MCP server (`:8020`) and the advisor bridge (`:8010`). Public transport goes to the **online** whatif-router (GTFS deployed 2026-07-10); a local whatif-router (`:8080`) is only a dev harness, see §"Optional".
 
-Start each process in its **own terminal** (in the `s4c` conda env), the local MCP server first. **Always stop a process with `Ctrl-C`, never by just closing the tab** — a closed tab leaves Tomcat running as a zombie holding `:8080`, and the next boot then fails with `Address already in use` / `read lock ... failed`. If zombies pile up, sweep them and confirm the ports are free before restarting:
+Start each process in its **own terminal** (in the `s4c` conda env), the local MCP server first. **Always stop a process with `Ctrl-C`, never by just closing the tab** — a closed tab can leave the process holding its port so the next boot fails with `Address already in use`. If a port is stuck, confirm it is free before restarting:
 
 ```bash
-whatif-local/apache-tomcat-9.0.119/bin/catalina.sh stop 20 -force 2>/dev/null
-pkill -9 -f 'apache-tomcat-9.0.119'
-ss -ltn | grep -E ':8080|:8020|:8010' || echo "all ports free"
+ss -ltn | grep -E ':8020|:8010' || echo "all ports free"
 ```
 
 **Terminal 1 — local geocode MCP server** (forward geocode, wraps public km4city ServiceMap, `docs/lessons.md` L29). Must be up before the bridge:
@@ -311,17 +309,11 @@ curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
 
 Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).
 
-### Optional — local whatif-router (development harness)
+### Optional — point `bus_route` at a local whatif-router
 
-`bus_route` calls the Snap4City What-If GraphHopper router; the default (`mcp_server.py`'s `WHATIF_ROUTER_URL`) is the **online** instance `https://www.snap4city.org/whatif-router/route`, which carries the Tuscany GTFS since 2026-07-10 and returns real transit. No extra process is needed. Note the online instance does not yet run the `pt-router-singleton` perf patch, so each PT request takes ~30-40 s (`BUS_ROUTE_TIMEOUT_S` covers it).
+`bus_route` calls the Snap4City What-If GraphHopper router; the default (`mcp_server.py`'s `WHATIF_ROUTER_URL`) is the **online** instance `https://www.snap4city.org/whatif-router/route`, which carries the Tuscany GTFS since 2026-07-10 and returns real transit. **No extra process is needed.** Note the online instance does not yet run the `pt-router-singleton` perf patch, so each PT request takes ~30-40 s (`BUS_ROUTE_TIMEOUT_S` covers it; tighten it back once the patch is merged).
 
-To test against a locally-run router instead (e.g. patched builds, other GTFS sets), self-host one **on the same JupyterHub** — full recipe + the referente perf patch: [`whatif-local/README.md`](whatif-local/README.md). Start it FIRST (the graph build takes minutes), after uploading the prebuilt war to `whatif-local/whatif-router.war`:
-
-```bash
-bash whatif-local/run-on-jupyterhub.sh   # installs Java8 + Tomcat9, fetches OSM+GTFS, deploys war, starts Tomcat as a detached daemon
-```
-
-First boot builds the graph-cache (minutes); the script waits for `PtWarmupListener: PT router ready.`. Tomcat runs detached (setsid): closing the terminal does not stop it — manage it with the `status` / `logs` / `stop` subcommands (`stop` shuts down gracefully and preserves the graph-cache; a hard kill corrupts it). In the `mcp_server` terminal, point `bus_route` at it **before** starting the server:
+Only to validate that perf patch (or a different GTFS set) do you need a self-built router — apply the patch and point `bus_route` at your build with an env override, see [`whatif-local/README.md`](whatif-local/README.md) and `whatif-local/patches/`:
 
 ```bash
 export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route

@@ -5,6 +5,6 @@ data/
 # Test outputs.
 test-output.json
 test-output-foot.json
-# JupyterHub native run (run-on-jupyterhub.sh): uploaded war + downloaded Tomcat.
+# Built war + downloaded Tomcat (only present when self-building a router to test the patch).
 whatif-router.war
 apache-tomcat-*/
