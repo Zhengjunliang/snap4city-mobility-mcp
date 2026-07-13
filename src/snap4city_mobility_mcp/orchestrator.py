@@ -1,28 +1,18 @@
 """Langgraph mobility advisor: the orchestration graph.
 
-A natural-language query runs through:
-
-    understand -> execute -+-> respond_fast -> execute_pt -> respond -> END   (two-phase)
-                           +-> execute_pt ------------------> respond -> END   (bus only)
-                           +----------------------------------> respond -> END   (no bus)
+A natural-language query runs through a linear graph: understand -> execute ->
+respond -> END.
 
 - understand (LLM, forced tool call): extracts the request slots (intent, origin,
   destination, category, mode, departure time) from the latest user turn, place text only.
   Follow-ups like "那坐公交呢?" resolve against the conversation history.
 - execute (plain Python, no LLM): for a route intent, resolves both endpoints then routes the
-  FAST modes (walking, driving — sub-second). A missing origin defaults to the user's GPS
-  position (browser geolocation, threaded through run_advisor); a generic-category
-  destination ("farmacia più vicina") resolves via the nearest-service search; text
-  places geocode with GPS-nearest candidate picking. "other" falls through to an
-  "unsupported" reply. A requested bus route is fired off in the BACKGROUND here.
-- respond_fast (LLM, no tools): phrases the walking/driving half and publishes it through
-  run_advisor's on_partial, so the chat box shows an answer (and draws those lines) in ~3s
-  instead of staring at a blank bubble for the ~30-45s the bus route costs (the router
-  rebuilds its public-transport graph on every request until referente's perf patch lands).
-- execute_pt (plain Python): collects that background bus route — this is where the turn waits.
-- respond (LLM, no tools): phrases the answer and assembles the widget JSON (full route WKT +
-  updated messages). After a preview it writes only the bus part and glues it onto the text the
-  user is already reading, so the turn still ends with ONE assistant message.
+  requested modes concurrently. A missing origin defaults to the user's GPS position (browser
+  geolocation, threaded through run_advisor); a generic-category destination ("farmacia più
+  vicina") resolves via the nearest-service search; text places geocode with GPS-nearest
+  candidate picking. "other" falls through to an "unsupported" reply.
+- respond (LLM, no tools): phrases a multilingual answer from the results and
+  assembles the widget JSON (with the full route WKT and the updated messages).
 
 The model never picks tools itself: in agentic mode Llama4 tends to emit tool calls
 as pythonic text instead of structured tool_calls, which then leaks into the answer.
@@ -148,16 +138,6 @@ ONLY the RESULTS fields.
 - When RESULTS carries a `departure_time`, the trip was planned for that departure: say so \
 plainly (e.g. "partendo alle 18:00"), using that field as written. With no such field, \
 never mention a departure time.
-- If RESULTS carries `pending: public_transport`, the bus route is STILL BEING COMPUTED (it is \
-slow). Answer in full about the modes RESULTS does have, then close with ONE short line saying \
-you are also checking public transport (e.g. "Sto controllando anche i mezzi pubblici..."). \
-NEVER say there is no public transport, and never guess what it will be — that answer is coming \
-in a moment.
-- If RESULTS carries `continuing: true`, your text CONTINUES a reply the user has ALREADY READ \
-(it gave the walking/driving options and said the bus was being checked). Write ONLY the \
-public-transport part now: the bus route (or, per its `hint`, that there is no direct one), plus \
-at most one short line comparing it with the other modes. No greeting, and never repeat the \
-other modes' distances or times — the user is looking at them.
 - If a RESULTS item could not be computed (an `error`, or a route/place not found), \
 say so plainly WITHOUT any numbers and suggest a sensible alternative (another mode, a \
 more precise address); when geocoded addresses are present, mention how you read the \
@@ -247,9 +227,6 @@ class AdvisorState(TypedDict, total=False):
     endpoints: dict[str, Any]  # precise resolved {origin, destination} {lat,lng} for the route
     parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
     departure: str  # requested departure "HH:MM" ('' = leave now), for the reply to state
-    pt_pending: bool  # a bus route is in flight (execute_pt collects it)
-    two_phase: bool  # fast routes are in hand AND a bus route is in flight -> answer in two goes
-    partial_answer: str  # the half of the reply already sent to the user (respond_fast)
     response: dict[str, Any]  # widget JSON assembled by respond
 
 
@@ -263,10 +240,6 @@ def _request_to_intent(slots: dict[str, Any]) -> str:
 # The graph is strictly linear, so the stages arrive in order.
 StageFn = Callable[[str], None]
 
-# The half-finished answer (a complete widget JSON: the fast routes + the text phrased for them)
-# handed out as soon as it exists, while the bus route is still being computed.
-PartialFn = Callable[[dict[str, Any]], None]
-
 
 def _emit(on_stage: StageFn | None, stage: str) -> None:
     """Report the current stage, if anyone is listening. Never raises: a progress hiccup must
@@ -277,17 +250,6 @@ def _emit(on_stage: StageFn | None, stage: str) -> None:
         on_stage(stage)
     except Exception:  # noqa: BLE001 - progress is cosmetic; the turn is not
         logger.debug("on_stage(%r) raised, ignoring", stage, exc_info=True)
-
-
-def _emit_partial(on_partial: PartialFn | None, response: dict[str, Any]) -> None:
-    """Publish the first half of a two-phase answer, if anyone is listening. Never raises: the
-    full answer is still coming, and losing the preview must not lose the turn."""
-    if on_partial is None:
-        return
-    try:
-        on_partial(response)
-    except Exception:  # noqa: BLE001 - the preview is a courtesy; the turn is not
-        logger.debug("on_partial raised, ignoring", exc_info=True)
 
 
 async def understand(
@@ -445,26 +407,15 @@ async def execute(
     client: Client,
     local_client: Client | None = None,
     on_stage: StageFn | None = None,
-    pending: dict[str, asyncio.Task] | None = None,
 ) -> dict[str, Any]:
-    """Run the FAST half of the tool flow for the extracted intent (no LLM).
+    """Run the tool flow for the extracted intent (no LLM).
 
-    route: resolve both endpoints, then route every mode the user can be answered about
-    immediately — walking and driving, which the What-If router returns in well under a second.
-    The origin defaults to the user's GPS position when no text was given (reverse-geocoded once
-    so respond can name it); a generic-category destination resolves to the nearest service (see
-    _nearest_service). Every call is recorded in tool_results so respond can mine the widget
-    data. "other" intent or an unresolvable endpoint sets unsupported (respond asks for what's
-    missing).
-
-    A public-transport leg is NOT awaited here. It is fired off as a background task (parked in
-    `pending`) and collected later by execute_pt, so the graph can answer with the fast modes
-    first and finish the reply once the bus route lands — that route costs ~30-45s while the
-    router rebuilds its PT graph per request, and making the user stare at a blank chat box for
-    that long is the whole problem this split solves. The task is created LAST, after the fast
-    routing and the parking enrichment, so the tool-call order stays deterministic (the bus call
-    always follows them); starting it a few hundred ms earlier would buy nothing anyway, since
-    the bus leg dominates the turn either way.
+    route: resolve both endpoints, then route the requested modes concurrently (every mode goes
+    to the local What-If `route` tool). The origin defaults to the user's GPS position when no
+    text was given (reverse-geocoded once so respond can name it); a generic-category
+    destination resolves to the nearest service (see _nearest_service). Every call is
+    recorded in tool_results so respond can mine the widget data. "other" intent or
+    an unresolvable endpoint sets unsupported (respond asks for what's missing).
     """
     slots = state.get("slots") or {}
     user_gps = state.get("user_gps") or None
@@ -572,17 +523,15 @@ async def execute(
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
 
     mode_specified = bool(slots.get("mode"))
-    # No mode given: answer about ALL THREE modes, so a plain "from A to B" gets a walking, a
-    # driving AND a public-transport option (one line each on the map) and the reply compares
-    # them. An explicit mode runs that one only — asking for "a piedi" must not pay the bus
-    # latency. The public-transport leg is split out of `modes`: it is the only slow one (the
-    # router rebuilds its PT graph on every vehicle=bus request, ~30-45s, vs sub-second for
-    # foot/car, probed 2026-07-13), so it runs in the background and the graph answers the fast
-    # modes first (see the docstring; the cost disappears entirely once referente merges the
-    # pt-router-singleton patch, with no change here).
-    asked = [slots["mode"]] if mode_specified else ["foot", "car", "public_transport"]
-    want_pt = "public_transport" in asked
-    modes = [m for m in asked if m != "public_transport"]  # the fast ones, awaited below
+    # No mode given: route ALL THREE modes concurrently, so a plain "from A to B" answers with a
+    # walking, a driving and a public-transport option (one line each on the map) and the reply
+    # compares them. The wall clock is the slowest coroutine, and until referente merges the
+    # pt-router-singleton patch that is the bus one: every vehicle=bus request rebuilds the PT
+    # graph server-side (~30-45s, probed 2026-07-13, vs sub-second for foot/car). That cost is
+    # accepted for the comparison (the chat box shows the stage + elapsed while it runs); it
+    # drops to nothing once the patch lands. An explicit mode runs that one only — asking for
+    # "a piedi" must not pay the bus latency.
+    modes = [slots["mode"]] if mode_specified else ["foot", "car", "public_transport"]
     # A departure the user asked for ("alle 18"), else None = leave now. Only the public
     # transport leg can honour it (it is the only mode with a timetable).
     departure = _parse_departure(slots.get("departure_time") or "", datetime.now(ROME))
@@ -635,53 +584,44 @@ async def execute(
         result = await exec_tool(client, "service_search_near_gps_position", p_args)
         return _audit("service_search_near_gps_position", p_args, result)
 
-    # The fast modes are independent, so route them concurrently (wall-clock = the slowest one,
+    # The modes are independent, so route them concurrently (wall-clock = the slowest one,
     # not the sum); parking (car only) runs alongside in the SAME flat gather, placed last so
     # routing keeps its modes-order append (deterministic _extract_data) and the parking entry
     # comes after. One flat gather (not nested) keeps the call order stable.
     do_parking = "car" in modes
+    # Emitted ONCE here, not inside _route: the mode coroutines run concurrently, so reporting
+    # from each of them would fire once per mode, in an order set by whoever suspends first. A bus
+    # leg gets its own stage name because it is the one that makes the user wait (the router
+    # rebuilds its PT graph per request until the perf patch lands) — the chat box says so.
+    _emit(on_stage, "routing_bus" if "public_transport" in modes else "routing")
+    coros = [_route(m) for m in modes]
+    coros += [_parking()] if do_parking else []
+    gathered = await asyncio.gather(*coros)
+    primary = gathered[: len(modes)]
+    parking_entry = gathered[len(modes)] if do_parking else None
+    results.extend(primary)
+
+    # Parking is only meaningful when a car route was actually found: if the car routing
+    # failed (ZTL / route-not-found), there is nowhere to drive to, so we drop the parking
+    # (the search was fetched concurrently above to add no wall-clock, and is simply discarded
+    # here). Parking entry goes after every routing entry so _extract_data (routing-only) is
+    # unaffected and _extract_parking finds it deterministically.
+    car_ok = any(
+        m == "car"
+        and isinstance(entry["result"], dict)
+        and isinstance(entry["result"].get("journey"), dict)
+        for m, entry in zip(modes, primary)
+    )
     parking: list[dict[str, Any]] = []
-    if modes:
-        # Emitted ONCE here, not inside _route: the mode coroutines run concurrently, so
-        # reporting from each of them would fire once per mode, in an order set by whoever
-        # suspends first.
-        _emit(on_stage, "routing")
-        coros = [_route(m) for m in modes]
-        coros += [_parking()] if do_parking else []
-        gathered = await asyncio.gather(*coros)
-        primary = gathered[: len(modes)]
-        parking_entry = gathered[len(modes)] if do_parking else None
-        results.extend(primary)
-
-        # Parking is only meaningful when a car route was actually found: if the car routing
-        # failed (ZTL / route-not-found), there is nowhere to drive to, so we drop the parking
-        # (the search was fetched concurrently above to add no wall-clock, and is simply
-        # discarded here). Parking entry goes after every routing entry so _extract_data
-        # (routing-only) is unaffected and _extract_parking finds it deterministically.
-        car_ok = any(
-            m == "car"
-            and isinstance(entry["result"], dict)
-            and isinstance(entry["result"].get("journey"), dict)
-            for m, entry in zip(modes, primary)
-        )
-        if parking_entry is not None and car_ok:
-            results.append(parking_entry)
-            # Build the nearest-N list (parse + Haversine distance + sort), then enrich each
-            # with its live free-spaces (service_info_dev per spot, concurrently). The entry is
-            # passed directly (not scanned from results): a category-destination search logs an
-            # entry under the same tool name, and only this one is parking.
-            spots = _extract_parking(parking_entry, {"lat": dest[1], "lng": dest[0]})
-            if spots:
-                parking = await _enrich_parking(client, spots)
-
-    # The slow one, fired off LAST and NOT awaited (see the docstring): it runs while respond
-    # phrases the fast half of the answer, and execute_pt collects it afterwards. Parked in a
-    # per-turn dict bound to both nodes — an asyncio.Task must never live in AdvisorState (the
-    # state has to stay serializable for any future checkpointer, same reason as on_stage).
-    if want_pt:
-        if pending is None:
-            pending = {}  # a direct caller (a unit test) that never collects: the task is its own
-        pending["pt"] = asyncio.create_task(_route("public_transport"))
+    if parking_entry is not None and car_ok:
+        results.append(parking_entry)
+        # Build the nearest-N list (parse + Haversine distance + sort), then enrich each with
+        # its live free-spaces (service_info_dev per spot, concurrently). The entry is passed
+        # directly (not scanned from results): a category-destination search logs an entry
+        # under the same tool name, and only this one is parking.
+        spots = _extract_parking(parking_entry, {"lat": dest[1], "lng": dest[0]})
+        if spots:
+            parking = await _enrich_parking(client, spots)
 
     # Surface the precise geocoded endpoints (origin/dest are [lng, lat]) so the front-end
     # pins markers on the real civic address, not on the routing service's road-snapped WKT
@@ -699,33 +639,7 @@ async def execute(
         # Absent when the user asked for no particular time — respond then says nothing about
         # departure rather than announcing "now".
         "departure": departure.strftime("%H:%M") if departure else "",
-        # A bus leg is in flight. With fast routes already in hand the graph answers them first
-        # (respond_fast -> the user reads it in ~3s) and finishes the same reply once the bus
-        # lands; with none (an explicit "in bus" request) there is nothing to say yet, so it
-        # goes straight to execute_pt and answers once.
-        "pt_pending": want_pt,
-        "two_phase": bool(want_pt and modes),
     }
-
-
-async def execute_pt(
-    state: AdvisorState,
-    *,
-    on_stage: StageFn | None = None,
-    pending: dict[str, asyncio.Task] | None = None,
-) -> dict[str, Any]:
-    """Collect the public-transport route execute fired off in the background.
-
-    This is where the turn actually waits (~30-45s until the router's perf patch lands). By now
-    the user has already read the walking/driving half of the answer and seen those lines drawn,
-    so the wait costs them nothing but the bus option itself. The entry is appended AFTER every
-    fast routing entry, keeping _extract_data's order deterministic."""
-    task = (pending or {}).get("pt")
-    if task is None:
-        return {}
-    _emit(on_stage, "routing_bus")
-    entry = await task
-    return {"tool_results": [*(state.get("tool_results") or []), entry]}
 
 
 async def _enrich_parking(
@@ -900,18 +814,10 @@ def _extract_parking(
 
 
 def _template_answer(
-    data: dict[str, Any],
-    *,
-    unsupported: bool,
-    missing: list[str] | None = None,
-    pending_pt: bool = False,
+    data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
 ) -> str:
     """Fallback answer in Italian (the advisor's default) when the respond LLM
-    is unavailable. `pending_pt` marks the first half of a two-phase answer: the bus route is
-    still being computed, so the text ends by saying so (the continuation appends to it)."""
-    if pending_pt:
-        head = _template_answer(data, unsupported=unsupported, missing=missing)
-        return f"{head}\nSto controllando anche i mezzi pubblici…"
+    is unavailable."""
     if missing:
         labels = {
             "origin": "il punto di partenza (o la tua posizione)",
@@ -991,19 +897,11 @@ def _results_view(
     unsupported: bool,
     missing: list[str] | None = None,
     departure: str = "",
-    pending_pt: bool = False,
-    continuing: bool = False,
 ) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (no huge WKT).
 
     `departure` is the HH:MM the user asked to leave at ('' = they asked for no time): it
-    rides at the root, not on a routing item, because it applies to the whole request.
-
-    `pending_pt` / `continuing` place the model in the two-phase answer (execute fires the slow
-    bus route in the background): pending_pt = this is the FIRST half, the bus result is not in
-    yet; continuing = this is the SECOND half, appended to a reply the user has already read.
-    Both are root markers for the same reason as departure — they describe the request, not any
-    one result."""
+    rides at the root, not on a routing item, because it applies to the whole request."""
     if missing:
         return {"status": "missing_place", "missing": missing}
     if unsupported:
@@ -1042,34 +940,14 @@ def _results_view(
     out = {"status": "ok", "results": view}
     if departure:
         out["departure_time"] = departure
-    if pending_pt:
-        out["pending"] = "public_transport"
-    if continuing:
-        out["continuing"] = True
     return out
 
 
 async def respond(
-    state: AdvisorState,
-    *,
-    llm: Llama4Client,
-    on_stage: StageFn | None = None,
-    phase: str = "final",
-    on_partial: PartialFn | None = None,
+    state: AdvisorState, *, llm: Llama4Client, on_stage: StageFn | None = None
 ) -> dict[str, Any]:
     """LLM phrases a multilingual answer from the results (no tools), then assembles
-    the widget JSON. Falls back to a template if the LLM errors.
-
-    Runs once per turn, EXCEPT when a bus route is still in flight and the fast modes are
-    already answerable (state["two_phase"]): then it runs twice.
-      - phase="fast": phrases the walking/driving half, hands it to `on_partial` (the bridge
-        publishes it, the chat box shows it within ~3s and draws those lines) and parks the text
-        in state["partial_answer"].
-      - phase="final": phrases ONLY the bus half (the prompt's `continuing` rule) and appends it
-        to the parked text, so the conversation ends up with ONE assistant message holding the
-        whole reply — the user watches a single bubble grow, and the history stays clean.
-    With no bus leg (or no fast route to show first) only the final phase runs, exactly as before.
-    """
+    the widget JSON. Falls back to a template if the LLM errors."""
     _emit(on_stage, "respond")
     messages = list(state.get("messages") or [])
     intent = state.get("intent", "other")
@@ -1110,16 +988,11 @@ async def respond(
     # without re-greeting (RESPOND_SYSTEM keys the greeting off this marker). messages
     # here is [history..., current user]; the assistant turn isn't appended yet.
     is_followup = any(m.get("role") == "assistant" for m in messages)
-    # The half of the reply the user is already reading (respond_fast wrote it). Its presence is
-    # what makes this call the CONTINUATION: the model must add only the bus part.
-    partial_answer = state.get("partial_answer") or ""
     view = _results_view(
         results,
         unsupported=unsupported,
         missing=missing,
         departure=state.get("departure") or "",
-        pending_pt=(phase == "fast"),
-        continuing=bool(partial_answer),
     )
     answer: str | None = None
     try:
@@ -1147,48 +1020,21 @@ async def respond(
     except Llama4Error:
         pass  # fall back to the deterministic template below
     if answer is None:
-        answer = _template_answer(
-            data, unsupported=unsupported, missing=missing, pending_pt=(phase == "fast")
-        )
+        answer = _template_answer(data, unsupported=unsupported, missing=missing)
 
-    if partial_answer:
-        # ONE assistant message per turn, whatever the phase count: the continuation is glued
-        # onto the text the user is already reading (the chat box rewrites the same bubble, and
-        # the next turn's history carries a single, complete reply).
-        answer = f"{partial_answer}\n\n{answer}"
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no
     # custom top-level `answer` field. status is the JSend-style outcome, request_type
     # names the served intent, data is the route payload, messages is the history to
     # pass back for the next turn.
-    response = {
-        "status": "success",
-        "request_type": intent,
-        "data": data,
-        "messages": messages,  # updated history (last turn = the reply)
+    return {
+        "response": {
+            "status": "success",
+            "request_type": intent,
+            "data": data,
+            "messages": messages,  # updated history (last turn = the reply)
+        }
     }
-    if phase == "fast":
-        # Publish the half-answer NOW (the bridge parks it; the next poll carries it to the chat
-        # box, which shows the text and draws the foot/car lines) and keep the raw text for the
-        # continuation. The turn goes on to wait for the bus route in execute_pt.
-        _emit_partial(on_partial, response)
-        return {"partial_answer": answer, "response": response}
-    return {"response": response}
-
-
-def _after_execute(state: AdvisorState) -> str:
-    """Which way the graph goes once the fast half is done.
-
-    fast   = a bus route is in flight AND there are fast routes to show meanwhile: answer them
-             now (respond_fast publishes the preview), then wait for the bus and finish the reply.
-    pt     = a bus route is in flight and nothing else was asked ("in bus" explicitly): there is
-             nothing to say yet, so just wait for it and answer once.
-    single = no bus leg at all (an explicit foot/car request), or nothing to route (unsupported /
-             missing endpoint / geocode failure): one answer, straight away.
-    """
-    if state.get("two_phase"):
-        return "fast"
-    return "pt" if state.get("pt_pending") else "single"
 
 
 def _build_graph(
@@ -1196,38 +1042,19 @@ def _build_graph(
     llm: Llama4Client,
     local_client: Client | None = None,
     on_stage: StageFn | None = None,
-    on_partial: PartialFn | None = None,
-    pending: dict[str, asyncio.Task] | None = None,
 ):
-    # The callbacks and the pending-task dict ride on the partials, NOT in AdvisorState: a
-    # callable (or an asyncio.Task) in the graph state would break any future checkpointer, which
-    # needs the state to stay serializable. The graph is rebuilt per turn (run_advisor), so
-    # per-turn objects bind cleanly.
-    #
-    #   understand -> execute -+-> respond_fast -> execute_pt -> respond -> END   (two-phase)
-    #                          +-> execute_pt ----------------> respond -> END   (bus only)
-    #                          +-------------------------------> respond -> END   (no bus)
-    #
-    # respond and respond_fast are the SAME node function in two phases (see respond).
+    # on_stage rides on the partials, NOT in AdvisorState: a callable in the graph state would
+    # break any future checkpointer (state must stay serializable). The graph is rebuilt per
+    # turn (run_advisor), so a per-turn callback binds cleanly.
     g = StateGraph(AdvisorState)
     g.add_node("understand", partial(understand, llm=llm, on_stage=on_stage))
     g.add_node("execute", partial(
-        execute, client=client, local_client=local_client, on_stage=on_stage, pending=pending
+        execute, client=client, local_client=local_client, on_stage=on_stage
     ))
-    g.add_node("respond_fast", partial(
-        respond, llm=llm, on_stage=on_stage, phase="fast", on_partial=on_partial
-    ))
-    g.add_node("execute_pt", partial(execute_pt, on_stage=on_stage, pending=pending))
-    g.add_node("respond", partial(respond, llm=llm, on_stage=on_stage, phase="final"))
+    g.add_node("respond", partial(respond, llm=llm, on_stage=on_stage))
     g.set_entry_point("understand")
     g.add_edge("understand", "execute")
-    g.add_conditional_edges(
-        "execute",
-        _after_execute,
-        {"fast": "respond_fast", "pt": "execute_pt", "single": "respond"},
-    )
-    g.add_edge("respond_fast", "execute_pt")
-    g.add_edge("execute_pt", "respond")
+    g.add_edge("execute", "respond")
     g.add_edge("respond", END)
     return g.compile()
 
@@ -1257,7 +1084,6 @@ async def run_advisor(
     history: list[dict[str, Any]] | None = None,
     gps: dict[str, Any] | None = None,
     on_stage: StageFn | None = None,
-    on_partial: PartialFn | None = None,
 ) -> dict[str, Any]:
     """Multi-turn mobility advisor. Returns widget JSON including updated messages.
 
@@ -1267,22 +1093,16 @@ async def run_advisor(
     drives nearest-candidate picking. `on_stage` is called with the name of each stage as
     the turn moves through the graph (understand / geocode / routing / routing_bus /
     respond) — the bridge relays it so the chat box can show what is running during the
-    30-45s a bus route currently costs. `on_partial` is called ONCE, with a complete widget
-    JSON for the walking/driving half, as soon as that half is phrased (~3s) while the bus
-    route is still being computed; the final return then carries the whole answer (one
-    assistant message: the preview text plus its continuation). The MCP Client is reconnected
-    per turn (clean lifecycle, cheap intranet handshake); config and LLM client persist for the
-    whole process.
+    30-45s a bus route currently costs. The MCP Client is reconnected per turn (clean
+    lifecycle, cheap intranet handshake); config and LLM client persist for the whole
+    process.
     """
     cfg, llm = await _session_deps()
     messages = list(history or [])
     messages.append({"role": "user", "content": query})
     t0 = time.perf_counter()
-    # Where execute parks the background bus route for execute_pt to collect. Per turn, and
-    # deliberately not in the graph state (a Task is not serializable).
-    pending: dict[str, asyncio.Task] = {}
     async with Client(cfg) as client, Client(_local_config()) as local_client:
-        graph = _build_graph(client, llm, local_client, on_stage, on_partial, pending)
+        graph = _build_graph(client, llm, local_client, on_stage)
         out: AdvisorState = await graph.ainvoke(
             {"messages": messages, "tool_results": [], "user_gps": gps}
         )

@@ -4,18 +4,12 @@ The dashboard chat box (frontend/mobility_advisor_dashboard.html) can't reach th
 JupyterHub-only Llama4 + MCP server from the browser, so this thin HTTP layer wraps
 run_advisor. It is a JOB + POLL protocol (never one long request, see below):
     POST /advise {query, history, gps} -> {"job_id": ...}   (returns at once)
-    GET  /advise/{job_id}              -> 202 {"status":"pending","stage":...,"elapsed_s":...,
-                                                "partial": <widget JSON>?}
+    GET  /advise/{job_id}              -> 202 {"status":"pending","stage":...,"elapsed_s":...}
                                           while running, then 200 with the widget JSON
 The 202 tells the chat box WHAT the turn is doing (the stage run_advisor's on_stage callback
 last reported: understand / geocode / routing / routing_bus / respond) and for how long, so a
-bus turn is not a blank "thinking" bubble for half a minute. Once the turn has phrased the
-walking/driving half of the answer (~3 s) it publishes it through on_partial and the 202 starts
-carrying it as `partial` — a COMPLETE widget JSON the front-end renders with its normal renderer
-(text + those route lines), while the slow bus route keeps computing. The final 200 then carries
-the whole answer (one assistant message: the preview text plus its continuation), so the chat box
-just rewrites the same bubble. These fields are transport-layer, like the job id: they never
-enter the widget JSON itself.
+bus turn is not a blank "thinking" bubble for half a minute. Those fields are transport-layer,
+like the job id: they never enter the widget JSON.
 The 200 body is the same widget JSON run_advisor returns (status/request_type/data/
 messages), passed through verbatim (no extra fields, project rule 8): the job id lives
 in the transport layer only. The reply is messages[-1].content (OpenAI standard);
@@ -50,7 +44,6 @@ import math
 import pathlib
 import time
 import uuid
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,18 +65,13 @@ _PKG_LOGGER = "snap4city_mobility_mcp"
 # client went away (tab closed mid-turn), so it is dropped on the next POST.
 JOB_TTL_S = 300.0
 
-# job_id -> (created_at, task, progress). progress is the running turn's scratch cell:
-#   {"stage": ...}    what it is doing right now (run_advisor's on_stage callback), so a poll
-#                     can say WHAT is running, not just that something is;
-#   {"partial": ...}  the walking/driving half of the answer, complete widget JSON, published
-#                     the moment it is phrased (on_partial) while the slow bus route is still
-#                     being computed — the poll hands it to the chat box, which shows the text
-#                     and draws those lines ~30-45s before the turn is actually over.
-# It lives inside the job entry so _prune_jobs drops it with the task (a parallel dict would
-# leak). In-memory on purpose: the bridge is a single-worker, single-user test rig (like
-# _reset_debug_log's per-turn truncation). Running it with several uvicorn workers would need
-# sticky routing or a shared store.
-_jobs: dict[str, tuple[float, asyncio.Task, dict[str, Any]]] = {}
+# job_id -> (created_at, task, progress). progress is a one-key dict the running turn writes
+# its current stage into (run_advisor's on_stage callback), so a poll can say WHAT is running,
+# not just that something is. It lives inside the job entry so _prune_jobs drops it with the
+# task (a parallel dict would leak). In-memory on purpose: the bridge is a single-worker,
+# single-user test rig (like _reset_debug_log's per-turn truncation). Running it with
+# several uvicorn workers would need sticky routing or a shared store.
+_jobs: dict[str, tuple[float, asyncio.Task, dict[str, str]]] = {}
 
 
 def _reset_debug_log() -> None:
@@ -156,23 +144,18 @@ def _sanitize_gps(raw: dict | None) -> dict[str, float] | None:
 
 
 async def _turn(
-    query: str, history: list[dict], gps: dict[str, float] | None, progress: dict[str, Any]
+    query: str, history: list[dict], gps: dict[str, float] | None, progress: dict[str, str]
 ) -> dict:
     """One advisor turn, run detached from the HTTP request that started it.
 
     Never raises: an infra failure (MCP/LLM unreachable) comes back as the JSend-style
     error shape run_advisor itself uses, so the front-end renders it. outputs.txt is
     written HERE, not in the GET handler, so the turn's full JSON is on disk even when
-    nobody collects it (tab closed mid-turn). `progress` is the job's scratch cell: the graph
-    writes each stage into it as it goes, plus the half-answer it can already show, and a poll
-    reads both back."""
+    nobody collects it (tab closed mid-turn). `progress` is the job's stage cell: the graph
+    writes each stage into it as it goes, and a poll reads it back."""
     try:
         response = await run_advisor(
-            query,
-            history,
-            gps=gps,
-            on_stage=lambda stage: progress.update(stage=stage),
-            on_partial=lambda preview: progress.update(partial=preview),
+            query, history, gps=gps, on_stage=lambda stage: progress.update(stage=stage)
         )
     except Exception as e:  # noqa: BLE001 - surface infra failure as data, not a 500
         logger.exception("advise failed")
@@ -224,27 +207,21 @@ async def advise_result(job_id: str) -> JSONResponse:
 
     202 = still computing (poll again), carrying the stage the turn is in and how long it has
     been running, so the chat box can say "calcolo il percorso in bus... 34s" instead of
-    staring at a blank bubble for the ~30-45s a bus route costs. Those two fields belong to
-    the TRANSPORT layer (like the job id and the 202 itself) and never enter the widget JSON,
-    which keeps rule 8. 200 = the widget JSON, passed through verbatim, and the job is dropped
-    from the table. 404 = unknown/expired job id, in the same JSend-style error shape the
-    front-end already renders."""
+    staring at a blank bubble for the ~30-45s a bus route costs. Those two fields belong to the
+    TRANSPORT layer (like the job id and the 202 itself) and never enter the widget JSON, which
+    keeps rule 8. 200 = the widget JSON, passed through verbatim, and the job is dropped from the
+    table. 404 = unknown/expired job id, in the same JSend-style error shape the front-end
+    already renders."""
     entry = _jobs.get(job_id)
     if entry is None:
         return JSONResponse(status_code=404, content={"status": "error", "error": f"unknown job {job_id}"})
     started, task, progress = entry
     if not task.done():
-        body = {
+        return JSONResponse(status_code=202, content={
             "status": "pending",
             "stage": progress.get("stage", "start"),
             "elapsed_s": round(time.monotonic() - started),
-        }
-        # The half-answer, once the turn has one: the widget renders it (text + the foot/car
-        # lines) and keeps polling for the rest. Same widget JSON shape as the final 200, so the
-        # front-end runs it through the very same renderer.
-        if progress.get("partial") is not None:
-            body["partial"] = progress["partial"]
-        return JSONResponse(status_code=202, content=body)
+        })
     _jobs.pop(job_id, None)
     # A turn that blew up in the bridge itself (run_advisor failures are already data by now,
     # see _turn) must still come back as the error shape the widget renders — a 500 here would

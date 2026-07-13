@@ -133,15 +133,7 @@ The remote Snap4City MCP server lives on the intranet and is reached directly fr
 
 ### Mobility advisor (dashboard chat box + bridge `api.py`)
 
-The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph:
-
-```
-understand -> execute -+-> respond_fast -> execute_pt -> respond -> END   (two-phase: see below)
-                       +-> execute_pt ----------------> respond -> END   (bus only)
-                       +-------------------------------> respond -> END   (no bus leg)
-```
-
-Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically chains the MCP tools in Python — geocoding + routing (`route`, all modes) on the local server, reverse geocode / nearest-service search / live parking on the remote `snap4agentic_advisor_native` server over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
+The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically chains the MCP tools in Python — geocoding + routing (`route`, all modes) on the local server, reverse geocode / nearest-service search / live parking on the remote `snap4agentic_advisor_native` server over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
 
 Run **two processes** on the JupyterHub (see §11; routing uses the online whatif-router, no third process needed). First the **local MCP server**, which serves
 forward geocoding (referente's remote `address_search_location` is server-side broken, so we host
@@ -199,9 +191,7 @@ The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, noth
 
 The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `duration` + `mode`, plus a `routes` list (one per travel mode; a bus route also ships its walk/ride `legs` geometry for the map split — the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (the dashboard front-end keeps it and sends it back as `history` each turn). Out-of-scope questions (including transport-network reference questions like line lists or timetables) return a friendly "unsupported" reply.
 
-**Travel modes.** When the question does not name one (*"da Piazza del Duomo a Santa Croce"*), all three are routed — on foot, by car and by public transport — so the reply compares them and the map draws a line each (`docs/lessons.md` L31). Naming a mode (*"a piedi"*) routes that one only. A **departure time** the user gives (*"alle 18"*, *"domani alle 9"*) becomes the public-transport timetable window; an *arrival* time is not supported (the What-If servlet has no `arrive_by`).
-
-**The answer arrives in two goes** (`docs/lessons.md` L48). Walking and driving come back in well under a second, while a bus route costs ~30–45 s — the online whatif-router rebuilds its public-transport graph on every `vehicle=bus` request until referente merges `whatif-local/patches/pt-router-singleton.patch`. So the graph does not make the fast half wait: `execute` fires the bus route off in the **background**, `respond_fast` phrases the walking/driving answer and publishes it (`run_advisor(on_partial=...)` → the bridge → the next `202`), and the chat box shows that text and draws those two lines after ~3 s, with the input still locked. `execute_pt` then collects the bus route and `respond` writes only that part, gluing it onto the text the user is already reading — so the turn ends with **one** assistant message and the widget simply rewrites the same bubble. Perceived latency drops from ~40 s to ~3 s; the wall clock is unchanged. Once the perf patch lands, the preview and the final answer arrive together and this degrades to a single render on its own.
+**Travel modes.** When the question does not name one (*"da Piazza del Duomo a Santa Croce"*), all three are routed **concurrently** — on foot, by car and by public transport — so the reply compares them and the map draws a line each (`docs/lessons.md` L31). The turn answers once, when all three are in: the wall clock is the slowest of them, today the bus one, because the online whatif-router rebuilds its public-transport graph on every `vehicle=bus` request (~30–45 s) until referente merges `whatif-local/patches/pt-router-singleton.patch`; foot and car are sub-second. The chat box shows the stage and the elapsed seconds meanwhile. Naming a mode (*"a piedi"*) routes that one only, so it never pays the bus latency. A **departure time** the user gives (*"alle 18"*, *"domani alle 9"*) becomes the public-transport timetable window; an *arrival* time is not supported (the What-If servlet has no `arrive_by`).
 
 > **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
 

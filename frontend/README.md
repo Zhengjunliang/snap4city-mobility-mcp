@@ -68,14 +68,6 @@ Each 202 carries `{"status":"pending","stage":...,"elapsed_s":...}`; the widget 
 rather than a blank bubble for the better part of a minute. An unrecognized stage falls back to
 the generic bubble, so a new backend stage can never blank the line.
 
-**Two-phase answer (L48).** Walking and driving are sub-second, a bus route costs ~30–45 s, so the
-backend answers the fast half first: the 202 then also carries `partial`, a **complete widget
-JSON**. The widget renders it with the normal `renderTurn` — answer bubble + foot/car lines, after
-~3 s — keeps the input locked and goes on polling; the thinking bubble drops below the answer and
-keeps ticking. The final 200 holds **one** assistant message (the preview text plus its
-continuation), so the widget just rewrites that same bubble and adds the bus line. Never render
-`partial` as a second bubble, and never unlock the input on it — the turn is not over.
-
 The collected 200 is the widget JSON `{status, request_type, data, messages}`; check that
 `data.wkt` (the LINESTRING), `data.distance_km`, `data.duration`, and `data.mode` are
 present and `messages[-1].content` is the Italian reply.

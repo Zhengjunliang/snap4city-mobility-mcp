@@ -11,7 +11,6 @@ from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
     ROME,
-    _after_execute,
     _build_graph,
     _extract_data,
     _extract_parking,
@@ -21,7 +20,6 @@ from snap4city_mobility_mcp.orchestrator import (
     _results_view,
     _routing_hint,
     execute,
-    execute_pt,
     respond,
     understand,
 )
@@ -426,39 +424,31 @@ def test_extract_data_all_fail_reports_earliest_error():
     assert "routes" not in data
 
 
-async def test_execute_unspecified_mode_answers_fast_modes_then_collects_the_bus(make_client, make_result):
-    """Empty mode → all three modes, but NOT in one wait: execute awaits only walking and driving
-    (sub-second) and fires the bus route off in the background, so respond can answer those two
-    while the router spends ~30-45s rebuilding its PT graph. execute_pt then collects the bus
-    entry, which lands AFTER every fast routing entry (deterministic _extract_data order)."""
+async def test_execute_unspecified_mode_routes_all_three(make_client, make_result):
+    """Empty mode → execute routes ALL THREE modes concurrently, so the reply can compare
+    walking, driving and public transport and the map draws a line each. The modes keep their
+    request order in the audit, and the parking entry stays last (car is among them)."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # foot
         make_result(structured=_journey()),                          # car
+        make_result(structured=_journey()),                          # public_transport
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
         make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
-        make_result(structured=_journey()),                          # public_transport (background)
     ])
-    pending = {}
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
-    fast = await execute({"slots": slots}, client=client, pending=pending)
-    assert [json.loads(e["args"])["routetype"] for e in fast["tool_results"] if e["name"] == "routing"] \
-        == ["foot", "car"]  # the bus is NOT awaited here
-    assert fast["two_phase"] is True and fast["pt_pending"] is True
-    # car is among the fast modes → the parking entry is appended after all routing entries.
-    assert fast["tool_results"][-1]["name"] == "service_search_near_gps_position"
-    assert fast["parking"][0]["free_spaces"] == 5
-
-    out = await execute_pt({"tool_results": fast["tool_results"]}, pending=pending)
-    assert [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"] \
-        == ["foot", "car", "public_transport"]
+    out = await execute({"slots": slots}, client=client)
+    routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
+    assert routetypes == ["foot", "car", "public_transport"]
+    # car is among the modes → the parking entry is appended after all routing entries.
+    assert out["tool_results"][-1]["name"] == "service_search_near_gps_position"
+    assert out["parking"][0]["free_spaces"] == 5
 
 
 async def test_execute_explicit_mode_pays_no_bus_latency(make_client, make_result):
     """An explicit mode routes THAT ONE only: asking "a piedi" must not wait for the bus router
-    (which rebuilds its PT graph per request, ~30-45s), draw a car/bus line, or split the answer
-    in two."""
+    (which rebuilds its PT graph per request, ~30-45s), nor draw a car/bus line."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
@@ -468,30 +458,26 @@ async def test_execute_explicit_mode_pays_no_bus_latency(make_client, make_resul
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
     assert routetypes == ["foot"]
-    assert out["pt_pending"] is False and out["two_phase"] is False
 
 
 async def test_execute_stages_are_reported_in_order(make_client, make_result):
-    """The nodes report what they are doing (the bridge relays it to the chat box). `routing` is
+    """execute reports what it is doing (the bridge relays it to the chat box). The stage is
     emitted ONCE, before the gather — reporting from inside the concurrent _route coroutines would
-    fire once per mode in a nondeterministic order. The bus wait gets its own stage, in execute_pt,
-    because that is the one the user actually waits through."""
+    fire once per mode in a nondeterministic order. With a bus leg in the batch it gets the
+    slow-stage label, because that is the one the user actually waits through."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),
         make_result(structured=_feature_collection(11.26, 43.76)),
         make_result(structured=_journey()),                          # foot
         make_result(structured=_journey()),                          # car
+        make_result(structured=_journey()),                          # public_transport
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),
         make_result(structured=_parking_realtime(5, 50)),
-        make_result(structured=_journey()),                          # public_transport (background)
     ])
     seen = []
-    pending = {}
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
-    fast = await execute({"slots": slots}, client=client, on_stage=seen.append, pending=pending)
-    assert seen == ["geocode", "routing"]
-    await execute_pt({"tool_results": fast["tool_results"]}, on_stage=seen.append, pending=pending)
-    assert seen == ["geocode", "routing", "routing_bus"]
+    await execute({"slots": slots}, client=client, on_stage=seen.append)
+    assert seen == ["geocode", "routing_bus"]
 
 
 async def test_execute_stage_callback_failure_never_sinks_the_turn(make_client, make_result):
@@ -517,11 +503,9 @@ async def test_execute_departure_time_drives_the_gtfs_window(make_client, make_r
         make_result(structured=_feature_collection(11.26, 43.76)),
         make_result(structured=_journey()),
     ])
-    pending = {}
     slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze",
              "mode": "public_transport", "departure_time": "18:00"}
-    out = await execute({"slots": slots}, client=client, pending=pending)
-    await execute_pt({"tool_results": out["tool_results"]}, pending=pending)
+    out = await execute({"slots": slots}, client=client)
     _, sent = client.calls[-1]
     assert sent["startdatetime"].endswith("T18:00")
     assert out["departure"] == "18:00"  # respond states it; HH:MM only, never a date (L43)
@@ -535,11 +519,9 @@ async def test_execute_without_departure_time_leaves_now(make_client, make_resul
         make_result(structured=_feature_collection(11.26, 43.76)),
         make_result(structured=_journey()),
     ])
-    pending = {}
     slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze",
              "mode": "public_transport"}
-    out = await execute({"slots": slots}, client=client, pending=pending)
-    await execute_pt({"tool_results": out["tool_results"]}, pending=pending)
+    out = await execute({"slots": slots}, client=client)
     _, sent = client.calls[-1]
     assert sent["startdatetime"]  # never naive-UTC: a bare now() would query the timetable 2h off
     assert out["departure"] == ""
@@ -558,14 +540,8 @@ async def test_execute_public_transport_routes_vehicle_bus(make_client, make_res
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=bus_journey),                         # route (local tool, vehicle=bus)
     ])
-    pending = {}
     slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "public_transport"}
-    # An explicit bus request has no fast half to preview: execute routes nothing and only fires
-    # the bus off, so the graph goes straight to execute_pt and answers once (two_phase False).
-    fast = await execute({"slots": slots}, client=client, pending=pending)
-    assert fast["pt_pending"] is True and fast["two_phase"] is False
-    assert not [e for e in fast["tool_results"] if e["name"] == "routing"]
-    out = await execute_pt({"tool_results": fast["tool_results"]}, pending=pending)
+    out = await execute({"slots": slots}, client=client)
     # PT went to the local route tool as vehicle=bus (+ timetable window); the audit
     # entry is still tagged public_transport.
     name, sent = client.calls[-1]
@@ -896,140 +872,9 @@ def test_results_view_carries_the_requested_departure():
     assert "departure_time" not in _results_view(entry, unsupported=False)
 
 
-# --- two-phase answer (the bus route arrives ~30-45s after the fast ones) -----
-
-async def test_respond_fast_publishes_the_preview_and_parks_its_text(make_llm):
-    """The fast half is handed to on_partial the moment it is phrased: a COMPLETE widget JSON
-    (text + the foot/car routes) the front-end renders ~30-45s before the bus route lands. The
-    raw text is parked for the continuation to glue onto."""
-    llm = make_llm([_text_response("A piedi: 1.83 km. Sto controllando anche i mezzi pubblici…")])
-    previews = []
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "da Duomo a Santa Croce"}],
-        "tool_results": [{"name": "routing", "args": json.dumps({"routetype": "foot"}),
-                          "result": {"journey": _journey()["journey"]}}],
-        "unsupported": False,
-        "two_phase": True,
-        "pt_pending": True,
-    }
-    out = await respond(state, llm=llm, phase="fast", on_partial=previews.append)
-    assert len(previews) == 1
-    assert previews[0]["messages"][-1]["content"].startswith("A piedi")
-    assert previews[0]["data"]["routes"][0]["mode"] == "foot"  # the map can draw it already
-    assert out["partial_answer"].startswith("A piedi")
-    # The model was TOLD the bus is still coming, so it never claims there is none.
-    view = json.loads(llm.calls[0]["messages"][-1]["content"].split("RESULTS:\n", 1)[1])
-    assert view["pending"] == "public_transport"
-
-
-async def test_respond_final_glues_the_continuation_onto_the_preview(make_llm):
-    """One assistant message per turn, whatever the phase count: the bus half is appended to the
-    text the user is already reading, so the chat box rewrites ONE bubble and the next turn's
-    history carries a single, complete reply."""
-    llm = make_llm([_text_response("In bus: linea 6, 25 minuti.")])
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "da Duomo a Santa Croce"}],
-        "tool_results": [{"name": "routing", "args": json.dumps({"routetype": "foot"}),
-                          "result": {"journey": _journey()["journey"]}}],
-        "unsupported": False,
-        "partial_answer": "A piedi: 1.83 km.",
-    }
-    out = await respond(state, llm=llm, phase="final")
-    reply = out["response"]["messages"][-1]
-    assert reply["role"] == "assistant"
-    assert reply["content"] == "A piedi: 1.83 km.\n\nIn bus: linea 6, 25 minuti."
-    assert [m["role"] for m in out["response"]["messages"]] == ["user", "assistant"]  # not two
-    # The model was told it is CONTINUING, so it does not re-state the walking numbers.
-    view = json.loads(llm.calls[0]["messages"][-1]["content"].split("RESULTS:\n", 1)[1])
-    assert view["continuing"] is True
-
-
-async def test_respond_without_a_preview_is_a_plain_single_answer(make_llm):
-    """No bus leg (or no fast half to show first) → one phase, no partial marker, no glue."""
-    llm = make_llm([_text_response("A piedi: 1.83 km.")])
-    previews = []
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "da Duomo a Santa Croce a piedi"}],
-        "tool_results": [{"name": "routing", "args": json.dumps({"routetype": "foot"}),
-                          "result": {"journey": _journey()["journey"]}}],
-        "unsupported": False,
-    }
-    out = await respond(state, llm=llm, phase="final", on_partial=previews.append)
-    assert previews == []  # nothing published mid-turn
-    assert out["response"]["messages"][-1]["content"] == "A piedi: 1.83 km."
-    view = json.loads(llm.calls[0]["messages"][-1]["content"].split("RESULTS:\n", 1)[1])
-    assert "pending" not in view and "continuing" not in view
-
-
-def test_after_execute_picks_the_route_through_the_graph():
-    """fast = answer the quick modes now and finish once the bus lands; pt = an explicit "in bus"
-    request (nothing to preview, so wait and answer once); single = no bus leg at all, or nothing
-    to route (unsupported / missing endpoint / geocode failure)."""
-    assert _after_execute({"two_phase": True, "pt_pending": True}) == "fast"
-    assert _after_execute({"two_phase": False, "pt_pending": True}) == "pt"
-    assert _after_execute({"two_phase": False, "pt_pending": False}) == "single"
-    assert _after_execute({"unsupported": True}) == "single"
-
-
 # --- graph wiring ------------------------------------------------------------
 
 def test_graph_compiles(make_client, make_llm):
     """StateGraph.compile() validates node/edge wiring — catches typos statically."""
     graph = _build_graph(make_client([]), make_llm([]))
     assert graph is not None
-
-
-async def test_graph_answers_twice_when_a_bus_route_is_in_flight(make_client, make_llm, make_result):
-    """End-to-end through the real graph: understand -> execute -> respond_fast -> execute_pt ->
-    respond. The user gets a walking/driving answer (and its lines) while the bus route is still
-    computing, then ONE grown reply with all three routes. This is the wiring the unit tests
-    above can't see: the conditional edge, the background task handover, and the glue."""
-    llm = make_llm([
-        _slots_response(json.dumps({
-            "request_type": "journey", "origin_text": "Duomo, Firenze",
-            "destination_text": "Santa Croce, Firenze", "destination_category": "",
-            "mode": "", "departure_time": "",
-        })),
-        _text_response("A piedi 1.83 km, in auto 2.1 km. Sto controllando anche i mezzi…"),
-        _text_response("In bus: linea 6, 25 minuti."),
-    ])
-    # The bus journey must carry a REAL ride leg: a walking-only PT itinerary is honestly
-    # degraded to a foot route and dropped when a real one exists (L39), which is exactly what
-    # a plain _journey() would produce here.
-    bus_journey = {"journey": {"routes": [{
-        "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38,
-        "arc": [{"transport": "bus", "transport_provider": "at - Firenze urbano",
-                 "desc": "linea 6 da PORTE NUOVE", "line": "6"}],
-    }]}}
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey()),                          # foot
-        make_result(structured=_journey()),                          # car
-        make_result(structured=_parking_search(("P1", 11.26, 43.76))),
-        make_result(structured=_parking_realtime(5, 50)),
-        make_result(structured=bus_journey),                         # public_transport (background)
-    ])
-    previews, stages, pending = [], [], {}
-    graph = _build_graph(client, llm, None, stages.append, previews.append, pending)
-    out = await graph.ainvoke({
-        "messages": [{"role": "user", "content": "da Duomo a Santa Croce"}],
-        "tool_results": [],
-    })
-
-    # The preview went out mid-turn, with only the fast routes on it.
-    assert len(previews) == 1
-    assert [r["mode"] for r in previews[0]["data"]["routes"]] == ["foot", "car"]
-    assert previews[0]["messages"][-1]["content"].startswith("A piedi")
-    # The final answer carries all three routes and ONE assistant message = preview + continuation.
-    final = out["response"]
-    assert sorted(r["mode"] for r in final["data"]["routes"]) == ["car", "foot", "public_transport"]
-    assert [m["role"] for m in final["messages"]] == ["user", "assistant"]
-    assert final["messages"][-1]["content"] == (
-        "A piedi 1.83 km, in auto 2.1 km. Sto controllando anche i mezzi…\n\n"
-        "In bus: linea 6, 25 minuti."
-    )
-    assert stages == ["understand", "geocode", "routing", "respond", "routing_bus", "respond"]

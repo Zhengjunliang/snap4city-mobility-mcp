@@ -15,11 +15,6 @@ NOT help, because jupyter-server-proxy buffers the whole body of a non-SSE respo
 collapse this back into one long request (see send()). Each 202 carries the stage the turn is
 in (understand / geocode / routing / routing_bus / respond) and its elapsed seconds; the
 "thinking" bubble shows them (STAGE_TEXT), so a bus turn is not a blank bubble for a minute.
-TWO-PHASE ANSWER: a bus route costs ~30-45s, walking and driving under a second, so the backend
-answers the fast half first and the 202 starts carrying it as `partial` (a COMPLETE widget JSON).
-We render it with the normal renderTurn - text bubble + foot/car lines, at ~3s - and keep polling
-with the input LOCKED; the final 200 holds ONE assistant message (preview + continuation), so we
-just rewrite the same bubble and add the bus line. Never render `partial` as a second bubble.
 MULTIPLE MODES: when the user does not say walk/drive/bus, the backend routes ALL THREE (foot,
 car AND public transport) and returns data.routes. We draw one vivid line per mode (foot green,
 car blue, bus orange) -
@@ -341,19 +336,14 @@ if (xhr && xhr.status === 404) { onFail("job scaduto"); return; }  // nothing to
 if (!again()) onFail(status || "timeout");
 });
 }
-// Render a turn - the half-finished one (202 `partial`: walking/driving) and the complete one
-// (200) go through THIS SAME function. $bubble is the answer bubble to write into: the partial
-// creates it, the final one rewrites it with the full text (the backend returns ONE assistant
-// message holding preview + continuation, so the user watches a single bubble grow rather than
-// getting a second message). Returns the bubble so the caller can reuse it.
-function renderTurn(response, $bubble) {
+// Render a completed turn: reply bubble + route lines + parking pins.
+function renderTurn(response) {
 if (response && response.status === "error") {
 addMsg("✗ " + (response.error || "richiesta fallita"), "err");
-return $bubble;
+return;
 }
 history = (response && response.messages) || history;  // carry multi-turn state
-var reply = replyOf(response);
-if ($bubble) $bubble.text(reply); else $bubble = addMsg(reply, "bot");
+addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
@@ -384,21 +374,7 @@ $("#advInput").prop("disabled", true);
 // and each poll rewrites it with the stage the bridge reports (a bus turn is otherwise a blank
 // bubble for the better part of a minute).
 var $thinking = addMsg(STAGE_TEXT.start, "bot thinking");
-// The answer bubble, once there is anything to put in it. A turn with a bus leg answers in two
-// goes: the bridge's 202 starts carrying `partial` (the walking/driving half, a complete widget
-// JSON) as soon as the backend has phrased it (~3s), so we open the bubble and draw those lines
-// THEN, ~30-45s before the bus route lands. The final 200 rewrites the same bubble with the full
-// text (preview + continuation, one assistant message) and adds the bus line. The thinking
-// bubble stays BELOW it, still ticking, so the user sees the answer is not finished - and the
-// input stays locked (inFlight) until the whole turn is done.
-var $answer = null;
-function pending(body) {
-$thinking.text(stageText(body));
-if (body && body.partial && !$answer) {
-try { $answer = renderTurn(body.partial); $thinking.appendTo("#advChat"); }
-catch (e) { if (window.console) console.warn("[advisor] partial render failed: " + e); }
-}
-}
+function pending(body) { $thinking.text(stageText(body)); }
 function finish() {
 inFlight = false;
 $thinking.remove();
@@ -421,9 +397,8 @@ dataType: "json"
 }).done(function (job) {
 if (!job || !job.job_id) { failed("no job_id"); return; }
 pollJob(job.job_id, Date.now() + POLL_MAX_MS, function (response) {
-// finally: a throw inside renderTurn must not leave the box disabled forever. $answer is the
-// bubble the preview opened (null when the turn had no preview): the full reply rewrites it.
-try { renderTurn(response, $answer); } finally { finish(); }
+// finally: a throw inside renderTurn must not leave the box disabled forever.
+try { renderTurn(response); } finally { finish(); }
 }, failed, pending);
 }).fail(function (xhr, status) {
 failed(status);
