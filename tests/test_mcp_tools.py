@@ -14,6 +14,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     TOOL_NAMES,
     _unwrap,
     exec_tool,
+    geocode_cache_clear,
     group_arc_legs,
     parse_service_features,
     reverse_geocode,
@@ -78,6 +79,47 @@ async def test_exec_tool_geocode_falls_back_to_poi_pass(make_client, make_result
     assert out["count"] == 1
     assert out["features"][0]["geometry"]["coordinates"] == [11.2482, 43.8047]
     assert [sent["excludePOI"] for _, sent in client.calls] == [True, False]
+
+
+# --- geocode cache -----------------------------------------------------------
+
+async def test_geocode_is_cached_per_search_text(make_client, make_result):
+    """The km4city address index is static, so the same place text resolves once and is
+    replayed after: a repeat (the other endpoint of a return trip, a demo asking the same
+    place again) sends NO second request. Case and spacing do not make a new key."""
+    fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714)]}
+    client = make_client([make_result(structured=fc)])  # exactly one response available
+    first = await exec_tool(client, "address_search_location", {"search": "via Roma, Firenze"})
+    again = await exec_tool(client, "address_search_location", {"search": "VIA  Roma,  Firenze"})
+    assert again == first
+    assert len(client.calls) == 1  # the second call never reached the server
+
+
+async def test_geocode_failures_are_not_cached(make_client, make_result):
+    """A miss (or a transient failure) must NOT be pinned for the whole session: the next turn
+    asking for the same place has to try the server again."""
+    empty = {"type": "FeatureCollection", "count": 0, "features": []}
+    good = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714)]}
+    client = make_client([
+        make_result(structured=empty), make_result(structured=empty),  # 1st turn: both passes empty
+        make_result(structured=good), make_result(structured=empty),   # 2nd turn: address pass hits
+    ])
+    assert (await exec_tool(client, "address_search_location", {"search": "via Zara"}))["count"] == 0
+    assert (await exec_tool(client, "address_search_location", {"search": "via Zara"}))["count"] == 1
+    # Both passes ran twice: the empty answer was retried against the server, not replayed
+    # (no city named, so the address pass is never city-confident and the POI pass always runs).
+    assert len(client.calls) == 4
+
+
+async def test_geocode_cache_clear_forgets_everything(make_client, make_result):
+    """The clear hook the test suite's autouse fixture relies on (a leaked entry would silently
+    skip a queued FakeClient response and shift every later pop by one)."""
+    fc = {"type": "FeatureCollection", "count": 1, "features": [_feature(11.2560, 43.7714)]}
+    client = make_client([make_result(structured=fc), make_result(structured=fc)])
+    await exec_tool(client, "address_search_location", {"search": "via Roma, Firenze"})
+    geocode_cache_clear()
+    await exec_tool(client, "address_search_location", {"search": "via Roma, Firenze"})
+    assert len(client.calls) == 2  # cleared → the second turn hit the server again
 
 
 # --- parse_service_features (nearest-category search envelope) ----------------

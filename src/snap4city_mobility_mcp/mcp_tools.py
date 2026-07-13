@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import unicodedata
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -142,6 +143,24 @@ GEOCODE_LANG = "it"
 GEOCODE_LOGIC = "or"
 
 
+# Geocode results are cached for the life of the process: the km4city address index is
+# static, so the same place text always resolves to the same FeatureCollection, and a demo
+# (or a multi-turn trip that keeps re-stating its endpoints) re-asks for the same handful of
+# places. The cache holds the FINAL 2-pass result keyed by the raw search text; the caller
+# still picks its own feature from it (_pick_coord ranks by the GPS/anchor of THIS turn, so
+# caching upstream of that changes no answer). Failures are never cached — a transient
+# network error must not pin an {"error": ...} for the whole session.
+_GEOCODE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
+GEOCODE_CACHE_MAX = 128
+
+
+def geocode_cache_clear() -> None:
+    """Empty the geocode cache. Tests must call this between cases (autouse fixture in
+    tests/conftest.py): the cache outlives a single test, and a hit would silently skip a
+    queued FakeClient response, shifting every later pop by one."""
+    _GEOCODE_CACHE.clear()
+
+
 async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
     """Two-pass geocode: addresses first, POIs as fallback, named-city hits first.
 
@@ -154,8 +173,27 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
       2. POI pass, named-city subset (stations/landmarks are POI-only)
       3. address hits (no city named — GPS-nearest picking happens in _pick_coord)
       4. POI hits / {"error": ...}
+
+    The result is memoized per search text (see _GEOCODE_CACHE).
     """
     search = str(args.get("search", ""))
+    key = " ".join(search.casefold().split())
+    if key in _GEOCODE_CACHE:
+        logger.debug("geocode %r: cache hit", search)
+        _GEOCODE_CACHE.move_to_end(key)
+        return _GEOCODE_CACHE[key]
+    found = await _geocode_uncached(client, args, search)
+    # Only a real hit is worth keeping: an error (or an empty/oddly-shaped answer) may be
+    # transient, and pinning it would break every later turn asking for the same place.
+    if isinstance(found, dict) and found.get("features"):
+        _GEOCODE_CACHE[key] = found
+        if len(_GEOCODE_CACHE) > GEOCODE_CACHE_MAX:
+            _GEOCODE_CACHE.popitem(last=False)  # oldest out (LRU: hits move to the end)
+    return found
+
+
+async def _geocode_uncached(client: Client, args: dict[str, Any], search: str) -> Any:
+    """The 2-pass ladder itself (see _geocode_address_first, which memoizes it)."""
     addresses = None  # rung 3: address hits without a named city
     try:
         first = _unwrap(await client.call_tool(

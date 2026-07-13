@@ -3,6 +3,22 @@ from types import SimpleNamespace
 
 import pytest
 
+from snap4city_mobility_mcp.mcp_tools import geocode_cache_clear
+
+
+@pytest.fixture(autouse=True)
+def _clean_geocode_cache():
+    """Empty the process-wide geocode cache around every test.
+
+    Mandatory, not hygiene: the cache outlives a test, while FakeClient is a single FIFO
+    queue of responses. A cached search would consume no queued response, so every later
+    pop in that test would shift by one — a silent, confusing failure (a routing call would
+    receive a FeatureCollection). Several tests already geocode the same place text
+    ("Duomo, Firenze" appears in five)."""
+    geocode_cache_clear()
+    yield
+    geocode_cache_clear()
+
 
 class FakeResult:
     """Stand-in for fastmcp Client.call_tool() result (structured_content or content[].text)."""

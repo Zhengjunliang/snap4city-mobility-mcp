@@ -45,8 +45,8 @@ def _client_with_captured_run(monkeypatch, response=None):
     """TestClient whose run_advisor is a capturing fake; returns (client, captured)."""
     captured = {}
 
-    async def fake_run_advisor(query, history=None, gps=None):
-        captured.update({"query": query, "history": history, "gps": gps})
+    async def fake_run_advisor(query, history=None, gps=None, on_stage=None, on_partial=None):
+        captured.update({"query": query, "history": history, "gps": gps, "on_stage": on_stage})
         return response if response is not None else {"status": "success", "messages": []}
 
     monkeypatch.setattr(api, "run_advisor", fake_run_advisor)
@@ -101,12 +101,18 @@ def test_advise_returns_widget_json_verbatim(monkeypatch):
 
 def test_advise_polls_202_while_the_turn_runs(monkeypatch):
     """The POST must NOT wait for the turn (L47): it returns a job id at once and the result is
-    polled out. A turn still running answers 202, so no HTTP request ever spans the whole turn
-    (the ~60 s proxy cut killed the old single-request design)."""
-    payload = {"status": "success", "messages": []}
+    polled out. A turn still running answers 202 carrying the stage it is in AND the half-answer
+    it has already phrased, so no HTTP request ever spans the whole turn (the ~60 s proxy cut
+    killed the old single-request design) and the chat box can show the walking/driving reply
+    while the ~30-45 s bus route is still computing."""
+    preview = {"status": "success", "data": {"routes": [{"mode": "foot"}]}, "messages": []}
+    payload = {"status": "success", "data": {"routes": [{"mode": "foot"}, {"mode": "public_transport"}]},
+               "messages": []}
     release = {"go": False}  # flipped from the test thread; the turn's loop polls it
 
-    async def slow_run_advisor(query, history=None, gps=None):
+    async def slow_run_advisor(query, history=None, gps=None, on_stage=None, on_partial=None):
+        on_stage("routing_bus")   # the graph reports where it is; the poll must echo it back
+        on_partial(preview)       # ...and the half it can already show
         while not release["go"]:
             await asyncio.sleep(0.01)
         return payload
@@ -118,13 +124,39 @@ def test_advise_polls_202_while_the_turn_runs(monkeypatch):
         job_id = client.post("/advise", json={"query": "q", "history": []}).json()["job_id"]
 
         pending = client.get(f"/advise/{job_id}")
-        assert pending.status_code == 202 and pending.json() == {"status": "pending"}
+        assert pending.status_code == 202
+        body = pending.json()
+        assert body["status"] == "pending"
+        assert body["stage"] == "routing_bus"  # relayed from the running turn
+        assert isinstance(body["elapsed_s"], int)
+        assert body["partial"] == preview  # the front-end renders this ~30-45 s before the 200
 
         release["go"] = True
         done = _collect(client, job_id)
-        assert done.status_code == 200 and done.json() == payload
+        assert done.status_code == 200 and done.json() == payload  # 200 = widget JSON, verbatim
         # The job is handed over exactly once: a second collect finds nothing.
         assert client.get(f"/advise/{job_id}").status_code == 404
+
+
+def test_advise_202_has_no_partial_before_there_is_one(monkeypatch):
+    """A turn that has not phrased anything yet (or has no fast half to show — an explicit "in
+    bus" request) must not ship an empty `partial`: the widget keys "is there a preview?" off the
+    field's presence."""
+    release = {"go": False}
+
+    async def slow_run_advisor(query, history=None, gps=None, on_stage=None, on_partial=None):
+        while not release["go"]:
+            await asyncio.sleep(0.01)
+        return {"status": "success", "messages": []}
+
+    monkeypatch.setattr(api, "run_advisor", slow_run_advisor)
+    monkeypatch.setattr(api, "_reset_debug_log", lambda: None)
+    monkeypatch.setattr(api, "_log_turn", lambda r: None)
+    with TestClient(api.app) as client:
+        job_id = client.post("/advise", json={"query": "q", "history": []}).json()["job_id"]
+        assert "partial" not in client.get(f"/advise/{job_id}").json()
+        release["go"] = True
+        _collect(client, job_id)
 
 
 def test_advise_unknown_job_is_404_error_shape(monkeypatch):
