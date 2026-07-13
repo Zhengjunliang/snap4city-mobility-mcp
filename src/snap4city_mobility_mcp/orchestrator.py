@@ -105,15 +105,17 @@ an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 - For a successful route: give the distance in km and the duration/ETA; main streets, \
 if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
 narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <provider> \
-toward <headsign> from the first to the last stop, then walk on), using ONLY the leg \
-fields — the leg's `line`, `provider`, `headsign`, `stops` (name + time), `stops_total` \
-and start/end times. Give the scheduled boarding and arrival times (the ride leg's \
-start/end times, or its first/last stop times); write every time you mention as plain \
+toward <headsign> from the board stop to the alight stop, then walk on), using ONLY the \
+leg fields — the leg's `line`, `provider`, `headsign`, `board` and `alight` (each a stop \
+name + time) and `stops_total`. Give the scheduled boarding and arrival \
+times (`board.time` / `alight.time`); write every time \
+you mention as plain \
 HH:MM (never seconds or dates) and each distance once, in km. NO disclaimers — never \
 comment on real-time information, traffic, dates, data validity, or timetable accuracy. \
 You may say \
-how many stops the ride covers and name the boarding/alighting stops, but never invent a \
-line, stop, operator, or time not in the fields. A \
+how many stops the ride covers (`stops_total`) and name the board/alight stops, but the \
+stops in between are NOT given: never invent one, nor a line, operator, or time not in \
+the fields. A \
 route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
 to restate, clarify, or give a nearby landmark for the origin/destination — they were \
 already located. When a bus route carries a `duration`, present it as an approximate ride \

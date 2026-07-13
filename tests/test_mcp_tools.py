@@ -11,7 +11,6 @@ import pytest
 
 from snap4city_mobility_mcp.mcp_tools import (
     LOCAL_ONLY_TOOLS,
-    STOPS_LLM_KEEP,
     TOOL_NAMES,
     _unwrap,
     exec_tool,
@@ -174,20 +173,29 @@ def test_group_arc_legs_walk_ride_walk():
     assert walk_out["distance_km"] == 0.05
 
 
-def test_slim_routing_multimodal_caps_stops():
-    long_stops = [{"name": f"S{i}", "time": None} for i in range(STOPS_LLM_KEEP + 8)]
+def test_slim_routing_multimodal_keeps_only_board_and_alight():
+    """A ride leg reaches the LLM as board + alight (+ how many stops in total): the stops
+    in between are noise the reply never names, and 20 ISO timestamps of prompt weight."""
+    stops = [{"name": "PORTE NUOVE BELFIORE", "time": "2026-07-06T08:23:00+02:00"}]
+    stops += [{"name": f"S{i}", "time": None} for i in range(18)]
+    stops += [{"name": "ACC. DEL CIMENTO ARTOM", "time": "2026-07-06T08:34:28+02:00"}]
     full = {"journey": {"routes": [{
         "wkt": "LINESTRING(...)", "distance": 2.9, "time": "0:13:16",
         "arc": [
             {"transport": "foot", "transport_provider": None, "distance": 0.1, "desc": "a piedi 100 m"},
-            {"transport": "bus", "transport_provider": "at", "line": "57", "stops": long_stops, "desc": "linea 57"},
+            {"transport": "bus", "transport_provider": "at", "line": "57", "stops": stops, "desc": "linea 57",
+             "start_datetime": "2026-07-06T08:23:00+02:00", "end_datetime": "2026-07-06T08:34:28+02:00"},
         ],
     }]}}
     slim = slim_result_for_llm("routing", full)
     legs = slim["journey"]["legs"]
     assert [leg.get("transport") for leg in legs] == ["foot", "bus"]  # legs kept, not streets
     ride = legs[1]
-    assert len(ride["stops"]) == STOPS_LLM_KEEP and ride["stops_total"] == STOPS_LLM_KEEP + 8
+    assert "stops" not in ride and ride["stops_total"] == 20
+    assert ride["board"] == {"name": "PORTE NUOVE BELFIORE", "time": "08:23"}   # HH:MM, no date/seconds
+    assert ride["alight"] == {"name": "ACC. DEL CIMENTO ARTOM", "time": "08:34"}
+    assert "S7" not in json.dumps(slim)   # no intermediate stop reaches the prompt
+    assert "2026-07-06" not in json.dumps(slim)  # no ISO instant left to copy a date/seconds from
 
 
 # --- contract: exposed tools exist in the live probe -------------------------

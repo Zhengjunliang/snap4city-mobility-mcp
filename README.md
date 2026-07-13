@@ -155,12 +155,20 @@ same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L2
 uvicorn api:app --host 0.0.0.0 --port 8010
 ```
 
+The bridge speaks a **job + poll** protocol: `POST /advise` starts the turn and answers
+`{"job_id": ...}` immediately, then `GET /advise/{job_id}` returns `202` while the turn is
+computing and `200` with the widget JSON once it is done. A public-transport turn runs
+~50–70 s and the reverse proxy chain cuts any single request past ~60 s, so no HTTP request
+here may span a whole turn (`docs/lessons.md` L47 — heartbeat streaming does *not* work).
+
 Sanity-check the bridge without the dashboard:
 
 ```bash
 curl -s localhost:8010/health
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
+  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
+curl -s localhost:8010/advise/$JOB    # 202 {"status":"pending"} -> repeat until the JSON lands
 ```
 
 The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, nothing hardcoded); the route (`data.wkt`) is drawn on a sibling `widgetMap`. Follow-ups reuse history (e.g. *"e per una passeggiata tranquilla?"*). The dashboard front-end also sends the browser geolocation as `gps: {lat, lng}` (or `null`) with every turn — origin defaulting and nearest-candidate picking key off it. Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every bridge start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
@@ -191,7 +199,7 @@ snap4city-mobility-mcp/
 ├── uv.lock                     # exact-version lockfile (committed)
 ├── .python-version             # "3.10" (committed)
 ├── README.md                   # this file
-├── api.py                      # FastAPI bridge for the dashboard chat box (POST /advise; writes full JSON to outputs.txt)
+├── api.py                      # FastAPI bridge for the dashboard chat box (job/poll: POST /advise + GET /advise/{job_id}; writes full JSON to outputs.txt)
 ├── frontend/                   # Snap4City dashboard front-end (widgetExternalContent chat box + widgetMap)
 ├── whatif-local/               # referente whatif-router perf patch (patches/) + apply/test notes (see its README)
 ├── docs/
@@ -248,10 +256,12 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 - [ ] End-to-end advisor check via the bridge (JupyterHub — drives the LLM + both MCP servers):
   ```bash
   uvicorn api:app --host 0.0.0.0 --port 8010      # in one terminal
-  curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-    -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+  JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+    -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
+    | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
+  curl -s localhost:8010/advise/$JOB   # 202 while computing; repeat until the JSON lands
   ```
-  Expected (also appended to `outputs.txt`): `status="success"`, `request_type="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`.
+  Expected (also written to `outputs.txt`): `status="success"`, `request_type="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`.
 
 ---
 
@@ -264,6 +274,7 @@ Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/sn
 | `POST /advise` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
 | `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | Not running inside the JupyterHub (the intranet IP is reachable only from there), or the dashboard is down. Run from a JupyterHub terminal/notebook and make sure `S4C_DASHBOARD_URL` is not overridden. |
 | A `public_transport` request takes ~30–45 s | Known current state, not a client bug: the online whatif-router has not merged the `pt-router-singleton` perf patch yet, so every PT request rebuilds the PT graph (`docs/lessons.md` L42/L46). `BUS_ROUTE_TIMEOUT_S=120` covers it; sub-second once the patch is merged. Foot/car never touch the PT graph (~0.3–0.5 s measured). |
+| Dashboard chat shows *"bridge non raggiungibile"* on a long (bus) turn | The widget must be the current one: the bridge is **job + poll** now (`POST /advise` → `job_id`, then `GET /advise/{job_id}`). An old single-request widget hangs on the POST and the proxy chain cuts it at ~60 s even though the turn succeeds (`docs/lessons.md` L47). Re-paste `frontend/mobility_advisor_dashboard.html`. |
 | VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
 
 ---
@@ -298,11 +309,14 @@ Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127
 uvicorn api:app --host 0.0.0.0 --port 8010
 ```
 
-Self-check (separate terminal):
+Self-check (separate terminal) — POST starts the job, then poll it out (§7):
 
 ```bash
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
+  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
+until curl -s -o /tmp/turn.json -w '%{http_code}' localhost:8010/advise/$JOB | grep -q 200; do sleep 2; done
+head -c 300 /tmp/turn.json
 # GPS-aware turns: origin defaults to the position, categories resolve to the nearest service
 curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
   -d '{"query":"portami alla farmacia più vicina","history":[],"gps":{"lat":43.7731,"lng":11.2558}}'

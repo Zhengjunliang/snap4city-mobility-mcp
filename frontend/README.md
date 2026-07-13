@@ -51,11 +51,19 @@ Sanity-check without the dashboard:
 
 ```
 curl -s localhost:8010/health
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}'
+JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
+  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
+curl -s localhost:8010/advise/$JOB    # 202 while computing, then the widget JSON
 ```
 
-The POST returns the widget JSON `{status, request_type, data, messages}`; check that
+**Job + poll (L47)**: the POST only *starts* the turn (it answers `{job_id}` at once) and the
+widget polls `GET /advise/{job_id}` until it returns 200. A bus turn takes ~50–70 s and the
+proxy chain in front of the bridge cuts any single request past ~60 s — and heartbeat bytes do
+not help, because `jupyter-server-proxy` buffers the whole body of a non-SSE response. Never
+collapse the widget back into one long request.
+
+The collected 200 is the widget JSON `{status, request_type, data, messages}`; check that
 `data.wkt` (the LINESTRING), `data.distance_km`, `data.duration`, and `data.mode` are
 present and `messages[-1].content` is the Italian reply.
 

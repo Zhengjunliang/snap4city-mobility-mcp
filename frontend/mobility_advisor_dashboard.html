@@ -8,6 +8,11 @@ It is a natural-language chat box: the question is POSTed to the FastAPI bridge 
 which wraps run_advisor on the JupyterHub) and the reply + route come back as widget JSON
 {status, request_type, data, messages}. The reply bubble is messages[-1].content; the
 routes are data.routes (one per travel mode), drawn on a sibling widgetMap.
+JOB + POLL (L47): the bridge answers the POST with {job_id} at once and the turn is collected
+by polling GET /advise/{job_id} (202 = still computing). A public-transport turn runs ~50-70s
+and the reverse proxy chain cuts any single request past ~60s - and heartbeat streaming does
+NOT help, because jupyter-server-proxy buffers the whole body of a non-SSE response. Do not
+collapse this back into one long request (see send()).
 MULTIPLE MODES: when the user does not say walk/drive/bus, the backend routes foot AND car
 and returns data.routes. We draw one vivid line per mode (foot green, car blue, bus orange) -
 there is no primary/alternate dimming and no legend. (Every route carries start/finish icons -
@@ -272,27 +277,46 @@ lastParkingUris.push(p.uri);
 });
 } catch (e) { /* L30: addSelectorPin shape unverified; chat list still shows parking */ }
 }
-// ---- Send a turn to the bridge ------------------------------------------
-function send() {
-var query = $("#advInput").val().trim();
-if (!query) return;
-addMsg(query, "user");
-$("#advInput").val("");
-$("#advSend").prop("disabled", true);
-// Transient "thinking" bubble shown while the bridge computes; removed in always().
-var $thinking = addMsg("Sto pensando…", "bot thinking");
-// GPS first (cb fires exactly once, null on any failure), then POST the turn with it.
-getGps(function (gps) {
-$.ajax({
-url: BRIDGE_BASE + "/advise",
-type: "POST",
-contentType: "application/json",
-data: JSON.stringify({ query: query, history: history, gps: gps }),
-dataType: "json"
-}).done(function (response) {
+// ---- Send a turn to the bridge (job + poll) ------------------------------
+// The bridge does NOT answer the turn on the POST: a public-transport turn takes ~50-70s
+// (the online router rebuilds its PT graph per bus request) and the reverse proxy chain in
+// front cuts any single request past ~60s. Streaming heartbeat bytes does NOT fix that -
+// jupyter-server-proxy buffers the whole response body unless the request is an SSE one, so
+// nothing reaches the proxy before the turn ends (L47). So: POST /advise starts the job and
+// returns {job_id} at once, then we poll GET /advise/{job_id} (202 = still computing, 200 =
+// the widget JSON). Every HTTP call is sub-second, so no proxy can time it out. NEVER turn
+// this back into one long request.
+var POLL_MS = 1500;         // gap between polls
+var POLL_MAX_MS = 240000;   // give up after this (worst case: unpatched router + slow LLM)
+// Poll one job to completion. onDone gets the widget JSON, onFail a status string.
+// A bus turn is ~45 polls through the same proxy chain L47 is about, so ONE failed poll must
+// not kill the turn: anything but a 404 (the job is gone - nothing left to wait for) is retried
+// until the deadline, because the job keeps running server-side regardless.
+function pollJob(jobId, deadline, onDone, onFail) {
+function again() {
+if (Date.now() > deadline) return false;
+setTimeout(function () { pollJob(jobId, deadline, onDone, onFail); }, POLL_MS);
+return true;
+}
+$.ajax({ url: BRIDGE_BASE + "/advise/" + jobId, type: "GET", dataType: "json", cache: false })
+.done(function (response, textStatus, xhr) {
+if (xhr.status === 202) {  // still computing
+if (!again()) onFail("timeout");
+return;
+}
+onDone(response);
+})
+.fail(function (xhr, status) {
+if (xhr && xhr.status === 404) { onFail("job scaduto"); return; }  // nothing to poll anymore
+if (!again()) onFail(status || "timeout");
+});
+}
+// Render a completed turn: reply bubble + route lines + parking pins.
+function renderTurn(response) {
 if (response && response.status === "error") {
 addMsg("✗ " + (response.error || "richiesta fallita"), "err");
-} else {
+return;
+}
 history = (response && response.messages) || history;  // carry multi-turn state
 addMsg(replyOf(response), "bot");
 var data = (response && response.data) || {};
@@ -308,12 +332,48 @@ catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
 clearParkingPins();
 drawParkingPins(data.parking);
 }
-}).fail(function (xhr, status) {
-addMsg("✗ bridge non raggiungibile (" + status + "). Controlla BRIDGE_BASE / il bridge.", "err");
-}).always(function () {
+// One turn at a time: a turn now stays in flight for as long as the polling lasts (up to
+// POLL_MAX_MS), and two overlapping turns would race on `history` (the later job's messages
+// can land first) and on the bridge's per-turn debug.log. Enter must not start a second one.
+var inFlight = false;
+function send() {
+if (inFlight) return;
+var query = $("#advInput").val().trim();
+if (!query) return;
+addMsg(query, "user");
+$("#advInput").val("");
+inFlight = true;
+$("#advSend").prop("disabled", true);
+$("#advInput").prop("disabled", true);
+// Transient "thinking" bubble: stays up for the whole job (POST + polling), not just the POST.
+var $thinking = addMsg("Sto pensando…", "bot thinking");
+function finish() {
+inFlight = false;
 $thinking.remove();
 $("#advSend").prop("disabled", false);
+$("#advInput").prop("disabled", false);
 $("#advInput").focus();
+}
+function failed(status) {
+addMsg("✗ bridge non raggiungibile (" + status + "). Controlla BRIDGE_BASE / il bridge.", "err");
+finish();
+}
+// GPS first (cb fires exactly once, null on any failure), then POST the turn with it.
+getGps(function (gps) {
+$.ajax({
+url: BRIDGE_BASE + "/advise",
+type: "POST",
+contentType: "application/json",
+data: JSON.stringify({ query: query, history: history, gps: gps }),
+dataType: "json"
+}).done(function (job) {
+if (!job || !job.job_id) { failed("no job_id"); return; }
+pollJob(job.job_id, Date.now() + POLL_MAX_MS, function (response) {
+// finally: a throw inside renderTurn must not leave the box disabled forever.
+try { renderTurn(response); } finally { finish(); }
+}, failed);
+}).fail(function (xhr, status) {
+failed(status);
 });
 });
 }

@@ -201,7 +201,6 @@ async def _geocode_address_first(client: Client, args: dict[str, Any]) -> Any:
 # its audit (tool_results), so the dashboard widget still gets complete data.
 GEOCODE_LLM_KEEP = 5
 PT_LEGS_LLM_KEEP = 10
-STOPS_LLM_KEEP = 12  # per-leg stop list cap for the LLM view (full list stays in the audit)
 
 
 def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
@@ -364,6 +363,34 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _stop_view(stop: Any) -> dict[str, Any] | None:
+    """One stop as the reply needs it: name + HH:MM. The ISO date/seconds are dropped —
+    the reply must not print them anyway (L43), and they are pure prompt weight."""
+    if not isinstance(stop, dict):
+        return None
+    raw = stop.get("time")
+    hhmm = raw.split("T", 1)[1][:5] if isinstance(raw, str) and "T" in raw else None
+    return {"name": stop.get("name"), "time": hhmm}
+
+
+def _leg_boarding(leg: dict[str, Any]) -> dict[str, Any]:
+    """A journey leg with its stop list collapsed to board + alight (+ how many in total).
+
+    Where the rider gets on and off is the whole content of a ride leg for the reply; the
+    stops in between are never named. Keeping them only grew the respond prompt (a 24-stop
+    bus trip carried 24 ISO timestamps) and gave the model more rows to garble. The raw ISO
+    `start_datetime` / `end_datetime` go too: they are the board/alight times in the very
+    format the reply must NOT print (dates and seconds, L43) — no ISO instant is left in the
+    model's view to copy. Legs without stops keep their other fields. Full list: the audit."""
+    stops = leg.get("stops")
+    slim = {k: v for k, v in leg.items() if k not in ("stops", "start_datetime", "end_datetime")}
+    if isinstance(stops, list) and stops:
+        slim["board"] = _stop_view(stops[0])
+        slim["alight"] = _stop_view(stops[-1])
+        slim["stops_total"] = len(stops)
+    return slim
+
+
 def slim_result_for_llm(name: str, result: Any) -> Any:
     """Compact a tool result for the LLM context. Full fidelity stays in the audit;
     this only shrinks what the model re-reads each turn. Errors and unknown shapes
@@ -397,14 +424,11 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
             # A change of transport (a public-transport journey: walk + ride
             # segments). The model needs legs to narrate the trip, not a flat street
             # list. Single-group journeys (foot, car, or a PT request satisfied
-            # entirely on foot) keep the street view below. A ride leg's `stops` is
-            # capped (full list stays in the audit) so the LLM view stays slim.
-            kept = []
-            for leg in legs[:PT_LEGS_LLM_KEEP]:
-                stops = leg.get("stops")
-                if isinstance(stops, list) and len(stops) > STOPS_LLM_KEEP:
-                    leg = {**leg, "stops": stops[:STOPS_LLM_KEEP], "stops_total": len(stops)}
-                kept.append(leg)
+            # entirely on foot) keep the street view below. A ride leg is cut down to
+            # its BOARD and ALIGHT stop (see _leg_boarding): the intermediate stops the
+            # bus rolls through are noise the reply never uses — they only inflate the
+            # respond prompt (and give the model more to misread). Full list: the audit.
+            kept = [_leg_boarding(leg) for leg in legs[:PT_LEGS_LLM_KEEP]]
             return {"journey": {**base, "legs": kept}}
         streets: list[str] = []
         for arc in first.get("arc") or []:
