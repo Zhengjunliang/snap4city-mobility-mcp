@@ -84,6 +84,10 @@ Two environment requirements, both **outside this file's control**:
 - Public transport (`bus`) is wired via the backend `bus_route` tool (What-If GraphHopper,
   `docs/lessons.md` L19/L34). A walking-only itinerary (short trip — walking beats any bus,
   L39) comes back relabeled as a foot route, so the map draws a fast green walking line.
-  For a real bus route the map still re-routes `type:"bus"` itself against the online
-  whatif-router. The GTFS is deployed online (2026-07-10) so the line draws, but each
-  request takes ~30-40 s until the referente merges the perf patch (L39).
+- Trajectories are drawn through the widgetMap's `drawMethod:"fetch"` branch (L44): the widget
+  fetches the router itself with **no timeout** (the default Leaflet-Routing-Machine branch
+  has a hard 30 s timeout that killed every bus line while the online router runs unpatched).
+  A bus trajectory carries `multimodal` line colors + a stop icon, so the widget paints
+  walking legs green, the ride leg orange, and pins the board/alight stops — Gea-Night-style.
+  Until the referente merges the perf patch the bus line appears ~30-45 s after the reply
+  (the widget's own router request); with the patch it drops to ~2 s.

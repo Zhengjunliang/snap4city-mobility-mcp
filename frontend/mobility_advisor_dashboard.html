@@ -13,20 +13,24 @@ car and public transport and returns data.routes. We draw one vivid line per mod
 car blue, bus orange) - there is no primary/alternate dimming and no legend. (Every route
 carries start/finish icons - omitting them on some trajectories crashed the widget, so the
 markers overlap at the shared O/D.) When only one route comes back (mode specified, or a mode
-empty in a ZTL / very short trip / no PT for that OD), a single line is drawn. (The bus line is
-a single vehicle=bus road line; a true foot+bus multimodal split is deferred - no per-leg stop
-coordinates are available. Line width is also left untouched - an unsupported field crashes
-the widget, same L30 lesson; revisit after a real-machine test.)
+empty in a ZTL / very short trip / no PT for that OD), a single line is drawn. Bus routes draw
+as a real multimodal split: walking legs in the foot color, the ride leg in the bus color, and
+a stop pin at the board/alight points (the widgetMap does the split, see below).
 HOW THE MAP DRAWS: the widgetMap's addCustomTrajectory does NOT paint a raw polyline - it
-routes through waypoints with Snap4City's own graphhopper. We feed the precise geocoded
-origin/destination (data.origin/data.destination) as the two waypoints - pinning the markers on
-the real civic address instead of the routing service's road-snapped WKT endpoint (which drifts
-~27 m up the street); the WKT endpoints are only a fallback. Each waypoint carries a graphhopper
-mode whose `type` is the front-end vehicle name (foot/car/bus, NOT the MCP routetype); the map
-routes between them.
+routes between the waypoints itself. We feed the precise geocoded origin/destination
+(data.origin/data.destination) as the two waypoints - pinning the markers on the real civic
+address instead of the routing service's road-snapped WKT endpoint (which drifts ~27 m up the
+street); the WKT endpoints are only a fallback. Every trajectory carries drawMethod:"fetch",
+selecting the widget's fetch branch (upstream dashboard-builder widgetMap.php, added 2025-05):
+the widget fetches Snap4City's graphhopper itself with NO timeout - unlike the default branch
+(Leaflet Routing Machine, hard 30s timeout) where bus lines always timed out while the online
+whatif-router runs unpatched (~30-45s per PT request, L44). The line appears when the response
+lands (~2s once the referente deploys the perf patch). A bus trajectory also carries
+`multimodal` (lineColors + stop icon): the widget splits the returned path on the pt leg's
+instruction `interval`, colors walking/ride legs separately and pins the board/alight stops.
 Per-point `mode` is required and `type` must be foot/car/bus or the map crashes in
-addCustomTrajectoryToMap. (Feeding the full downsampled WKT as many waypoints + a
-drawMethod:"custom" also crashed it - 2 endpoints, no drawMethod, is the shape that works.)
+addCustomTrajectoryToMap; every point must also carry an `icon` field (empty string = no
+marker) - the old L30 "drawMethod crash" was missing icon fields, not the drawMethod itself.
 PARKING (car routes): data.parking lists free car parks near the destination; we show a compact
 list under the reply and plot each on the map via the widgetMap "addSelectorPin" event (one per
 serviceUri, Snap4City's own pin pattern). The pin payload + clear event are real-machine-calibrated
@@ -46,8 +50,8 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <style>
-.adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; padding: 8px; display: flex; flex-direction: column; position: absolute; top: 0; right: 0; bottom: 0; left: 0; box-sizing: border-box; }
-.adv h3 { margin: 0 0 8px; font-size: 15px; color: #f5c518; }
+html, body { margin: 0; background: #1b2a4d; }
+.adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; background: #1b2a4d; padding: 8px; display: flex; flex-direction: column; position: absolute; top: 0; right: 0; bottom: 0; left: 0; box-sizing: border-box; }
 .adv #advChat { flex: 1; overflow-y: auto; min-height: 0; padding-right: 4px; }
 .adv .msg { margin: 6px 0; padding: 7px 10px; border-radius: 10px; font-size: 13px; line-height: 1.35; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
 .adv .msg.user { background: #1f2a44; border: 1px solid #f5c518; color: #f5c518; margin-left: auto; }
@@ -63,7 +67,6 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 </head>
 <body>
 <div class="adv">
-<h3>Mobility Advisor</h3>
 <div id="advChat"></div>
 <div class="row">
 <input id="advInput" type="text" placeholder='es. "da Piazza del Duomo a Santa Croce a piedi"' autocomplete="off">
@@ -183,16 +186,18 @@ passedData: [{ id: id, eventType: "Trajectory" }]
 });
 });
 }
-// Build one trajectory object for a route by feeding two endpoints as graphhopper waypoints
-// and letting the widgetMap route between them (the native What-If pattern, proven to draw).
-// The endpoints are the precise geocoded origin/destination (markers land on the real civic
-// address); the WKT endpoints are only a fallback. Feeding the full downsampled WKT as 12
-// waypoints + drawMethod:"custom" crashed the widget's addCustomTrajectoryToMap (Cannot read
-// ... 'length'); 2 endpoints + no drawMethod is the shape that works. color is the line color
-// (one vivid shade per mode). EVERY point must carry an `icon` (start on the first, finish on
-// the last) - omitting it on some trajectories crashed addCustomTrajectoryToMap (Cannot read
-// ... 'length', the L30 signature), so all routes get icons; since they share the same O/D the
-// markers overlap. Returns the object - the caller batches all routes into ONE event (see
+// Build one trajectory object for a route: two endpoint waypoints + drawMethod:"fetch", the
+// widget's no-timeout fetch branch (the 'default' branch is Leaflet Routing Machine with a
+// hard 30s timeout - bus requests to the unpatched online router take ~30-45s and always
+// timed out there, L44). The endpoints are the precise geocoded origin/destination (markers
+// land on the real civic address); the WKT endpoints are only a fallback. In the fetch branch
+// the per-point `color` ARRAY is consumed for real: color[0] styles the drawn line. A bus
+// trajectory adds `multimodal` (lineColors + stop icon): the widget splits the fetched path
+// on the pt leg's instruction interval, colors walking/ride legs separately and pins the
+// board/alight stops; foot/car must NOT carry it (a path with no pt leg would be painted in
+// the pedestrian color - wrong for car). EVERY point must carry an `icon` field (empty string
+// = no marker) - the L30 crash signature (Cannot read ... 'length') was a missing icon field,
+// not the drawMethod. Returns the object - the caller batches all routes into ONE event (see
 // drawRoutes).
 function buildTraj(route, color, origin, destination) {
 // Prefer the precise geocoded endpoints (origin/destination from the backend, pinned on the
@@ -221,17 +226,18 @@ if (i === 0) pt.icon = ICONS.start;
 else if (i === coords.length - 1) pt.icon = ICONS.finish;
 return pt;
 });
-return {
+var traj = {
 id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle),
 eventType: "Trajectory",
+drawMethod: "fetch",
 returnInstructionTrigger: "returnedTraj",
 multipleLines: false,
 points: points
 };
-// NOTE: do NOT add a trajectory-level `color` field here - it ALSO crashed the widget
-// (same L30 signature). The line color is widget-default; the real per-line color field is
-// unknown and must be captured from a working colored-trajectory payload (DevTools) before
-// being fed - guessing crashes.
+if (vehicle === "bus") {
+traj.multimodal = { lineColors: { pedestrian: MODE_COLORS.foot, bus: MODE_COLORS.bus, modal: MODE_COLORS.bus }, icon: ICON_BASE + "IntermediateStopOfRoute.png" };
+}
+return traj;
 }
 // Draw every route from the backend, one vivid line per mode (foot green / car blue / bus
 // orange) - no primary/alternate distinction, no dimming. ALL trajectories go in ONE
