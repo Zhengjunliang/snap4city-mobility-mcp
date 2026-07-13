@@ -2,8 +2,9 @@
 
 Backend reference: field-by-field notes from live-probing the km4city endpoints behind
 referente's remote MCP server. §1 / §2 cover the underlying km4city `/location/` +
-`/shortestpath` semantics (baseline); the actual remote tool signatures the advisor
-calls (bare names, since a single-server config adds no prefix) live in §3.
+`/shortestpath` semantics (§2 documents the retired remote `routing` tool — kept as bug
+evidence); the actual remote tool signatures the advisor calls (bare names, since a
+single-server config adds no prefix) live in §3.
 
 Spec source: `ascapi-openapiv3.json` (OAS3, mirrored at https://www.km4city.org/swagger/external/ascapi-openapiv3.json).
 Backend base URL: `https://www.snap4city.org/superservicemap/api/v1/` (what the remote tools call internally; we don't touch it directly).
@@ -46,6 +47,8 @@ Backend base URL: `https://www.snap4city.org/superservicemap/api/v1/` (what the 
 ---
 
 ## §2. Routing: `routing` / km4city `/shortestpath`
+
+*Storico — il tool remoto `routing` è stato dismesso dal client il 2026-07-13 (tutte le modalità ora passano dal router What-If locale, lessons L46); la sezione resta come evidenza dei bug segnalati al referente.*
 
 ### Query
 
@@ -109,16 +112,16 @@ Names appear **without server prefix** under a single-server config (as we use).
 
 ### Tools the advisor drives
 
-Remote (referente server); forward geocoding and `bus_route` instead go to the LOCAL MCP server (mcp_server.py, L28/L29/L19):
+Remote (referente server); forward geocoding and routing (`route`, all modes) instead go to the LOCAL MCP server (mcp_server.py, L28/L29/L46):
 
 | Tool | Required input | Notable optional | Purpose |
 |---|---|---|---|
-| `routing` | `startlatitude` + `startlongitude` + `endlatitude` + `endlongitude` (float) | `routetype` (default `car`; no bicycle), `startdatetime` | Best route between two GPS points (§2) |
+| `routing` *(dismesso 2026-07-13 — sostituito dal tool locale `route`)* | `startlatitude` + `startlongitude` + `endlatitude` + `endlongitude` (float) | `routetype` (default `car`; no bicycle), `startdatetime` | Best route between two GPS points (§2, storico) |
 | `coordinates_to_address` | `latitude` + `longitude` | — | Reverse geocode; labels a GPS-defaulted origin for the reply |
 | `service_search_near_gps_position` | `latitude` + `longitude` | `categories`, `maxdistance` (km), `maxresults` | Nearest-category POIs: car parks + "farmacia più vicina" destinations |
 | `service_info_dev` | `serviceUri` | `fromTime` | Latest realtime free-spaces for a car park |
 
-Both routing/geocoding accept an optional `authentication` (Bearer); the probe surfaced no token requirement, so the advisor omits it (public km4city backend).
+The probed tools accept an optional `authentication` (Bearer); the probe surfaced no token requirement, so the advisor omits it (public km4city backend).
 
 ### Other native tools (not used by the orchestrator)
 
@@ -128,13 +131,14 @@ Both routing/geocoding accept an optional `authentication` (Bearer); the probe s
 
 ### `routing` failure shapes observed
 
-- **Shape A (top-level empty wrap)**: `{"error": ""}`, no `journey`. Causes: a short-window cold-start stale (transient, clears ≥ 5 s later), or a stable server-side wrapper bug (car-in-ZTL, and in fact all car / public_transport requests; retries don't clear).
+*Storico — vale per il tool remoto `routing`, dismesso dal client il 2026-07-13 (L46); conservato come evidenza dei bug segnalati al referente.*
+
+- **Shape A (top-level empty wrap)**: `{"error": ""}`, no `journey`. Causes: a short-window cold-start stale (transient, clears ≥ 5 s later), or a stable server-side wrapper bug for car-in-ZTL destinations (retries don't clear). The blanket car failure this used to describe was fixed server-side on 2026-06-15 (lessons L19); public_transport never returned transit at all — one of the bugs behind the tool's retirement in favour of the local `route` tool.
 - **Shape B (km4city envelope, negative code)**: `journey.routes` possibly empty + `response.error_code = "-N"` (`-1` wrapper internal, `-2` route not found).
 - **Shape C (empty routes, success envelope)**: `error_code = "0"` but `journey.routes = []` (the graph search found no path, e.g. car in a pedestrian zone). Surfaced as `"no route found (empty routes list)"`.
 - **Shape D (zero-distance route with real geometry)**: success envelope, `routes[0]` carries a plausible multi-point WKT but `distance = 0`, `time = "00:00:00"`, `eta` = the call time (live 2026-07-10, `routetype=car`, short intra-Florence OD). Surfaced as `"routing failed: zero-distance route (server-side data bug)"` with the `service_empty_try_foot_or_later` hint.
 
 ### Open questions (carry forward to referente)
 
-- `routing` (car) can return a **zero-distance route**: real WKT polyline but `distance=0`, `time=00:00:00`, `eta` = call time (shape D above, 2026-07-10). Same family as the empty-body bug? Client fails the mode rather than telling the user "0 km".
-- Will referente fix the car / public_transport empty-body bug? `routing` returns `{"error": ""}` for car (even a drivable non-ZTL destination) and public_transport (even with `startdatetime`), while foot_* work. This is server-side.
+- *(storico — tool `routing` dismesso 2026-07-13)* `routing` (car) can return a **zero-distance route**: real WKT polyline but `distance=0`, `time=00:00:00`, `eta` = call time (shape D above, 2026-07-10). The client failed the mode rather than telling the user "0 km".
 - SuperServiceMap (his backend, `www.snap4city.org/superservicemap/api/v1`): ranking is broken ("via zara firenze" ranks a Maastricht bus stop first, the L28 failure mode), federated `/shortestpath` 500s, and Brescia city has no data despite the GardaLake federation (Sirmione only). Which regions are actually supported, and will the ranking be fixed? (Client can switch via `S4C_SERVICEMAP_BASE` once it is.)

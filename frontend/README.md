@@ -5,21 +5,24 @@ A natural-language **chat box** `widgetExternalContent` that asks the FastAPI br
 sibling `widgetMap`. The backend is the brain: it understands the question, geocodes, and
 computes the route (WKT + distance/ETA); the front-end renders the reply and the line.
 
-## How the map draws the route (Step-0 finding)
+## How the map draws the route
 
-The widgetMap's `addCustomTrajectory` does **not** paint a raw polyline — it routes through
-waypoints with Snap4City's own **graphhopper**. So the backend route WKT is parsed,
-downsampled to ~12 vertices, and fed as waypoints with a graphhopper `mode`; the map traces
-our route through them (same engine, so the line matches the backend route).
+Every route goes through the widgetMap's **manual** branch of `addCustomTrajectory`
+(per-point `mode.routing.manual`): the widget just connects the given points with
+straight segments, so the front end feeds it the backend's own route geometry and the
+map **never calls a router** — the line appears together with the reply, straight from
+the `/advise` response (`docs/lessons.md` L44/L46). A bus route ships its walk/ride
+split as per-leg geometry (`data.routes[].legs`, cut by the backend from the single
+router response); foot/car draw the whole route WKT as one leg. Each segment takes the
+current point's `color` (a string); a point's non-empty `icon` becomes a marker —
+start/finish flags on the precise geocoded origin/destination, the Gea-Night bus pin
+(`TransferServiceAndRenting_Urban_bus.png`) on the board/alight vertices. (The ride
+shape is stop-to-stop straight lines: the GTFS carries no shapes.)
 
-Two traps that cost a debugging round (now encoded in the code + `docs/lessons.md`):
-
-- Each point's `mode.routing.graphhopper.type` **must** be the front-end vehicle name
-  `foot` / `car` / `bus` — **not** the MCP routetype `foot_shortest`. A wrong value makes
-  graphhopper return nothing and the map crashes in `addCustomTrajectoryToMap` (`Cannot
-  read properties of undefined (reading 'length')`).
-- Each point needs a `mode` (omitting it crashes the same way). Icons go on the first/last
-  point only.
+One trap that cost a debugging round (now encoded in the code + `docs/lessons.md` L30/L44):
+every point must carry `mode` and an `icon` field (empty string = no marker) — a missing
+one crashes the map in `addCustomTrajectoryToMap` (`Cannot read properties of undefined
+(reading 'length')`).
 
 ## File
 
@@ -36,10 +39,12 @@ Two traps that cost a debugging round (now encoded in the code + `docs/lessons.m
 
 ## Run the bridge (JupyterHub)
 
-The bridge needs Llama4 + the MCP server, both reachable only on the JupyterHub:
+The bridge needs Llama4 + the MCP servers, all reachable only on the JupyterHub. Start
+the local MCP server first (it serves geocoding and ALL routing — the `route` tool):
 
 ```
-uvicorn api:app --host 0.0.0.0 --port 8010
+python -m snap4city_mobility_mcp.mcp_server   # :8020, terminal 1
+uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2
 ```
 
 Sanity-check without the dashboard:
@@ -51,13 +56,13 @@ curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
 ```
 
 The POST returns the widget JSON `{status, request_type, data, messages}`; check that
-`data.wkt` (the LINESTRING), `data.distance_km`, `data.eta`, and `data.mode` are present
-and `messages[-1].content` is the Italian reply.
+`data.wkt` (the LINESTRING), `data.distance_km`, `data.duration`, and `data.mode` are
+present and `messages[-1].content` is the Italian reply.
 
-> **Browser → bridge reachability is still open.** `jupyter-server-proxy` is not installed
-> (and crashed the server once), so this round is curl-only. Decide between installing
-> server-proxy or a same-origin proxy before wiring the dashboard end-to-end, minding HTTPS
-> mixed-content / CORS. CORS in `api.py` is dev-permissive (`*`) and must be tightened.
+The browser reaches the bridge same-origin through `jupyter-server-proxy`
+(`BRIDGE_BASE = https://www.snap4city.org/jupyterhub/user/<account>/proxy/8010`, see
+`docs/lessons.md` L27/L28). CORS in `api.py` is dev-permissive (`*`) and should be
+tightened for a production deployment.
 
 ## GPS (near-me)
 
@@ -81,16 +86,8 @@ Two environment requirements, both **outside this file's control**:
 
 - The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).
 - Multi-turn: the front-end keeps `response.messages` and sends it back as `history`.
-- Public transport (`bus`) is wired via the backend `bus_route` tool (What-If GraphHopper,
-  `docs/lessons.md` L19/L34). A walking-only itinerary (short trip — walking beats any bus,
-  L39) comes back relabeled as a foot route, so the map draws a fast green walking line.
-- A bus route ships its walk/ride split as per-leg geometry (`data.routes[].legs`, cut by
-  the backend from the ONE router response, L44): the front end feeds it to the widgetMap's
-  **manual** branch, which just connects the given points — walking legs green, ride leg
-  orange, ServiceMap bus-stop pins at the board/alight vertices — so the line appears
-  **together with the reply**, zero extra router calls, patched or not. (The ride shape is
-  stop-to-stop straight lines: the GTFS carries no shapes.) Foot/car (and a legless bus
-  from an older backend) still go through the `drawMethod:"fetch"` branch: the widget
-  re-fetches the router itself with no timeout (the default Leaflet-Routing-Machine branch
-  has a hard 30 s timeout that killed every bus line while the online router runs
-  unpatched, L44).
+- All three modes are routed by the backend's local `route` tool (What-If GraphHopper,
+  `docs/lessons.md` L19/L46) and drawn from its geometry — walking green, car blue, bus
+  ride orange with bus pins at the board/alight stops. A walking-only bus itinerary
+  (short trip — walking beats any bus, L39) comes back relabeled as a foot route, so the
+  map draws a plain green walking line.

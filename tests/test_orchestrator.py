@@ -1,7 +1,7 @@
 """Unit tests for the deterministic graph nodes (orchestrator.py).
 
 Lean core suite: one happy path per flow + one guard per documented lesson
-(L8 car-ZTL, L17 POI ranking, L18 missing-slot ask, L19 service-error vs ZTL).
+(L17 POI ranking, L18 missing-slot ask, L39 PT walking degrade, L43 dest anchoring).
 """
 import json
 
@@ -95,11 +95,10 @@ def _fc_with_addresses(*entries) -> dict:
 
 
 def _journey(distance=1.83, routes=None) -> dict:
-    """Server `routing` payload shape (journey + km4city success envelope)."""
+    """The local `route` tool's payload shape: {"journey": {"routes": [...]}}."""
     if routes is None:
-        routes = [{"wkt": "LINESTRING(1 2,3 4)", "distance": distance, "eta": "15:59:09", "time": "00:23:18"}]
-    return {"journey": {"routes": routes, "source_node": "s", "destination_node": "d"},
-            "response": {"error_code": "0"}}
+        routes = [{"wkt": "LINESTRING(1 2,3 4)", "distance": distance, "time": "00:23:18"}]
+    return {"journey": {"routes": routes}}
 
 
 class _RaisingLLM:
@@ -114,14 +113,14 @@ class _RaisingLLM:
 async def test_understand_parses_slots(make_llm):
     llm = make_llm([_slots_response(
         '{"request_type":"journey","origin_text":"Duomo",'
-        '"destination_text":"Santa Croce","destination_category":"","mode":"foot_shortest"}'
+        '"destination_text":"Santa Croce","destination_category":"","mode":"foot"}'
     )])
     out = await understand(
         {"messages": [{"role": "user", "content": "from Duomo to Santa Croce on foot"}]}, llm=llm
     )
     assert out["intent"] == "route"  # journey folded into the internal route intent
     assert out["slots"]["origin_text"] == "Duomo"
-    assert out["slots"]["mode"] == "foot_shortest"
+    assert out["slots"]["mode"] == "foot"
 
 
 def test_request_to_intent():
@@ -175,15 +174,16 @@ async def test_execute_route_success(make_client, make_result):
     ])
     # City-named searches resolve on the address pass alone (named-city subset), so one
     # geocode call per endpoint; a bare place name would trigger the POI fallback pass too.
-    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "foot_shortest"}
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "foot"}
     out = await execute({"slots": slots}, client=client)
     assert out["unsupported"] is False
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["address_search_location", "address_search_location", "routing"]
-    # routing got [lng,lat] mapped to the right lat/lng fields
+    # the local route tool got [lng,lat] mapped to the right lat/lng fields + the vehicle
     route_args = json.loads(out["tool_results"][-1]["args"])
-    assert route_args["startlatitude"] == 43.77 and route_args["startlongitude"] == 11.24
-    assert route_args["routetype"] == "foot_shortest"
+    assert route_args["start_latitude"] == 43.77 and route_args["start_longitude"] == 11.24
+    assert route_args["routetype"] == "foot" and route_args["vehicle"] == "foot"
+    assert client.calls[-1][0] == "route"
 
 
 async def test_execute_unsupported_intent(make_client):
@@ -214,13 +214,13 @@ async def test_execute_gps_default_origin(make_client, make_result):
         make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass (no city named)
         make_result(structured=_journey()),                           # routing
     ])
-    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot"}
     out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
     assert out["unsupported"] is False
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["coordinates_to_address", "address_search_location", "routing"]
     route_args = json.loads(out["tool_results"][-1]["args"])
-    assert route_args["startlatitude"] == 43.7731 and route_args["startlongitude"] == 11.2558
+    assert route_args["start_latitude"] == 43.7731 and route_args["start_longitude"] == 11.2558
     assert out["endpoints"]["origin"] == {"lat": 43.7731, "lng": 11.2558}
 
 
@@ -233,7 +233,7 @@ async def test_execute_gps_default_origin_reverse_failure_not_audited(make_clien
         make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
         make_result(structured=_journey()),                           # routing
     ])
-    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot_shortest"}
+    slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot"}
     out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["address_search_location", "routing"]
@@ -251,7 +251,7 @@ async def test_execute_category_destination_uses_near_tool(make_client, make_res
         make_result(structured=_journey()),                           # routing
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "farmacia",
-             "destination_category": "Pharmacy", "mode": "foot_shortest"}
+             "destination_category": "Pharmacy", "mode": "foot"}
     out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["address_search_location", "service_search_near_gps_position", "routing"]
@@ -260,7 +260,7 @@ async def test_execute_category_destination_uses_near_tool(make_client, make_res
     assert near_args["latitude"] == 43.7731 and near_args["longitude"] == 11.2558
     assert near_args["maxdistance"] == 0.5  # first rung of the widening ladder
     route_args = json.loads(out["tool_results"][-1]["args"])
-    assert route_args["endlatitude"] == 43.7735 and route_args["endlongitude"] == 11.2546
+    assert route_args["end_latitude"] == 43.7735 and route_args["end_longitude"] == 11.2546
     assert out["endpoints"]["destination"] == {"lat": 43.7735, "lng": 11.2546}
 
 
@@ -279,10 +279,10 @@ async def test_execute_dest_geocode_anchors_to_origin(make_client, make_result):
         make_result(structured=_journey()),                          # routing
     ])
     slots = {"intent": "route", "origin_text": "via Mortuli 40, Firenze",
-             "destination_text": "via Pisana 166", "mode": "foot_shortest"}
+             "destination_text": "via Pisana 166", "mode": "foot"}
     out = await execute({"slots": slots}, client=client)
     route_args = json.loads(out["tool_results"][-1]["args"])
-    assert route_args["endlatitude"] == 43.7747 and route_args["endlongitude"] == 11.2216
+    assert route_args["end_latitude"] == 43.7747 and route_args["end_longitude"] == 11.2216
 
 
 async def test_execute_far_gps_named_city_still_routes(make_client, make_result):
@@ -296,14 +296,14 @@ async def test_execute_far_gps_named_city_still_routes(make_client, make_result)
         make_result(structured=_journey()),                          # routing
     ])
     slots = {"intent": "route", "origin_text": "via Pisana 157, Firenze",
-             "destination_text": "via Barna 7, Firenze", "mode": "foot_shortest"}
+             "destination_text": "via Barna 7, Firenze", "mode": "foot"}
     out = await execute({"slots": slots, "user_gps": {"lat": 45.5308, "lng": 10.1828}}, client=client)
     assert out["unsupported"] is False
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["address_search_location", "address_search_location", "routing"]
     assert all("error" not in e["result"] for e in out["tool_results"][:2])
     route_args = json.loads(out["tool_results"][-1]["args"])
-    assert route_args["startlatitude"] == 43.77 and route_args["endlatitude"] == 43.76
+    assert route_args["start_latitude"] == 43.77 and route_args["end_latitude"] == 43.76
 
 
 async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, make_result):
@@ -320,7 +320,7 @@ async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, 
         make_result(structured=_journey()),                           # routing
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "farmacia",
-             "destination_category": "Pharmacy", "mode": "foot_shortest"}
+             "destination_category": "Pharmacy", "mode": "foot"}
     out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
     assert len([n for n, _ in client.calls if n == "service_search_near_gps_position"]) == 3
     names = [e["name"] for e in out["tool_results"]]
@@ -329,45 +329,18 @@ async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, 
     assert out["endpoints"]["destination"] == {"lat": 43.76, "lng": 11.26}
 
 
-async def test_execute_foot_quiet_falls_back_to_foot_shortest(make_client, make_result):
+async def test_execute_car_error_drops_parking(make_client, make_result):
+    """A failed car route means nowhere to drive: the parking search (fetched
+    concurrently to add no wall-clock) is discarded, never surfaced or enriched."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey(routes=[])),                 # foot_quiet → empty routes error
-        make_result(structured=_journey()),                          # foot_shortest → success
-    ])
-    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "foot_quiet"}
-    out = await execute({"slots": slots}, client=client)
-    routings = [e for e in out["tool_results"] if e["name"] == "routing"]
-    assert len(routings) == 2
-    assert json.loads(routings[0]["args"])["routetype"] == "foot_quiet"
-    assert json.loads(routings[1]["args"])["routetype"] == "foot_shortest"
-    # last routing succeeded → widget data has the journey
-    assert _extract_data(out["tool_results"])["distance_km"] == 1.83
-
-
-async def test_execute_car_bare_error_burns_ladder_only(make_client, make_result, monkeypatch):
-    """L8: the stable car-ZTL wrapper bug returns bare {"error": ""} — the stale
-    ladder runs its 3 attempts but NO foot-style profile fallback follows."""
-    async def _noop(*a, **k):
-        return None
-
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    stale = {"error": ""}
-    client = make_client([
-        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
-        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=stale),                               # car #1
-        make_result(structured=stale),                               # car #2
-        make_result(structured=stale),                               # car #3
-        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (fetched concurrently, then discarded)
+        make_result(structured={"error": "whatif-router returned no car path"}),  # route (car)
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (discarded)
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
-    assert len([n for n, _ in client.calls if n == "routing"]) == 3  # ladder only, no 4th probe
     assert "route_error" in _extract_data(out["tool_results"])
-    # car route failed → nowhere to drive, so parking is dropped (fetched concurrently but not
-    # surfaced) and never enriched (no service_info_dev call).
     assert out["parking"] == []
     assert not any(n == "service_info_dev" for n, _ in client.calls)
 
@@ -391,42 +364,43 @@ def test_extract_data_orders_routes_fastest_first():
     """No mode given → both routes returned; routes is fastest-first and the top-level
     mirrors the faster one (car here: 8 min beats 20 min on foot)."""
     results = [
-        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
     ]
     data = _extract_data(results)
-    assert [r["mode"] for r in data["routes"]] == ["car", "foot_shortest"]
+    assert [r["mode"] for r in data["routes"]] == ["car", "foot"]
     assert data["mode"] == "car" and data["wkt"] == "LINESTRING(0 0,2 2)"
 
 
 def test_extract_data_drops_empty_car_keeps_foot():
-    """car empty (ZTL / too close) → a single foot route, no route_error."""
+    """car failed (no path / router error) → a single foot route, no route_error."""
     results = [
-        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
-        _routing_entry("car", error="no route found (empty routes list)"),
+        _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("car", error="whatif-router returned no car path"),
     ]
     data = _extract_data(results)
-    assert len(data["routes"]) == 1 and data["routes"][0]["mode"] == "foot_shortest"
+    assert len(data["routes"]) == 1 and data["routes"][0]["mode"] == "foot"
     assert "route_error" not in data
 
 
 def test_extract_data_all_fail_reports_earliest_error():
     results = [
-        _routing_entry("foot_shortest", error="empty response from routing service"),
-        _routing_entry("car", error="no route found (empty routes list)"),
+        _routing_entry("foot", error="whatif-router foot route failed: TimeoutError: x"),
+        _routing_entry("car", error="whatif-router returned no car path"),
     ]
     data = _extract_data(results)
-    assert data.get("route_error") == "empty response from routing service"  # the user's first mode
+    assert data.get("route_error") == "whatif-router foot route failed: TimeoutError: x"  # the user's first mode
     assert "routes" not in data
 
 
 async def test_execute_unspecified_mode_routes_foot_car_only(make_client, make_result):
     """Empty mode → execute routes walking and driving only. Public transport is NOT run by
-    default (the What-If bus router is ~25 s); it runs only on an explicit public_transport mode."""
+    default (vehicle=bus reloads the PT graph, ~30-45s until the singleton patch lands);
+    it runs only on an explicit public_transport mode."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=_journey()),                          # foot_shortest
+        make_result(structured=_journey()),                          # foot
         make_result(structured=_journey()),                          # car
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
         make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
@@ -434,15 +408,15 @@ async def test_execute_unspecified_mode_routes_foot_car_only(make_client, make_r
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
-    assert routetypes == ["foot_shortest", "car"]  # no public_transport by default
+    assert routetypes == ["foot", "car"]  # no public_transport by default
     # car is among the modes → the parking entry is appended after all routing entries.
     assert out["tool_results"][-1]["name"] == "service_search_near_gps_position"
     assert out["parking"][0]["free_spaces"] == 5
 
 
-async def test_execute_public_transport_routes_via_bus_route(make_client, make_result):
-    """public_transport routes through the local `bus_route` tool (What-If router), NOT the
-    transit-blind MCP routing; a returned bus journey becomes a drawable PT route."""
+async def test_execute_public_transport_routes_vehicle_bus(make_client, make_result):
+    """public_transport goes to the local `route` tool as vehicle=bus with a GTFS
+    startdatetime; a returned bus journey becomes a drawable PT route."""
     bus_journey = {"journey": {"routes": [{
         "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38,
         "arc": [{"transport": "bus", "transport_provider": "at - Firenze urbano",
@@ -451,12 +425,15 @@ async def test_execute_public_transport_routes_via_bus_route(make_client, make_r
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
-        make_result(structured=bus_journey),                         # bus_route (local tool)
+        make_result(structured=bus_journey),                         # route (local tool, vehicle=bus)
     ])
     slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "public_transport"}
     out = await execute({"slots": slots}, client=client)
-    # PT went to bus_route, not MCP routing; the audit entry is still tagged public_transport.
-    assert client.calls[-1][0] == "bus_route"
+    # PT went to the local route tool as vehicle=bus (+ timetable window); the audit
+    # entry is still tagged public_transport.
+    name, sent = client.calls[-1]
+    assert name == "route"
+    assert sent["vehicle"] == "bus" and sent["startdatetime"]
     routings = [e for e in out["tool_results"] if e["name"] == "routing"]
     assert len(routings) == 1 and json.loads(routings[0]["args"])["routetype"] == "public_transport"
     # the bus journey (real ride leg) survives _extract_data as a drawable PT route.
@@ -468,7 +445,7 @@ async def test_execute_public_transport_routes_via_bus_route(make_client, make_r
 def test_extract_data_collects_three_modes():
     """foot+car+real-PT all succeed → routes has all three, keyed to distinct vehicles."""
     results = [
-        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
         _routing_entry("public_transport", route={
             "wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00",
@@ -476,21 +453,21 @@ def test_extract_data_collects_three_modes():
         }),
     ]
     data = _extract_data(results)
-    assert {r["mode"] for r in data["routes"]} == {"foot_shortest", "car", "public_transport"}
+    assert {r["mode"] for r in data["routes"]} == {"foot", "car", "public_transport"}
     assert len(data["routes"]) == 3
 
 
 def test_extract_data_forwards_pt_legs():
-    """bus_route's per-leg geometry rides along into the widget route (the dashboard draws
-    the walk/ride split + stop pins from it, no second router call, L44); routes without
-    it stay bare."""
+    """The route tool's per-leg geometry rides along into the widget route (the dashboard
+    draws the walk/ride split + stop pins from it, no second router call, L44); routes
+    without it stay bare."""
     legs = [
         {"type": "foot", "wkt": "LINESTRING(0 0,1 1)"},
         {"type": "bus", "wkt": "LINESTRING(1 1,2 2)"},
         {"type": "foot", "wkt": "LINESTRING(2 2,3 3)"},
     ]
     results = [
-        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("public_transport", route={
             "wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00",
             "arc": [{"transport": "foot"}, {"transport": "bus"}],  # a real ride leg
@@ -500,7 +477,7 @@ def test_extract_data_forwards_pt_legs():
     data = _extract_data(results)
     by_mode = {r["mode"]: r for r in data["routes"]}
     assert by_mode["public_transport"]["legs"] == legs
-    assert "legs" not in by_mode["foot_shortest"]
+    assert "legs" not in by_mode["foot"]
 
 
 # --- parking -----------------------------------------------------------------
@@ -540,7 +517,6 @@ def test_parse_service_features_reads_nested_service_envelope():
     ]}}
     spots = mcp_tools.parse_service_features(nested)
     assert spots == [{"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": None}]
-    assert mcp_tools.parse_service_features({"error": "boom"}) == []
     # the live envelope shape (result -> [uris, {Services: {features}}])
     live = _parking_search(("P", 11.25, 43.77))
     assert mcp_tools.parse_service_features(live)[0]["name"] == "P"
@@ -596,7 +572,7 @@ async def test_execute_foot_only_skips_parking(make_client, make_result):
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # routing (foot)
     ])
-    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "foot_shortest"}
+    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "foot"}
     out = await execute({"slots": slots}, client=client)
     assert not any(n == "service_search_near_gps_position" for n, _ in client.calls)
     assert out["parking"] == []
@@ -606,14 +582,14 @@ def test_extract_data_drops_foot_only_pt_when_real_foot_present():
     """PT degraded to a walking-only journey (no transit leg): with a genuine foot route in
     the same run it is a duplicate → dropped, no bus route, no error."""
     results = [
-        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
         _routing_entry("public_transport", route={
             "wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00",
             "arc": [{"transport": "foot"}],  # walking only — not real PT
         }),
     ]
     data = _extract_data(results)
-    assert [r["mode"] for r in data["routes"]] == ["foot_shortest"]
+    assert [r["mode"] for r in data["routes"]] == ["foot"]
     assert data["duration"] == "00:20:00"
     assert "route_error" not in data
 
@@ -629,17 +605,10 @@ def test_extract_data_relabels_foot_only_pt_as_walk_when_only_result():
         }),
     ]
     data = _extract_data(results)
-    assert [r["mode"] for r in data["routes"]] == ["foot_shortest"]
-    assert data["mode"] == "foot_shortest"
+    assert [r["mode"] for r in data["routes"]] == ["foot"]
+    assert data["mode"] == "foot"
     assert data["distance_km"] == 1.328 and data["duration"] == "0:16:00"
     assert "route_error" not in data
-
-
-def test_routing_hint_zero_distance_is_service_side():
-    """A shape-D zero-distance car route is a server data bug, not a ZTL: the hint must
-    steer respond to 'service problem, try foot/later', never to the ZTL phrasing."""
-    err = {"error": "routing failed: zero-distance route (server-side data bug)"}
-    assert _routing_hint("car", err) == "service_empty_try_foot_or_later"
 
 
 def test_routing_hint_flags_foot_only_pt():
@@ -767,33 +736,18 @@ async def test_respond_gps_covers_origin_asks_destination_only():
     assert "partenza" not in reply
 
 
-def test_results_view_hint_separates_service_error_from_ztl():
-    """L19: a server-side empty (car/PT broken) must NOT be narrated as a ZTL/pedestrian
-    restriction — that misled the user and the referente (a drivable, non-ZTL destination got
-    blamed on a ZTL). The judgement now lives in _results_view as a deterministic `hint`
-    (not a respond-prompt error-string match): ZTL phrasing is reserved for the genuine
-    empty-routes error on a car/PT mode; the service-side empty gets a neutral hint."""
-    car_ztl = _results_view(
+def test_results_view_plain_errors_carry_no_hint():
+    """The km4city-era ZTL/service-side hint taxonomy retired with the remote routing
+    tool (L46): a What-If router failure is a plain error — respond's generic error rule
+    phrases it, no hint key. The routetype still surfaces so respond can suggest another
+    mode."""
+    view = _results_view(
         [{"name": "routing", "args": json.dumps({"routetype": "car"}),
-          "result": {"error": "no route found (empty routes list)"}}],
+          "result": {"error": "whatif-router returned no car path"}}],
         unsupported=False,
     )
-    assert car_ztl["results"][0]["hint"] == "car_pt_blocked_try_foot"
-
-    service = _results_view(
-        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
-          "result": {"error": "routing failed: empty response from routing service (mode=car)"}}],
-        unsupported=False,
-    )
-    assert service["results"][0]["hint"] == "service_empty_try_foot_or_later"
-
-    # An unclassified routing error carries no hint — respond's generic error rule handles it.
-    other = _results_view(
-        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
-          "result": {"error": "routing call failed: TimeoutError: x"}}],
-        unsupported=False,
-    )
-    assert "hint" not in other["results"][0]
+    assert "hint" not in view["results"][0]
+    assert view["results"][0]["routetype"] == "car"
 
 
 # --- graph wiring ------------------------------------------------------------

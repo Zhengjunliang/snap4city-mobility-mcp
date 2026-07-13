@@ -8,29 +8,27 @@ It is a natural-language chat box: the question is POSTed to the FastAPI bridge 
 which wraps run_advisor on the JupyterHub) and the reply + route come back as widget JSON
 {status, request_type, data, messages}. The reply bubble is messages[-1].content; the
 routes are data.routes (one per travel mode), drawn on a sibling widgetMap.
-MULTIPLE MODES: when the user does not say walk/drive/bus, the backend routes ALL of foot,
-car and public transport and returns data.routes. We draw one vivid line per mode (foot green,
-car blue, bus orange) - there is no primary/alternate dimming and no legend. (Every route
-carries start/finish icons - omitting them on some trajectories crashed the widget, so the
-markers overlap at the shared O/D.) When only one route comes back (mode specified, or a mode
-empty in a ZTL / very short trip / no PT for that OD), a single line is drawn. Bus routes draw
-as a real multimodal split: walking legs in the foot color, the ride leg in the bus color, and
-a stop pin at the board/alight points (the widgetMap does the split, see below).
-HOW THE MAP DRAWS: the widgetMap's addCustomTrajectory does NOT paint a raw polyline - it
-routes between the waypoints itself. We feed the precise geocoded origin/destination
-(data.origin/data.destination) as the two waypoints - pinning the markers on the real civic
-address instead of the routing service's road-snapped WKT endpoint (which drifts ~27 m up the
-street); the WKT endpoints are only a fallback. Every trajectory carries drawMethod:"fetch",
-selecting the widget's fetch branch (upstream dashboard-builder widgetMap.php, added 2025-05):
-the widget fetches Snap4City's graphhopper itself with NO timeout - unlike the default branch
-(Leaflet Routing Machine, hard 30s timeout) where bus lines always timed out while the online
-whatif-router runs unpatched (~30-45s per PT request, L44). The line appears when the response
-lands (~2s once the referente deploys the perf patch). A bus trajectory also carries
-`multimodal` (lineColors + stop icon): the widget splits the returned path on the pt leg's
-instruction `interval`, colors walking/ride legs separately and pins the board/alight stops.
-Per-point `mode` is required and `type` must be foot/car/bus or the map crashes in
-addCustomTrajectoryToMap; every point must also carry an `icon` field (empty string = no
-marker) - the old L30 "drawMethod crash" was missing icon fields, not the drawMethod itself.
+MULTIPLE MODES: when the user does not say walk/drive/bus, the backend routes foot AND car
+and returns data.routes. We draw one vivid line per mode (foot green, car blue, bus orange) -
+there is no primary/alternate dimming and no legend. (Every route carries start/finish icons -
+omitting them on some trajectories crashed the widget, so the markers overlap at the shared
+O/D.) When only one route comes back (mode specified, or a mode empty / very short trip / no
+PT for that OD), a single line is drawn.
+HOW THE MAP DRAWS: every route goes through the widgetMap's MANUAL branch
+(addCustomTrajectory with per-point mode.routing.manual): the widget just connects the given
+points with straight segments, so we feed it the backend's own route geometry and the map
+NEVER calls a router - the line appears together with the reply, straight from the /advise
+response (ONE router call per mode in total, backend-side; L44). A bus route ships its
+walk/ride split as per-leg geometry (route.legs, cut by the backend on the pt instructions'
+interval); foot/car draw the whole route WKT as a single leg. Each straight segment takes the
+CURRENT point's color (a STRING in the manual branch). A point's non-empty icon becomes a
+marker: start/finish flags on the precise geocoded origin/destination
+(data.origin/data.destination - pinned on the real civic address, not the routing service's
+road-snapped WKT endpoint, which drifts ~27 m up the street; the WKT endpoints are only a
+fallback), and Gea-Night's bus pin (TransferServiceAndRenting_Urban_bus) on the ride
+boundaries (board/alight stops). EVERY point must carry `mode` and an `icon` field (empty
+string = no marker) or the map crashes in addCustomTrajectoryToMap - the old L30 crash was a
+missing icon field. The ride shape is stop-to-stop straight lines: the GTFS carries no shapes.
 PARKING (car routes): data.parking lists free car parks near the destination; we show a compact
 list under the reply and plot each on the map via the widgetMap "addSelectorPin" event (one per
 serviceUri, Snap4City's own pin pattern). The pin payload + clear event are real-machine-calibrated
@@ -99,8 +97,8 @@ var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "La
 var SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1/";
 var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", display: "pins", queryType: "Default" };
 // One vivid color per vehicle (foot green, car blue, bus orange). Every drawn route uses
-// its mode color; there is no primary/alternate dimming. The color value fed to a leg MUST
-// be an array - a single string makes the line invisible. (Line width is left alone: the
+// its mode color; there is no primary/alternate dimming. In the manual branch each segment
+// reads the current point's color as a plain STRING. (Line width is left alone: the
 // widgetMap may not support a width field and L30 warns unsupported fields crash it.)
 var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
 // ---- State --------------------------------------------------------------
@@ -149,17 +147,13 @@ return msgs[i].content.trim();
 }
 return "(nessuna risposta)";
 }
-// ---- Map drawing (Snap4City graphhopper via addCustomTrajectory) ---------
-// The MCP routetype (foot_shortest/foot_quiet/car/public_transport) maps to the
-// front-end graphhopper vehicle name the map expects.
+// ---- Map drawing (widgetMap manual branch via addCustomTrajectory) -------
+// The backend route mode (foot/car/public_transport) maps to the front-end vehicle
+// family (trajectory ids, colors).
 function vehicleOf(mode) {
 if (mode === "car") return "car";
 if (mode === "public_transport") return "bus";
-return "foot";  // foot_shortest / foot_quiet / unset
-}
-function nowLocalDatetime() {
-var d = new Date(), p = function (n) { return String(n).padStart(2, "0"); };
-return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+return "foot";  // foot / unset
 }
 // WKT is "LINESTRING(lng lat, ...)"; the map wants {lat, lng}, so swap (coord-order trap).
 function parseWktLine(wkt) {
@@ -186,27 +180,32 @@ passedData: [{ id: id, eventType: "Trajectory" }]
 });
 });
 }
-var BUS_STOP_ICON = "https://servicemap.disit.org/WebAppGrafo/img/mapicons/TransferServiceAndRenting_BusStop.png";
-// Bus route carrying per-leg geometry (route.legs, the backend's walk/ride split of the
-// journey line): drawn through the widget's MANUAL branch - every point carries
-// mode.routing.manual, and the widget connects consecutive points with straight segments,
-// each segment taking the CURRENT point's color (a STRING here, not the fetch branch's
-// array). So walking vertices carry green and ride vertices orange, and the split paints
-// straight from the /advise response with NO router call: the line appears together with
-// the reply (L44; the ride shape is stop-to-stop straight lines - the GTFS has no shapes,
-// same look the widget's own fetch drew). A point's non-empty icon becomes a marker:
-// start/finish flags on the precise geocoded endpoints, ServiceMap bus-stop pins on the
-// ride boundaries (board/alight). Adjacent legs share their boundary vertex; the
-// duplicate is dropped so the segments stay connected.
-function buildBusTraj(route, origin, destination) {
+// Gea-Night's board/alight pin (same icon dir as ICONS): blue rounded square, white bus.
+var BUS_STOP_ICON = ICON_BASE + "TransferServiceAndRenting_Urban_bus.png";
+// Per-leg segment color: walking legs green, ride legs orange, a whole car leg blue.
+function legColor(type) { return MODE_COLORS[type] || MODE_COLORS.foot; }
+// Build one MANUAL-branch trajectory for a route: every point carries mode.routing.manual,
+// and the widget connects consecutive points with straight segments, each segment taking
+// the CURRENT point's color (a STRING here) - so the backend geometry paints exactly as
+// computed, with NO router call from the widget. A bus route brings its walk/ride split
+// as route.legs (backend-cut, L44); foot/car draw the whole route WKT as one leg of their
+// mode color. Adjacent legs share their boundary vertex; the duplicate is dropped so the
+// segments stay connected, and ride boundaries (board/alight stops) get the bus pin.
+// Start/finish flags go on the precise geocoded origin/destination (real civic address);
+// the WKT endpoints already sit in the geometry as plain vertices. EVERY point carries an
+// `icon` field (empty string = no marker): a missing icon was the L30 crash. Returns the
+// object - the caller batches all routes into ONE event (see drawRoutes).
+function buildTraj(route, origin, destination) {
+var vehicle = vehicleOf(route.mode);
+var legs = (route.legs && route.legs.length) ? route.legs : [{ type: vehicle, wkt: route.wkt }];
 var points = [];
 function push(gps, col, icon) {
 points.push({ optionalhtmltrajpopup: "", mode: { routing: { manual: true } }, color: col, icon: icon, position: { serviceUri: "", gps: gps } });
 }
-if (origin) push(origin, MODE_COLORS.foot, ICONS.start);
+if (origin) push(origin, legColor(legs[0].type), ICONS.start);
 var legStarted = false;
-route.legs.forEach(function (leg) {
-var col = leg.type === "bus" ? MODE_COLORS.bus : MODE_COLORS.foot;
+legs.forEach(function (leg) {
+var col = legColor(leg.type);
 var line = parseWktLine(leg.wkt);
 if (!line.length) return;
 if (legStarted) {
@@ -223,65 +222,9 @@ points[points.length - 1].icon = BUS_STOP_ICON;
 }
 legStarted = true;
 });
-if (destination) push(destination, MODE_COLORS.foot, ICONS.finish);
-return { id: TRAJ_IDS.bus, eventType: "Trajectory", points: points };
-}
-// Build one trajectory object for a route. A bus route with per-leg geometry goes through
-// buildBusTraj (manual branch, zero router calls); everything else sends two endpoint
-// waypoints + drawMethod:"fetch", the widget's no-timeout fetch branch (the 'default'
-// branch is Leaflet Routing Machine with a hard 30s timeout - bus requests to the
-// unpatched online router take ~30-45s and always timed out there, L44). The endpoints
-// are the precise geocoded origin/destination (markers land on the real civic address);
-// the WKT endpoints are only a fallback. In the fetch branch the per-point `color` ARRAY
-// is consumed for real: color[0] styles the drawn line. A legless bus trajectory (older
-// backend) still adds `multimodal` (lineColors + stop icon) so the widget splits the
-// fetched path itself; foot/car must NOT carry it (a path with no pt leg would be painted
-// in the pedestrian color - wrong for car). EVERY point must carry an `icon` field (empty
-// string = no marker) - the L30 crash signature (Cannot read ... 'length') was a missing
-// icon field, not the drawMethod. Returns the object - the caller batches all routes into
-// ONE event (see drawRoutes).
-function buildTraj(route, color, origin, destination) {
-if (vehicleOf(route.mode) === "bus" && route.legs && route.legs.length) {
-return buildBusTraj(route, origin, destination);
-}
-// Prefer the precise geocoded endpoints (origin/destination from the backend, pinned on the
-// real civic address) so the markers don't drift to the routing service's road-snapped WKT
-// endpoint (~27 m up the street). Fall back to the WKT endpoints when O/D is absent (the
-// top-level data.wkt single-route path).
-var coords;
-if (origin && destination) {
-coords = [origin, destination];
-} else {
-var line = parseWktLine(route.wkt);
-if (line.length < 2) throw new Error("route geometry has < 2 points");
-coords = [line[0], line[line.length - 1]];  // start + finish only
-}
-var vehicle = vehicleOf(route.mode), startDatetime = nowLocalDatetime();
-// Each waypoint needs a graphhopper mode; type MUST be foot/car/bus (not foot_shortest)
-// or addCustomTrajectoryToMap crashes.
-var points = coords.map(function (gps, i) {
-var pt = {
-optionalhtmltrajpopup: "",
-mode: { routing: { graphhopper: { type: vehicle, startDatetime: startDatetime, weighting: "fastest" } } },
-color: [color],
-position: { serviceUri: "", gps: gps }
-};
-if (i === 0) pt.icon = ICONS.start;
-else if (i === coords.length - 1) pt.icon = ICONS.finish;
-return pt;
-});
-var traj = {
-id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle),
-eventType: "Trajectory",
-drawMethod: "fetch",
-returnInstructionTrigger: "returnedTraj",
-multipleLines: false,
-points: points
-};
-if (vehicle === "bus") {
-traj.multimodal = { lineColors: { pedestrian: MODE_COLORS.foot, bus: MODE_COLORS.bus, modal: MODE_COLORS.bus }, icon: "https://servicemap.disit.org/WebAppGrafo/img/mapicons/TransferServiceAndRenting_BusStop.png" };
-}
-return traj;
+if (destination) push(destination, legColor(legs[legs.length - 1].type), ICONS.finish);
+if (points.length < 2) throw new Error("route geometry has < 2 points");
+return { id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle), eventType: "Trajectory", points: points };
 }
 // Draw every route from the backend, one vivid line per mode (foot green / car blue; bus =
 // walking legs green, ride leg orange, ServiceMap bus-stop pins at the board/alight
@@ -293,8 +236,7 @@ return traj;
 function drawRoutes(routes, origin, destination) {
 clearAllTrajectories();
 var trajs = routes.map(function (route) {
-var color = MODE_COLORS[vehicleOf(route.mode)] || MODE_COLORS.foot;
-return buildTraj(route, color, origin, destination);
+return buildTraj(route, origin, destination);
 });
 trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs });
 }

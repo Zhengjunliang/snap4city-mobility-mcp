@@ -1,8 +1,8 @@
-"""Unit tests for the local MCP server (mcp_server.py) — the ServiceMap geocode wrapper.
+"""Unit tests for the local MCP server (mcp_server.py) — geocode + the all-modes route tool.
 
-No network: httpx is monkeypatched. Covers the two things the server owns — picking the
-right ServiceMap endpoint from excludePOI, and normalizing features to the FeatureCollection
-shape the client expects — plus the error path.
+No network: httpx is monkeypatched. Covers the ServiceMap geocode (endpoint pick from
+excludePOI, feature normalization, error path) and the What-If `route` tool (per-vehicle
+request/response assembly, leg slicing, arc synthesis).
 """
 import httpx
 
@@ -15,6 +15,7 @@ from snap4city_mobility_mcp.mcp_server import (
     _rome_local_iso,
     _normalize_feature,
     _servicemap_search,
+    _street_arcs,
     _wkt_length_km,
     _wkt_points,
 )
@@ -44,6 +45,7 @@ def _install_fake_httpx(monkeypatch, *, body=None, raise_exc=None):
         async def get(self, url, params=None, timeout=None):
             captured["url"] = url
             captured["params"] = params
+            captured["timeout"] = timeout
             if raise_exc is not None:
                 raise raise_exc
             return _FakeResp()
@@ -242,3 +244,76 @@ def test_bus_arcs_empty_instructions_yield_no_arcs():
     # Nothing to walk, nothing to ride: empty arc list (group_arc_legs/_pt_is_foot_only
     # treat it as foot-only), no placeholder invented.
     assert _bus_arcs({"instructions": []}) == []
+
+
+# --- the unified `route` tool (foot/car/bus share one request/response shape) -------------
+
+def test_street_arcs_names_streets_per_instruction():
+    # One arc per instruction, desc = street name ("nd" when unnamed — the slim streets
+    # view drops it), transport labeled with the vehicle, distance in km.
+    first = {"instructions": [
+        {"text": "Continue onto Via dei Benci", "street_name": "Via dei Benci", "distance": 356.97, "time": 42838},
+        {"text": "Turn left", "street_name": "", "distance": 12.0, "time": 1400},
+    ]}
+    assert _street_arcs(first, "car") == [
+        {"transport": "car", "transport_provider": None, "desc": "Via dei Benci", "distance": 0.357},
+        {"transport": "car", "transport_provider": None, "desc": "nd", "distance": 0.012},
+    ]
+
+
+async def test_route_foot_uses_path_totals(monkeypatch):
+    # foot/car never touch the PT graph: distance/time come straight from the path's true
+    # totals (the PT walking-access caveat doesn't apply), no legs, street arcs for the
+    # respond narration, generic HTTP timeout.
+    body = {"paths": [{
+        "wkt": "LINESTRING (11.0 43.0, 11.001 43.0)",
+        "distance": 1644.3, "time": 1183906,
+        "instructions": [
+            {"text": "Continue onto Via dei Benci", "street_name": "Via dei Benci", "distance": 1644.3, "time": 1183906, "interval": [0, 1]},
+        ],
+    }]}
+    captured = _install_fake_httpx(monkeypatch, body=body)
+    out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.001, vehicle="foot")
+    assert captured["params"]["vehicle"] == "foot"
+    assert "startDatetime" not in captured["params"]
+    assert captured["timeout"] == mcp_server.HTTP_TIMEOUT_S
+    found = out["journey"]["routes"][0]
+    assert found["distance"] == 1.644 and found["time"] == "0:19:43"
+    assert "legs" not in found
+    assert found["arc"][0]["desc"] == "Via dei Benci" and found["arc"][0]["transport"] == "foot"
+
+
+async def test_route_bus_forwards_datetime_and_slices_legs(monkeypatch):
+    # bus keeps the PT semantics: GTFS startDatetime forwarded, the dedicated long timeout
+    # (graph reload until the singleton patch lands), distance measured on the geometry
+    # (paths[0].distance counts only walking access), duration summed from instructions,
+    # and the walk/ride leg slices attached for the dashboard split (L44).
+    wkt = "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0, 11.003 43.0)"
+    body = {"paths": [{
+        "wkt": wkt, "distance": 160.0, "time": 999999,
+        "instructions": [
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
+            {"text": "Pt_start_trip", "interval": [1, 2], "leg": {"map": {"type": "pt", "travelTime": 120000}}},
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
+        ],
+    }]}
+    captured = _install_fake_httpx(monkeypatch, body=body)
+    out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.003, vehicle="bus", startdatetime="2026-07-13T10:00")
+    assert captured["params"]["vehicle"] == "bus"
+    assert captured["params"]["startDatetime"] == "2026-07-13T10:00"
+    assert captured["timeout"] == mcp_server.BUS_ROUTE_TIMEOUT_S
+    found = out["journey"]["routes"][0]
+    assert [leg["type"] for leg in found["legs"]] == ["foot", "bus", "foot"]
+    assert found["distance"] == _wkt_length_km(wkt)  # geometry length, not the 160 m access metres
+    assert found["time"] == _fmt_hms(57600 + 120000 + 57600)
+
+
+async def test_route_rejects_unknown_vehicle_and_surfaces_errors(monkeypatch):
+    out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.001, vehicle="boat")
+    assert "unsupported vehicle" in out["error"]
+    _install_fake_httpx(monkeypatch, raise_exc=httpx.ConnectError("boom"))
+    out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.001, vehicle="car")
+    assert "whatif-router car route failed" in out["error"]
+    _install_fake_httpx(monkeypatch, body={"paths": []})
+    out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.001, vehicle="foot")
+    assert out["error"] == "whatif-router returned no foot path"

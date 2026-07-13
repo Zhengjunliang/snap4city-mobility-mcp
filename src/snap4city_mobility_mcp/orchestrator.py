@@ -19,13 +19,12 @@ The model never picks tools itself: in agentic mode Llama4 tends to emit tool ca
 as pythonic text instead of structured tool_calls, which then leaks into the answer.
 Letting it pick only slots and prose, with Python driving the tools, avoids that.
 
-MCP execution and km4city quirk handling live in mcp_tools.py, the Llama4 client in
-llm.py. Runs end-to-end only on the Snap4City JupyterHub.
+MCP execution helpers live in mcp_tools.py, the Llama4 client in llm.py. Runs
+end-to-end only on the Snap4City JupyterHub.
 """
 import asyncio
 import json
 import logging
-import math
 import time
 from datetime import datetime
 from functools import partial
@@ -35,6 +34,7 @@ from zoneinfo import ZoneInfo
 from fastmcp import Client
 from langgraph.graph import END, StateGraph
 
+from snap4city_mobility_mcp.geo import haversine_km
 from snap4city_mobility_mcp.llm import (
     Llama4Client,
     Llama4Error,
@@ -79,7 +79,7 @@ reuse the origin/destination from earlier in the conversation and change only wh
 the user changed (here mode → public_transport). An origin the user never stated \
 stays '' on follow-ups too.
 <examples>
-"ciao, voglio andare da stazione di Rifredi a piazza Dalmazia a piedi" → request_type=journey, origin_text="stazione di Rifredi", destination_text="piazza Dalmazia", mode=foot_shortest (all other slots '')
+"ciao, voglio andare da stazione di Rifredi a piazza Dalmazia a piedi" → request_type=journey, origin_text="stazione di Rifredi", destination_text="piazza Dalmazia", mode=foot (all other slots '')
 "da piazza Duomo a piazza Dalmazia in Firenze" → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze"
 "portami al Duomo" → request_type=journey, origin_text='', destination_text="Duomo"
 "dov'è la farmacia più vicina?" → request_type=journey, origin_text='', destination_text="farmacia", destination_category="Pharmacy"
@@ -129,16 +129,11 @@ say so plainly WITHOUT any numbers and suggest a sensible alternative (another m
 more precise address); when geocoded addresses are present, mention how you read the \
 origin/destination so the user can spot a wrong match.
 - If a routing RESULTS item carries a `hint`, follow it for the alternative you \
-suggest — it already decided the right one: `car_pt_blocked_try_foot` = that mode is \
-likely blocked by a restricted-traffic/pedestrian zone (e.g. an Italian city-centre \
-ZTL), so suggest going on foot or by \
-public transport; `service_empty_try_foot_or_later` = a service-side problem for that \
-mode (NOT a ZTL), so suggest walking (foot routes work) or trying again later; \
-`pt_degraded_to_foot` = the public-transport request returned a walking-only journey \
-(no real transit), so if other modes are present do NOT list it as a public-transport \
-option, and if it is the only result say there is no direct public transport for this \
-trip and give the walking distance/time instead. With NO `hint`, never claim a \
-ZTL/pedestrian zone yourself.
+suggest — it already decided the right one: `pt_degraded_to_foot` = the \
+public-transport request returned a walking-only journey (no real transit), so if \
+other modes are present do NOT list it as a public-transport option, and if it is the \
+only result say there is no direct public transport for this trip and give the walking \
+distance/time instead. With NO `hint`, never claim a ZTL/pedestrian zone yourself.
 - If RESULTS has status "missing_place", ask the user for the field(s) listed in \
 `missing` (the origin/destination of a trip); when "origin" is missing you may also \
 suggest sharing the position — do NOT say the request is unsupported.
@@ -188,8 +183,8 @@ _EXTRACT_SLOTS_SCHEMA = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["car", "public_transport", "foot_quiet", "foot_shortest", ""],
-                    "description": "Travel mode, '' if not specified. Map: walk / on foot → foot_shortest (a quiet or scenic walk → foot_quiet); drive / car → car; bus / tram / public transport / 公交 → public_transport.",
+                    "enum": ["car", "public_transport", "foot", ""],
+                    "description": "Travel mode, '' if not specified. Map: walk / on foot / a piedi → foot; drive / car → car; bus / tram / public transport / 公交 → public_transport.",
                 },
             },
             # Mark every field required: Llama4 only fills required params and
@@ -303,7 +298,7 @@ def _pick_coord(
             c = _feature_coords(f)
             if c is None:
                 continue
-            dist = _haversine_km(gps["lat"], gps["lng"], c[1], c[0])
+            dist = haversine_km(gps["lat"], gps["lng"], c[1], c[0])
             if best_dist is None or dist < best_dist:
                 best_dist, best = dist, f
     if best is None:
@@ -315,12 +310,6 @@ def _pick_coord(
     return _feature_coords(best)
 
 
-# A failed walking route is retried once with the other foot profile: the two
-# profiles take different graph paths, so one can succeed where the other returns an
-# empty body. Only for walking; car/public_transport failures instead get an
-# alternative suggested by respond.
-_FOOT_FALLBACK = {"foot_quiet": "foot_shortest", "foot_shortest": "foot_quiet"}
-
 # Nearest-category destination search: widening radius ladder (km) around the anchor
 # (the user's GPS, or the geocoded destination text without one). An empty rung means
 # "no such service within <radius>", so the next rung widens; all-empty falls back to
@@ -330,13 +319,29 @@ NEAREST_SERVICE_RADII_KM = (0.5, 2.0, 10.0)
 NEAREST_SERVICE_MAX = 10
 
 
+def _audit(name: str, args: dict[str, Any], result: Any, *, extra: str = "") -> dict[str, Any]:
+    """Audit entry for one tool call, debug-logging its slim view along the way.
+
+    The entry keeps the full payload (respond and the widget mine it); only the log line
+    is slimmed. `extra` appends what the slim view drops (e.g. the picked coordinate)."""
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "tool %s %s -> %s%s",
+            name,
+            args,
+            json.dumps(slim_result_for_llm(name, result), ensure_ascii=False)[:500],
+            extra,
+        )
+    return {"name": name, "args": json.dumps(args), "result": result}
+
+
 async def execute(
     state: AdvisorState, *, client: Client, local_client: Client | None = None
 ) -> dict[str, Any]:
     """Run the tool flow for the extracted intent (no LLM).
 
-    route: resolve both endpoints, then routing with the requested mode (plus a foot
-    profile retry). The origin defaults to the user's GPS position when no text was
+    route: resolve both endpoints, then route the requested mode (every mode goes to
+    the local What-If `route` tool). The origin defaults to the user's GPS position when no text was
     given (reverse-geocoded once so respond can name it); a generic-category
     destination resolves to the nearest service (see _nearest_service). Every call is
     recorded in tool_results so respond can mine the widget data. "other" intent or
@@ -346,9 +351,9 @@ async def execute(
     user_gps = state.get("user_gps") or None
     logger.debug("execute user_gps=%s", user_gps)
     results: list[dict[str, Any]] = []
-    # Forward geocoding goes to our local MCP server (referente's is broken, L29); routing,
-    # reverse geocode and near-search stay on the remote client. Tests pass only `client`,
-    # so lc falls back to it.
+    # Forward geocoding AND routing go to our local MCP server (L29; L46 — the referente
+    # remote `routing` tool is retired); reverse geocode and near-search stay on the remote
+    # client. Tests pass only `client`, so lc falls back to it.
     lc = local_client or client
 
     if slots.get("intent") != "route":
@@ -373,15 +378,7 @@ async def execute(
         args = {"search": search}
         result = await exec_tool(lc, "address_search_location", args)
         coord = _pick_coord(result, search, gps=anchor)
-        results.append({"name": "address_search_location", "args": json.dumps(args), "result": result})
-        if logger.isEnabledFor(logging.DEBUG):
-            # The slim view drops coordinates, so log the picked one here.
-            logger.debug(
-                "tool address_search_location %s -> %s (picked %s)",
-                args,
-                json.dumps(slim_result_for_llm("address_search_location", result), ensure_ascii=False)[:500],
-                coord,
-            )
+        results.append(_audit("address_search_location", args, result, extra=f" (picked {coord})"))
         return coord
 
     async def _nearest_service(anchor: list[float], category: str) -> list[float] | None:
@@ -398,7 +395,7 @@ async def execute(
                 "maxresults": NEAREST_SERVICE_MAX,
             }
             result = await exec_tool(client, "service_search_near_gps_position", n_args)
-            entry = {"name": "service_search_near_gps_position", "args": json.dumps(n_args), "result": result}
+            entry = _audit("service_search_near_gps_position", n_args, result)
             spots = parse_service_features(result)
             if spots:
                 results.append(entry)
@@ -425,7 +422,7 @@ async def execute(
             # Only a successful lookup enters the audit: respond keys "dalla tua
             # posizione (vicino a ...)" off this entry, and a failure entry would
             # trigger its error rule for a trip that is actually fine.
-            results.append({"name": "coordinates_to_address", "args": json.dumps(rev_args), "result": rev})
+            results.append(_audit("coordinates_to_address", rev_args, rev))
 
     # --- destination: nearest-category service when asked, else plain text geocode.
     # Its geocodes anchor on the resolved origin (see _geocode), falling back to GPS.
@@ -455,57 +452,40 @@ async def execute(
 
     mode_specified = bool(slots.get("mode"))
     # No mode given: route walking AND driving only (a foot/car line each). Public transport
-    # is NOT run by default: the What-If bus router is ~25 s per call (no CH preprocessing,
-    # server-side, unfixable client-side), which dominated the whole turn. The bus line is
-    # run ONLY when the user explicitly asks for it (mode=public_transport → the branch below),
-    # so a plain "A to B" query answers in a few seconds. An explicit mode runs that one only.
-    modes = [slots["mode"]] if mode_specified else ["foot_shortest", "car"]
+    # is NOT run by default: until referente merges the pt-router-singleton patch, every
+    # vehicle=bus request rebuilds the PT graph (~30-45s, server-side), which would dominate
+    # the whole turn. The bus line runs ONLY when the user explicitly asks for it
+    # (mode=public_transport), so a plain "A to B" query answers fast — foot/car never touch
+    # the PT graph (probed 2026-07-13: sub-second). An explicit mode runs that one only.
+    modes = [slots["mode"]] if mode_specified else ["foot", "car"]
 
-    async def _route(routetype: str, *, attempts: int | None = None) -> dict[str, Any]:
-        # GeoJSON coordinate order is [longitude, latitude]. Returns the audit entry; the
-        # caller appends it, so concurrent calls don't race on the shared results list.
-        args = {
-            "startlatitude": origin[1],
-            "startlongitude": origin[0],
-            "endlatitude": dest[1],
-            "endlongitude": dest[0],
-            "routetype": routetype,
-        }
-        start = time.perf_counter()
-        result = await exec_tool(client, "routing", args, routing_attempts=attempts)
-        elapsed = time.perf_counter() - start
-        # Per-mode latency in debug.log. Probe (2026-06-29) measured routing at 1.6-4.6 s, so a
-        # missing PT line is a foot-only degrade / route-not-found, NOT a slow call timing out.
-        logger.debug("routing mode=%s took %.1fs", routetype, elapsed)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "tool routing %s -> %s",
-                args,
-                json.dumps(slim_result_for_llm("routing", result), ensure_ascii=False)[:500],
-            )
-        return {"name": "routing", "args": json.dumps(args), "result": result}
-
-    async def _route_pt() -> dict[str, Any]:
-        # MCP routing's public_transport never returns transit (foot-only / -2 for any
-        # date/OD, L19). The bus line comes from our local `bus_route` tool instead, which
-        # wraps the What-If GraphHopper router (mcp_server.py) — the same source the
-        # Gea-Night dashboard draws from. Goes to the local client (lc), like geocode (L29).
-        args = {
+    async def _route(mode: str) -> dict[str, Any]:
+        # EVERY mode goes to the local `route` tool (What-If GraphHopper, mcp_server.py —
+        # the referente remote `routing` tool is retired, L46), so the three modes share
+        # one request/response shape. GeoJSON coordinate order is [longitude, latitude].
+        # Returns the audit entry; the caller appends it, so concurrent calls don't race
+        # on the shared results list.
+        args: dict[str, Any] = {
             "start_latitude": origin[1],
             "start_longitude": origin[0],
             "end_latitude": dest[1],
             "end_longitude": dest[0],
+            "vehicle": _ROUTER_VEHICLE.get(mode, mode),
+        }
+        if mode == "public_transport":
             # Pinned to the network's timezone: the servlet parses this as a LOCAL
             # datetime in its own zone, so a naive now() from a UTC process would query
             # the GTFS timetable 2h off (wrong service window on time-sensitive trips).
-            "startdatetime": datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%dT%H:%M"),
-        }
+            args["startdatetime"] = datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%dT%H:%M")
         start = time.perf_counter()
-        result = await exec_tool(lc, "bus_route", args)
-        logger.debug("routing mode=public_transport (bus_route) took %.1fs", time.perf_counter() - start)
-        # Shaped as a routing audit entry (routetype=public_transport) so _extract_data /
-        # _results_view render and narrate it exactly like a routing-derived route.
-        return {"name": "routing", "args": json.dumps({"routetype": "public_transport"}), "result": result}
+        result = await exec_tool(lc, "route", args)
+        # Per-mode latency in debug.log. foot/car are sub-second; bus reloads the PT graph
+        # (~30-45s) until the singleton patch lands — so a missing PT line is a foot-only
+        # degrade / route-not-found, NOT a slow call timing out.
+        logger.debug("routing mode=%s took %.1fs", mode, time.perf_counter() - start)
+        # Audited under the historical "routing" name (routetype = the slot mode) so
+        # _extract_data / _results_view render and narrate every mode uniformly.
+        return _audit("routing", {"routetype": mode, **args}, result)
 
     async def _parking() -> dict[str, Any]:
         # Find car parks near the destination (called only when a car route is in play — the
@@ -520,33 +500,19 @@ async def execute(
             "maxresults": PARKING_MAX * 3,
         }
         result = await exec_tool(client, "service_search_near_gps_position", p_args)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "tool service_search_near_gps_position %s -> %s",
-                p_args,
-                json.dumps(slim_result_for_llm("service_search_near_gps_position", result), ensure_ascii=False)[:500],
-            )
-        return {"name": "service_search_near_gps_position", "args": json.dumps(p_args), "result": result}
+        return _audit("service_search_near_gps_position", p_args, result)
 
     # The modes are independent, so route them concurrently (wall-clock = the slowest one,
     # not the sum); parking (car only) runs alongside in the SAME flat gather, placed last so
     # routing keeps its modes-order append (deterministic _extract_data) and the parking entry
     # comes after. One flat gather (not nested) keeps the call order stable.
     do_parking = "car" in modes
-    coros = [(_route_pt() if m == "public_transport" else _route(m)) for m in modes]
+    coros = [_route(m) for m in modes]
     coros += [_parking()] if do_parking else []
     gathered = await asyncio.gather(*coros)
     primary = gathered[: len(modes)]
     parking_entry = gathered[len(modes)] if do_parking else None
     results.extend(primary)
-    for m, entry in zip(modes, primary):
-        routed = entry["result"]
-        if isinstance(routed, dict) and "error" in routed and m in _FOOT_FALLBACK:
-            # Single-shot fallback to the other foot profile. The requested profile
-            # already exhausted the stale-retry ladder (~27 s), so this only probes the
-            # other graph path, not the transient. car/PT failures get no fallback —
-            # they just stay absent from the routes, so the dashboard draws one less line.
-            results.append(await _route(_FOOT_FALLBACK[m], attempts=1))
 
     # Parking is only meaningful when a car route was actually found: if the car routing
     # failed (ZTL / route-not-found), there is nowhere to drive to, so we drop the parking
@@ -620,11 +586,13 @@ def _routetype_of(entry: dict[str, Any]) -> str | None:
         return None
 
 
-# Maps an MCP routetype to the dashboard vehicle family (mirrors the front-end
-# vehicleOf): foot profiles collapse to one walking line, car/PT to their own.
+# Slot mode -> What-If router vehicle (the slot keeps the user-facing public_transport
+# name; the router speaks vehicle=bus).
+_ROUTER_VEHICLE = {"foot": "foot", "car": "car", "public_transport": "bus"}
+
+# Maps a slot mode to the dashboard vehicle family (mirrors the front-end vehicleOf).
 _VEHICLE = {
-    "foot_shortest": "foot",
-    "foot_quiet": "foot",
+    "foot": "foot",
     "car": "car",
     "public_transport": "bus",
 }
@@ -664,10 +632,9 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Mine the tool-result audit for the widget payload.
 
     Collects every successful routing into a `routes` list, one per vehicle family
-    (foot/car/bus) — a later success overwrites an earlier one, so a foot-profile
-    fallback wins over its failed sibling. routes is ordered fastest-first; the
-    top-level wkt/mode/distance mirror routes[0] for single-route consumers and the
-    template. With no success, returns the earliest error (the mode the user asked for).
+    (foot/car/bus). routes is ordered fastest-first; the top-level wkt/mode/distance
+    mirror routes[0] for single-route consumers and the template. With no success,
+    returns the earliest error (the mode the user asked for).
     """
     route_error: str | None = None
     by_vehicle: dict[str, dict[str, Any]] = {}
@@ -686,16 +653,13 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "mode": routetype,
                 "wkt": first.get("wkt"),  # full LINESTRING, not truncated
                 "distance_km": first.get("distance"),
-                "eta": first.get("eta"),
                 "duration": first.get("time"),
                 # "arcs": first.get("arc"),  # per-segment detail: bloats the payload
                 # ~90%, re-enable once referente confirms the widget needs it.
-                "source_node": journey.get("source_node"),
-                "destination_node": journey.get("destination_node"),
             }
             if isinstance(first.get("legs"), list) and first["legs"]:
-                # Per-leg geometry (walk/ride split) from bus_route: the dashboard draws
-                # the colored split + stop pins from this, no second router call (L44).
+                # Per-leg geometry (walk/ride split) from the route tool: the dashboard
+                # draws the colored split + stop pins from this, no second router call (L44).
                 route["legs"] = first["legs"]
             if routetype == "public_transport" and _pt_is_foot_only(result):
                 # Walking-only journey: not a real PT option (respond gets the
@@ -703,7 +667,7 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 # keep it as a foot candidate so an explicit bus request still gets a
                 # drawable walking line instead of nothing (L39).
                 logger.debug("PT route degraded: foot-only journey (no transit leg)")
-                route["mode"] = "foot_shortest"
+                route["mode"] = "foot"
                 pt_walk = route
                 continue
             by_vehicle[_VEHICLE.get(routetype or "", routetype or "")] = route
@@ -713,7 +677,7 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
             route_error = result["error"]
     if pt_walk is not None and "foot" not in by_vehicle:
         # Only when no real foot route exists (explicit-bus request); in a multi-mode
-        # run the genuine foot_shortest result wins and the degraded PT walk is a dup.
+        # run the genuine foot result wins and the degraded PT walk is a dup.
         by_vehicle["foot"] = pt_walk
     if not by_vehicle:
         return {"route_error": route_error} if route_error else {}
@@ -728,15 +692,6 @@ def _parking_sort_key(s: dict[str, Any]) -> tuple[bool, float, float]:
     free = s.get("free_spaces")
     dist = s.get("distance_km")
     return (free is None, -(free or 0), dist if dist is not None else float("inf"))
-
-
-def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Great-circle distance in km between two lat/lng points."""
-    radius = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * radius * math.asin(math.sqrt(a))
 
 
 def _extract_parking(
@@ -758,7 +713,7 @@ def _extract_parking(
     for s in spots:
         if dest and s.get("lat") is not None and s.get("lng") is not None:
             s["distance_km"] = round(
-                _haversine_km(dest["lat"], dest["lng"], s["lat"], s["lng"]), 3
+                haversine_km(dest["lat"], dest["lng"], s["lat"], s["lng"]), 3
             )
         else:
             s["distance_km"] = None
@@ -768,7 +723,7 @@ def _extract_parking(
 
 
 def _template_answer(
-    intent: str, data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
+    data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
 ) -> str:
     """Fallback answer in Italian (the advisor's default) when the respond LLM
     is unavailable."""
@@ -829,29 +784,19 @@ def _missing_route_slots(slots: dict[str, Any], user_gps: Any) -> list[str]:
 
 
 def _routing_hint(routetype: str | None, result: Any) -> str | None:
-    """Suggestion key for a failed routing attempt.
+    """Suggestion key for a routing result respond must not take at face value.
 
-    Keeps the ZTL-vs-service-side judgement in Python rather than asking the respond
-    LLM to pattern-match result["error"]. None means no special hint, and respond's
-    generic error rule handles it (geocode failures, transient call errors, etc.).
+    Keeps the walking-only-PT judgement in Python rather than asking the respond LLM
+    to pattern-match the journey. None means no special hint, and respond's generic
+    error rule handles plain failures (geocode misses, router errors, transient call
+    errors). The km4city-specific hints (stale/ZTL error-string matching) retired with
+    the remote routing tool (L46): the What-If GraphHopper knows nothing about ZTLs, so
+    there is no blocked-zone signal to translate anymore.
     """
-    if not isinstance(result, dict):
-        return None
     if routetype == "public_transport" and _pt_is_foot_only(result):
         # PT came back as a walking-only journey (no transit leg) — not a real PT
         # option. respond must not present it as public transport.
         return "pt_degraded_to_foot"
-    err = result.get("error")
-    if not isinstance(err, str):
-        return None
-    if "empty response from routing service" in err or "zero-distance route" in err:
-        # Service-side failure for this mode (empty body, or a bogus 0-km route with
-        # real geometry — shape D), not a ZTL/pedestrian restriction.
-        return "service_empty_try_foot_or_later"
-    if "empty routes list" in err and routetype in ("car", "public_transport"):
-        # A car/PT route with no result is often a restricted-traffic (ZTL) or
-        # pedestrian zone.
-        return "car_pt_blocked_try_foot"
     return None
 
 
@@ -966,7 +911,7 @@ async def respond(state: AdvisorState, *, llm: Llama4Client) -> dict[str, Any]:
     except Llama4Error:
         pass  # fall back to the deterministic template below
     if answer is None:
-        answer = _template_answer(intent, data, unsupported=unsupported, missing=missing)
+        answer = _template_answer(data, unsupported=unsupported, missing=missing)
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no

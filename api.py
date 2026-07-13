@@ -43,9 +43,10 @@ _PKG_LOGGER = "snap4city_mobility_mcp"
 
 # /advise heartbeat cadence (seconds): must sit well below the ~60 s read timeout of
 # the proxy chain fronting jupyter-server-proxy (snap4city.org), which otherwise cuts
-# public-transport turns that exceed it (~70 s while the online whatif-router runs
-# unpatched — the browser then shows "bridge non raggiungibile" for a turn that in
-# fact completed). See advise() for how the heartbeat stays invisible to clients.
+# turns that exceed it — in practice only public-transport ones (~70 s while the online
+# whatif-router runs unpatched; foot/car are sub-second on the same router) — and the
+# browser then shows "bridge non raggiungibile" for a turn that in fact completed.
+# See advise() for how the heartbeat stays invisible to clients.
 HEARTBEAT_S = 10.0
 
 

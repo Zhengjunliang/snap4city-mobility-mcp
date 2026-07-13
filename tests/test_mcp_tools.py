@@ -1,16 +1,14 @@
 """Unit tests for the deterministic MCP layer (mcp_tools.py).
 
-Lean core suite: routing envelope shapes (L2/L3/L7/L8), the two-pass geocode with
-named-city preference (L11/L17, worldwide since the Tuscany bbox removal), the
-nearest-service parsing, the LLM-context slimming (L12), and the contract that every
-exposed tool exists in the live probe.
+Lean core suite: the two-pass geocode with named-city preference (L17/L41, worldwide
+since the Tuscany bbox removal), the nearest-service parsing, the LLM-context slimming
+(L12), and the contract that every exposed tool exists in the live probe.
 """
 import json
 import pathlib
 
 import pytest
 
-from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.mcp_tools import (
     LOCAL_ONLY_TOOLS,
     STOPS_LLM_KEEP,
@@ -20,7 +18,6 @@ from snap4city_mobility_mcp.mcp_tools import (
     group_arc_legs,
     parse_service_features,
     reverse_geocode,
-    routing_with_retry,
     slim_result_for_llm,
 )
 
@@ -31,57 +28,7 @@ def test_unwrap_structured(make_result):
     assert _unwrap(make_result(structured={"a": 1})) == {"a": 1}
 
 
-# --- routing_with_retry (L2/L3/L7/L8 envelope shapes) ------------------------
-
-_ROUTE_ARGS = {
-    "startlatitude": 43.77, "startlongitude": 11.25,
-    "endlatitude": 43.76, "endlongitude": 11.26, "routetype": "foot_shortest",
-}
-
-
-async def test_routing_happy(make_client, make_result):
-    env = {
-        "journey": {"routes": [{"distance": 0.68, "eta": "10:00:00", "wkt": "LINESTRING(1 2,3 4)"}]},
-        "response": {"error_code": "0", "error_message": "successful"},
-    }
-    client = make_client([make_result(structured=env)])
-    out = await routing_with_retry(client, _ROUTE_ARGS)
-    assert out["journey"]["routes"][0]["distance"] == 0.68
-
-
-async def test_routing_empty_routes_shape_c(make_client, make_result):
-    # L2: success envelope (error_code "0") but empty routes — NOT a route.
-    env = {"journey": {"routes": []}, "response": {"error_code": "0", "error_message": "successful"}}
-    out = await routing_with_retry(make_client([make_result(structured=env)]), _ROUTE_ARGS)
-    assert out["error"] == "no route found (empty routes list)"
-
-
-async def test_routing_zero_distance_shape_d(make_client, make_result):
-    # Shape D (live 2026-07-10): car returned a real WKT but distance=0 / time=00:00:00
-    # / eta=call time. Presenting it would tell the user "0 km, arriving now" — fail it.
-    env = {
-        "journey": {"routes": [{"distance": 0, "eta": "08:12:21", "time": "00:00:00",
-                                "wkt": "LINESTRING(1 2,3 4)"}]},
-        "response": {"error_code": "0", "error_message": "successful"},
-    }
-    out = await routing_with_retry(make_client([make_result(structured=env)]), _ROUTE_ARGS)
-    assert out["error"] == "routing failed: zero-distance route (server-side data bug)"
-
-
-async def test_routing_stale_retry_shape_a(make_client, make_result, monkeypatch):
-    # L3/L8: bare {"error": ""} — stale ladder runs 3 attempts, then surfaces empty-body error.
-    async def _noop(*a, **k):
-        return None
-
-    monkeypatch.setattr(mcp_tools.asyncio, "sleep", _noop)
-    stale = make_result(structured={"error": ""})
-    client = make_client([stale, stale, stale])  # initial + 2 retries, all stale
-    out = await routing_with_retry(client, _ROUTE_ARGS)
-    assert "empty response" in out["error"]
-    assert len(client.calls) == 3
-
-
-# --- exec_tool: geocode two-pass + named-city preference (L11/L17) -----------
+# --- exec_tool: geocode two-pass + named-city preference (L17/L41) -----------
 
 def _feature(lng, lat, addr="x", city="FIRENZE"):
     return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
@@ -195,10 +142,10 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     assert "source_node" not in j and "destination_node" not in j  # no raw coordinates
 
 
-# --- group_arc_legs (walk -> ride -> walk from the bus_route arc list) --------
+# --- group_arc_legs (walk -> ride -> walk from the route tool's arc list) -----
 
 def _multimodal_arcs():
-    """The arc list bus_route._bus_arcs produces for a GTFS ride: foot -> board -> alight -> foot.
+    """The arc list the route tool's _bus_arcs produces for a GTFS ride: foot -> board -> alight -> foot.
     Times are Rome local with offset (mcp_server converts the router's UTC instants)."""
     stops = [{"name": "PORTE NUOVE BELFIORE", "time": "2026-07-06T08:23:00+02:00"},
              {"name": "ACC. DEL CIMENTO ARTOM", "time": "2026-07-06T08:34:28+02:00"}]
@@ -263,7 +210,7 @@ def test_exposed_tools_exist_in_probe():
         pytest.skip("probe-native-tools.json not present")
     names: set = set()
     _collect_names(json.loads(probe.read_text(encoding="utf-8")), names)
-    # Local-only tools (bus_route) live on our own MCP server, not referente's, so they
+    # Local-only tools (route) live on our own MCP server, not referente's, so they
     # are not expected in the referente probe.
     missing = TOOL_NAMES - LOCAL_ONLY_TOOLS - names
     assert not missing, f"exposed tools absent from probe: {missing}"

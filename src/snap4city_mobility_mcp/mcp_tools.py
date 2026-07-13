@@ -1,10 +1,9 @@
 """Client-side MCP layer.
 
 This module implements no tools: they live on referente's remote
-snap4agentic_advisor_native server. Here we only connect to it and run the graph's
-tool calls via client.call_tool, unwrapping the response and smoothing km4city's
-known quirks. The route flow drives its tool chain in Python; no LLM ever picks a
-tool.
+snap4agentic_advisor_native server and on our local mcp_server.py. Here we only
+connect and run the graph's tool calls via client.call_tool, unwrapping the response.
+The route flow drives its tool chain in Python; no LLM ever picks a tool.
 
 The dashboard's intranet IP is reachable directly from the JupyterHub, so
 DASHBOARD_URL defaults to it; override with S4C_DASHBOARD_URL if the dashboard is
@@ -12,12 +11,10 @@ elsewhere. /apps.json carries the multi-server config: we keep the native server
 rewrite the internal IP to DASHBOARD_URL.
 
 exec_tool is the single execution seam and never raises: every failure comes back as
-{"error": ...} so the graph can recover. routing goes through routing_with_retry
-(km4city envelope quirks), address_search_location through _geocode_address_first
-(2-pass address/POI, named-city preference); other tools pass straight through
-_unwrap.
+{"error": ...} so the graph can recover. address_search_location goes through
+_geocode_address_first (2-pass address/POI, named-city preference); other tools pass
+straight through _unwrap.
 """
-import asyncio
 import json
 import logging
 import os
@@ -30,12 +27,6 @@ from fastmcp import Client
 
 logger = logging.getLogger(__name__)
 
-# The routing wrapper occasionally returns an empty body on cold start; retry after a
-# delay to mask the transient. Three attempts total also tell the transient apart from
-# the stable wrapper bug: still empty on the third attempt means the server-side bug.
-ROUTING_STALE_RETRIES = 2
-ROUTING_STALE_RETRY_DELAY_S = 6.0
-
 # The intranet dashboard IP is reachable directly from the JupyterHub, so it's the
 # default. Override via S4C_DASHBOARD_URL if the dashboard is exposed elsewhere.
 DASHBOARD_URL = os.environ.get("S4C_DASHBOARD_URL", "http://192.168.1.117:8000")
@@ -47,19 +38,19 @@ NATIVE_SERVER_ID = "snap4agentic_advisor_native"
 # instead of hitting the network.
 EXPOSED_TOOLS = (
     "address_search_location",
-    "bus_route",  # local: public-transport (bus) route via the What-If router (mcp_server.py, L19/L29)
     "coordinates_to_address",  # reverse geocode: labels a GPS-defaulted origin for the reply
-    "routing",
+    "route",  # local: all-modes (foot/car/bus) route via the What-If router (mcp_server.py, L19/L46)
     "service_search_near_gps_position",  # nearest-category POIs: car parks + "farmacia più vicina" destinations
     "service_info_dev",  # latest realtime free-spaces for a car park (serviceUri + time window)
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
 # Tools served only by our local MCP server (mcp_server.py), with no referente remote
-# equivalent — so they are NOT expected in the referente probe. `bus_route` wraps the
-# What-If router (L19/L29); geocode reuses referente's `address_search_location` name (it
-# exists remotely, just broken) so it is NOT local-only here.
-LOCAL_ONLY_TOOLS = frozenset({"bus_route"})
+# equivalent — so they are NOT expected in the referente probe. `route` wraps the What-If
+# router for every mode (L19/L46 — the referente remote `routing` tool is retired);
+# geocode reuses referente's `address_search_location` name (it exists remotely, just
+# broken) so it is NOT local-only here.
+LOCAL_ONLY_TOOLS = frozenset({"route"})
 
 # Parking discovery (car routes): search car parks near the destination, then read live
 # free-spaces per spot. Calibrated from scripts/probe_parking.py on the JupyterHub (2026-06-26):
@@ -111,97 +102,6 @@ def _unwrap(result: Any) -> Any:
     return None
 
 
-async def _call_routing_once(client: Client, args: dict[str, Any]) -> dict[str, Any]:
-    """Single routing tool call -> {data} | {error}. Stale retry handled by the caller."""
-    try:
-        result = await client.call_tool("routing", args)
-    except Exception as e:
-        return {"error": f"routing call failed: {type(e).__name__}: {e}"}
-    data = _unwrap(result)
-    if not isinstance(data, dict):
-        return {"error": f"routing returned non-dict payload: {type(data).__name__}"}
-    return {"data": data}
-
-
-def _looks_stale(data: dict[str, Any]) -> bool:
-    """Does this payload look like the cold-start stale shape?
-
-    Stale = no `journey` dict (an empty wrap or an unrecognized envelope).
-    """
-    return not isinstance(data.get("journey"), dict)
-
-
-async def routing_with_retry(
-    client: Client, args: dict[str, Any], *, attempts: int | None = None
-) -> dict[str, Any]:
-    """km4city routing with stale retry and envelope checks.
-
-    args = {startlatitude, startlongitude, endlatitude, endlongitude, routetype, [startdatetime]}.
-    Returns {"journey": {...}} on success or {"error": "<msg>"} on any failure shape.
-    `attempts` overrides the stale-retry ladder: the foot-profile fallback probe passes
-    1, since the requested profile's full ladder already ruled the transient out (each
-    failing attempt costs ~5 s call + 6 s delay).
-    """
-    # First attempt plus bounded retries for the cold-start stale window.
-    if attempts is None:
-        attempts = ROUTING_STALE_RETRIES + 1
-    res = await _call_routing_once(client, args)
-    for attempt in range(1, attempts):
-        if "error" in res:
-            break
-        if not _looks_stale(res["data"]):
-            break
-        logger.debug(
-            "routing stale payload (attempt %d/%d, routetype=%s): %s",
-            attempt, attempts, args.get("routetype"), json.dumps(res["data"])[:500],
-        )
-        await asyncio.sleep(ROUTING_STALE_RETRY_DELAY_S)
-        res = await _call_routing_once(client, args)
-
-    if "error" in res:
-        return {"error": res["error"]}
-    data = res["data"]
-
-    # Failure shape A: still no journey after retries. Either the transient didn't clear
-    # or it's the stable wrapper bug (a bare {"error": ""}). The raw payload goes to the
-    # debug log so the two can be told apart offline; the user-facing message stays plain.
-    if not isinstance(data.get("journey"), dict):
-        logger.debug(
-            "routing still stale after %d attempts (routetype=%s): %s",
-            attempts, args.get("routetype"), json.dumps(data)[:500],
-        )
-        err = data.get("error")
-        if not err:
-            return {
-                "error": f"routing failed: empty response from routing service "
-                f"({attempts} attempts); try a different travel mode or a more "
-                f"specific address"
-            }
-        return {"error": f"routing failed: {err}"}
-    journey = data["journey"]
-
-    # Failure shape B: km4city envelope error_code != "0". error_message can read
-    # "successful" even on success, so only error_code is authoritative ("0" means OK).
-    resp = data.get("response") or {}
-    err_code = resp.get("error_code")
-    if err_code not in (None, "", "0", 0):
-        err_msg = resp.get("error_message") or "unknown"
-        return {"error": f"routing failed: {err_msg} (code={err_code})"}
-
-    # Failure shape C: a success-looking envelope but empty routes. km4city returns this
-    # for car-in-pedestrian-zone, src == dst, etc., with no 4xx.
-    if not journey.get("routes"):
-        return {"error": "no route found (empty routes list)"}
-    # Failure shape D: a route with geometry but zero/missing distance and time (live
-    # 2026-07-10: car returned distance=0, time=00:00:00, eta=call time, plus a real
-    # 31-point WKT). A genuine src==dst comes back as empty routes (shape C), so a
-    # zero-distance route WITH geometry is bogus server data — presenting it would tell
-    # the user "0 km / arriving now". Fail the mode instead; respond suggests another.
-    if not (journey["routes"][0] or {}).get("distance"):
-        return {"error": "routing failed: zero-distance route (server-side data bug)"}
-    return {"journey": journey}
-
-
 # Italian function words carry no signal when matching a feature label or city against
 # the user's place text ("Piazza del Duomo" vs "PIAZZA DUOMO").
 _LABEL_STOPWORDS = frozenset(
@@ -236,8 +136,8 @@ def _narrow_by_city(features: list[dict[str, Any]], search: str) -> list[dict[st
 
 # The geocoder defaults to lang="en"/logic="or". km4city is an Italian dataset, so bias
 # it to Italian: better ranking and labels that match the Italian search text in
-# _pick_coord/_narrow_by_city. logic stays "or" (broad) by default; flip GEOCODE_LOGIC to
-# "and" (stricter) and A/B it via scripts/probe_geocode.py before committing the change.
+# _pick_coord/_narrow_by_city. logic stays "or" (broad) by default; A/B "and" (stricter)
+# against real queries before committing a change.
 GEOCODE_LANG = "it"
 GEOCODE_LOGIC = "or"
 
@@ -417,7 +317,7 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
     sorted by distance from the search point. Each item yields
     {name, lat, lng, uri, free_spaces} with missing fields as None — free_spaces only
     matters for car parks and is currently empty server-side (parking
-    `realtimeAttributes`/`realtime` come back {}, lessons L21/L22); the key lookup stays
+    `realtimeAttributes`/`realtime` come back {}, lesson L33); the key lookup stays
     for when the backend starts loading occupancy. Returns [] on error / unrecognized
     shape."""
     if not isinstance(result, dict) or "error" in result:
@@ -439,7 +339,7 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 lat = lng = None
         # Free spaces may live directly on properties or, once the backend loads occupancy,
-        # inside realtimeAttributes (currently {} — L21/L22). Check both.
+        # inside realtimeAttributes (currently {} — L33). Check both.
         rt = props.get("realtimeAttributes")
         sources = [props, rt] if isinstance(rt, dict) else [props]
         free = None
@@ -521,33 +421,19 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
     return result
 
 
-async def exec_tool(
-    client: Client, name: str, args: dict[str, Any], *, routing_attempts: int | None = None
-) -> Any:
-    """Execute one tool call by forwarding it to the remote server. Never raises:
+async def exec_tool(client: Client, name: str, args: dict[str, Any]) -> Any:
+    """Execute one tool call by forwarding it to the given client. Never raises:
     returns the payload or {"error": ...}.
 
-    routing goes through routing_with_retry (km4city quirk handling; routing_attempts
-    caps its stale ladder). Every other tool passes straight through client.call_tool +
-    _unwrap. The `authentication` arg is stripped (public backend).
+    address_search_location goes through _geocode_address_first (2-pass address/POI).
+    Every other tool passes straight through client.call_tool + _unwrap. The
+    `authentication` arg is stripped (public backend).
     """
     try:
         if name not in TOOL_NAMES:
             return {"error": f"unknown tool {name!r}"}
 
         clean = {k: v for k, v in args.items() if k != "authentication"}
-
-        if name == "routing":
-            route_args = {
-                "startlatitude": clean.get("startlatitude"),
-                "startlongitude": clean.get("startlongitude"),
-                "endlatitude": clean.get("endlatitude"),
-                "endlongitude": clean.get("endlongitude"),
-                "routetype": clean.get("routetype", "car"),
-            }
-            if clean.get("startdatetime"):
-                route_args["startdatetime"] = clean["startdatetime"]
-            return await routing_with_retry(client, route_args, attempts=routing_attempts)
 
         if name == "address_search_location":
             return await _geocode_address_first(client, clean)
