@@ -84,10 +84,13 @@ Two environment requirements, both **outside this file's control**:
 - Public transport (`bus`) is wired via the backend `bus_route` tool (What-If GraphHopper,
   `docs/lessons.md` L19/L34). A walking-only itinerary (short trip — walking beats any bus,
   L39) comes back relabeled as a foot route, so the map draws a fast green walking line.
-- Trajectories are drawn through the widgetMap's `drawMethod:"fetch"` branch (L44): the widget
-  fetches the router itself with **no timeout** (the default Leaflet-Routing-Machine branch
-  has a hard 30 s timeout that killed every bus line while the online router runs unpatched).
-  A bus trajectory carries `multimodal` line colors + a stop icon, so the widget paints
-  walking legs green, the ride leg orange, and pins the board/alight stops — Gea-Night-style.
-  Until the referente merges the perf patch the bus line appears ~30-45 s after the reply
-  (the widget's own router request); with the patch it drops to ~2 s.
+- A bus route ships its walk/ride split as per-leg geometry (`data.routes[].legs`, cut by
+  the backend from the ONE router response, L44): the front end feeds it to the widgetMap's
+  **manual** branch, which just connects the given points — walking legs green, ride leg
+  orange, ServiceMap bus-stop pins at the board/alight vertices — so the line appears
+  **together with the reply**, zero extra router calls, patched or not. (The ride shape is
+  stop-to-stop straight lines: the GTFS carries no shapes.) Foot/car (and a legless bus
+  from an older backend) still go through the `drawMethod:"fetch"` branch: the widget
+  re-fetches the router itself with no timeout (the default Leaflet-Routing-Machine branch
+  has a hard 30 s timeout that killed every bus line while the online router runs
+  unpatched, L44).

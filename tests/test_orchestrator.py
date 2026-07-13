@@ -480,6 +480,29 @@ def test_extract_data_collects_three_modes():
     assert len(data["routes"]) == 3
 
 
+def test_extract_data_forwards_pt_legs():
+    """bus_route's per-leg geometry rides along into the widget route (the dashboard draws
+    the walk/ride split + stop pins from it, no second router call, L44); routes without
+    it stay bare."""
+    legs = [
+        {"type": "foot", "wkt": "LINESTRING(0 0,1 1)"},
+        {"type": "bus", "wkt": "LINESTRING(1 1,2 2)"},
+        {"type": "foot", "wkt": "LINESTRING(2 2,3 3)"},
+    ]
+    results = [
+        _routing_entry("foot_shortest", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+        _routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,3 3)", "distance": 3.0, "time": "00:15:00",
+            "arc": [{"transport": "foot"}, {"transport": "bus"}],  # a real ride leg
+            "legs": legs,
+        }),
+    ]
+    data = _extract_data(results)
+    by_mode = {r["mode"]: r for r in data["routes"]}
+    assert by_mode["public_transport"]["legs"] == legs
+    assert "legs" not in by_mode["foot_shortest"]
+
+
 # --- parking -----------------------------------------------------------------
 
 def _parking_entry(*spots) -> dict:

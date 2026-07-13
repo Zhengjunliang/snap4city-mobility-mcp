@@ -186,20 +186,64 @@ passedData: [{ id: id, eventType: "Trajectory" }]
 });
 });
 }
-// Build one trajectory object for a route: two endpoint waypoints + drawMethod:"fetch", the
-// widget's no-timeout fetch branch (the 'default' branch is Leaflet Routing Machine with a
-// hard 30s timeout - bus requests to the unpatched online router take ~30-45s and always
-// timed out there, L44). The endpoints are the precise geocoded origin/destination (markers
-// land on the real civic address); the WKT endpoints are only a fallback. In the fetch branch
-// the per-point `color` ARRAY is consumed for real: color[0] styles the drawn line. A bus
-// trajectory adds `multimodal` (lineColors + stop icon): the widget splits the fetched path
-// on the pt leg's instruction interval, colors walking/ride legs separately and pins the
-// board/alight stops; foot/car must NOT carry it (a path with no pt leg would be painted in
-// the pedestrian color - wrong for car). EVERY point must carry an `icon` field (empty string
-// = no marker) - the L30 crash signature (Cannot read ... 'length') was a missing icon field,
-// not the drawMethod. Returns the object - the caller batches all routes into ONE event (see
-// drawRoutes).
+var BUS_STOP_ICON = "https://servicemap.disit.org/WebAppGrafo/img/mapicons/TransferServiceAndRenting_BusStop.png";
+// Bus route carrying per-leg geometry (route.legs, the backend's walk/ride split of the
+// journey line): drawn through the widget's MANUAL branch - every point carries
+// mode.routing.manual, and the widget connects consecutive points with straight segments,
+// each segment taking the CURRENT point's color (a STRING here, not the fetch branch's
+// array). So walking vertices carry green and ride vertices orange, and the split paints
+// straight from the /advise response with NO router call: the line appears together with
+// the reply (L44; the ride shape is stop-to-stop straight lines - the GTFS has no shapes,
+// same look the widget's own fetch drew). A point's non-empty icon becomes a marker:
+// start/finish flags on the precise geocoded endpoints, ServiceMap bus-stop pins on the
+// ride boundaries (board/alight). Adjacent legs share their boundary vertex; the
+// duplicate is dropped so the segments stay connected.
+function buildBusTraj(route, origin, destination) {
+var points = [];
+function push(gps, col, icon) {
+points.push({ optionalhtmltrajpopup: "", mode: { routing: { manual: true } }, color: col, icon: icon, position: { serviceUri: "", gps: gps } });
+}
+if (origin) push(origin, MODE_COLORS.foot, ICONS.start);
+var legStarted = false;
+route.legs.forEach(function (leg) {
+var col = leg.type === "bus" ? MODE_COLORS.bus : MODE_COLORS.foot;
+var line = parseWktLine(leg.wkt);
+if (!line.length) return;
+if (legStarted) {
+// Shared boundary vertex (already appended): a ride starting here gets its board
+// pin on it; never clobber a start/finish flag.
+if (leg.type === "bus" && points[points.length - 1].icon === "") points[points.length - 1].icon = BUS_STOP_ICON;
+line = line.slice(1);
+}
+var first = points.length;
+line.forEach(function (gps) { push(gps, col, ""); });
+if (leg.type === "bus" && points.length > first) {
+if (!legStarted && points[first].icon === "") points[first].icon = BUS_STOP_ICON;
+points[points.length - 1].icon = BUS_STOP_ICON;
+}
+legStarted = true;
+});
+if (destination) push(destination, MODE_COLORS.foot, ICONS.finish);
+return { id: TRAJ_IDS.bus, eventType: "Trajectory", points: points };
+}
+// Build one trajectory object for a route. A bus route with per-leg geometry goes through
+// buildBusTraj (manual branch, zero router calls); everything else sends two endpoint
+// waypoints + drawMethod:"fetch", the widget's no-timeout fetch branch (the 'default'
+// branch is Leaflet Routing Machine with a hard 30s timeout - bus requests to the
+// unpatched online router take ~30-45s and always timed out there, L44). The endpoints
+// are the precise geocoded origin/destination (markers land on the real civic address);
+// the WKT endpoints are only a fallback. In the fetch branch the per-point `color` ARRAY
+// is consumed for real: color[0] styles the drawn line. A legless bus trajectory (older
+// backend) still adds `multimodal` (lineColors + stop icon) so the widget splits the
+// fetched path itself; foot/car must NOT carry it (a path with no pt leg would be painted
+// in the pedestrian color - wrong for car). EVERY point must carry an `icon` field (empty
+// string = no marker) - the L30 crash signature (Cannot read ... 'length') was a missing
+// icon field, not the drawMethod. Returns the object - the caller batches all routes into
+// ONE event (see drawRoutes).
 function buildTraj(route, color, origin, destination) {
+if (vehicleOf(route.mode) === "bus" && route.legs && route.legs.length) {
+return buildBusTraj(route, origin, destination);
+}
 // Prefer the precise geocoded endpoints (origin/destination from the backend, pinned on the
 // real civic address) so the markers don't drift to the routing service's road-snapped WKT
 // endpoint (~27 m up the street). Fall back to the WKT endpoints when O/D is absent (the
@@ -235,12 +279,13 @@ multipleLines: false,
 points: points
 };
 if (vehicle === "bus") {
-traj.multimodal = { lineColors: { pedestrian: MODE_COLORS.foot, bus: MODE_COLORS.bus, modal: MODE_COLORS.bus }, icon: ICON_BASE + "IntermediateStopOfRoute.png" };
+traj.multimodal = { lineColors: { pedestrian: MODE_COLORS.foot, bus: MODE_COLORS.bus, modal: MODE_COLORS.bus }, icon: "https://servicemap.disit.org/WebAppGrafo/img/mapicons/TransferServiceAndRenting_BusStop.png" };
 }
 return traj;
 }
-// Draw every route from the backend, one vivid line per mode (foot green / car blue / bus
-// orange) - no primary/alternate distinction, no dimming. ALL trajectories go in ONE
+// Draw every route from the backend, one vivid line per mode (foot green / car blue; bus =
+// walking legs green, ride leg orange, ServiceMap bus-stop pins at the board/alight
+// points) - no primary/alternate distinction, no dimming. ALL trajectories go in ONE
 // addCustomTrajectory event (passedData is an array): the widget replaces its whole trajectory
 // layer on each event, so separate events would let the last wipe the others. The markers use
 // the precise geocoded origin/destination so every mode's start/finish pins land on the real

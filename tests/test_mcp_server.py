@@ -11,10 +11,12 @@ from snap4city_mobility_mcp.mcp_server import (
     _bus_arcs,
     _fmt_hms,
     _journey_duration_ms,
+    _leg_slices,
     _rome_local_iso,
     _normalize_feature,
     _servicemap_search,
     _wkt_length_km,
+    _wkt_points,
 )
 
 
@@ -181,6 +183,43 @@ def test_wkt_length_km():
     d = _wkt_length_km("LINESTRING (11.2558 43.7731, 11.2558 43.7821)")
     assert d is not None and 0.9 < d < 1.1
     assert _wkt_length_km("not a linestring") is None
+
+
+def test_wkt_points_and_leg_slices_single_ride():
+    # instruction `interval` indexes the WKT vertices (live-verified, L44): a ride over
+    # vertices 2..4 cuts the line into walk / ride / walk, boundary vertices shared so the
+    # drawn segments connect.
+    wkt = "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0, 11.003 43.0, 11.004 43.0, 11.005 43.0)"
+    pts = _wkt_points(wkt)
+    assert pts is not None and len(pts) == 6 and pts[0] == (11.0, 43.0)
+    ins = [
+        {"text": "Continue", "interval": [0, 2], "leg": None},
+        {"text": "Pt_start_trip", "interval": [2, 4], "leg": {"map": {"type": "pt"}}},
+        {"text": "Continue", "interval": [4, 5], "leg": None},
+    ]
+    legs = _leg_slices(ins, pts)
+    assert [leg["type"] for leg in legs] == ["foot", "bus", "foot"]
+    assert legs[0]["wkt"] == "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0)"
+    assert legs[1]["wkt"] == "LINESTRING (11.002 43.0, 11.003 43.0, 11.004 43.0)"
+    assert legs[2]["wkt"] == "LINESTRING (11.004 43.0, 11.005 43.0)"
+    assert _wkt_points("not a linestring") is None
+
+
+def test_leg_slices_transfer_and_defenses():
+    pts = [(float(i), 0.0) for i in range(10)]
+    # Two rides (a transfer): walk / ride / walk / ride / walk.
+    legs = _leg_slices(
+        [{"leg": {"map": {}}, "interval": [1, 3]}, {"leg": {"map": {}}, "interval": [5, 8]}],
+        pts,
+    )
+    assert [leg["type"] for leg in legs] == ["foot", "bus", "foot", "bus", "foot"]
+    # Walking-only journey (no instruction carries a leg dict): no slices at all.
+    assert _leg_slices([{"text": "walk", "leg": None, "interval": [0, 9]}], pts) == []
+    # Defensive: malformed interval skipped, out-of-range end clamped to the last vertex.
+    assert _leg_slices([{"leg": {"map": {}}, "interval": None}], pts) == []
+    clamped = _leg_slices([{"leg": {"map": {}}, "interval": [8, 99]}], pts)
+    assert [leg["type"] for leg in clamped] == ["foot", "bus"]
+    assert clamped[-1]["wkt"] == "LINESTRING (8.0 0.0, 9.0 0.0)"
 
 
 def test_bus_arcs_walk_only_yields_foot_arcs():

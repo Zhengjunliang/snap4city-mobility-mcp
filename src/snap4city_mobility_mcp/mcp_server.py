@@ -115,13 +115,12 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * radius * math.asin(math.sqrt(a))
 
 
-def _wkt_length_km(wkt: str) -> float | None:
-    """Total geodesic length (km) of a 'LINESTRING (lng lat, lng lat, ...)'.
+def _wkt_points(wkt: str) -> list[tuple[float, float]] | None:
+    """(lng, lat) vertex list of a 'LINESTRING (lng lat, lng lat, ...)', or None.
 
-    The router's paths[0].distance counts only the walking-access metres — a GTFS transit
-    leg's in-vehicle ride contributes 0 to it (whatif-local/test-output.json: distance 2017 m
-    is exactly the walk to/from the stops), so the real door-to-door distance is recovered by
-    measuring the full drawn geometry instead. None when the WKT can't be parsed.
+    Vertex indices match the router instructions' `interval` fields (live-verified: the
+    last instruction's interval names the last vertex, and a ride interval's endpoints
+    land on the board/alight stops) — which is what lets _leg_slices cut the geometry.
     """
     lo, hi = wkt.find("("), wkt.rfind(")")
     if lo < 0 or hi <= lo:
@@ -131,16 +130,68 @@ def _wkt_length_km(wkt: str) -> float | None:
         xy = pair.split()
         if len(xy) >= 2:
             try:
-                pts.append((float(xy[1]), float(xy[0])))  # (lat, lng) from "lng lat"
+                pts.append((float(xy[0]), float(xy[1])))
             except ValueError:
                 continue
-    if len(pts) < 2:
+    return pts or None
+
+
+def _wkt_length_km(wkt: str) -> float | None:
+    """Total geodesic length (km) of a 'LINESTRING (lng lat, lng lat, ...)'.
+
+    The router's paths[0].distance counts only the walking-access metres — a GTFS transit
+    leg's in-vehicle ride contributes 0 to it (whatif-local/test-output.json: distance 2017 m
+    is exactly the walk to/from the stops), so the real door-to-door distance is recovered by
+    measuring the full drawn geometry instead. None when the WKT can't be parsed.
+    """
+    pts = _wkt_points(wkt)
+    if pts is None or len(pts) < 2:
         return None
     total = sum(
-        _haversine_km(a_lat, a_lng, b_lat, b_lng)
-        for (a_lat, a_lng), (b_lat, b_lng) in zip(pts, pts[1:])
+        _haversine_km(a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:])
     )
     return round(total, 3)
+
+
+def _fmt_linestring(pts: list[tuple[float, float]]) -> str:
+    """'LINESTRING (lng lat, ...)' from a (lng, lat) vertex list (router WKT shape)."""
+    return "LINESTRING (" + ", ".join(f"{lng} {lat}" for lng, lat in pts) + ")"
+
+
+def _leg_slices(
+    instructions: list[Any], pts: list[tuple[float, float]]
+) -> list[dict[str, Any]]:
+    """Per-leg geometry cuts of the journey line: [{"type": "foot"|"bus", "wkt": ...}].
+
+    A PT ride instruction's `interval` is a [start, end] vertex-index pair into the path
+    geometry, so the line splits into walk / ride / walk slices — the same cut the What-If
+    widget makes client-side after re-fetching the route (dashboard-builder widgetMap.php).
+    Shipping the slices lets the dashboard draw the walk/ride split (and the board/alight
+    stop pins, the slice boundary vertices) straight from this response, with no second
+    router call. Adjacent slices share their boundary vertex so the drawn segments connect.
+    Rides with a missing/malformed interval are skipped; no rides yields [] (walking-only).
+    """
+    rides: list[tuple[int, int]] = []
+    for ins in instructions:
+        if not (isinstance(ins, dict) and isinstance(ins.get("leg"), dict)):
+            continue
+        iv = ins.get("interval")
+        if not (isinstance(iv, list) and len(iv) == 2 and all(isinstance(i, int) for i in iv)):
+            continue
+        a, b = max(0, iv[0]), min(len(pts) - 1, iv[1])
+        if a < b:
+            rides.append((a, b))
+    rides.sort()
+    legs: list[dict[str, Any]] = []
+    start = 0
+    for a, b in rides:
+        if a > start:
+            legs.append({"type": "foot", "wkt": _fmt_linestring(pts[start : a + 1])})
+        legs.append({"type": "bus", "wkt": _fmt_linestring(pts[a : b + 1])})
+        start = b
+    if legs and start < len(pts) - 1:
+        legs.append({"type": "foot", "wkt": _fmt_linestring(pts[start:])})
+    return legs
 
 
 def _journey_duration_ms(first: dict[str, Any]) -> int:
@@ -383,6 +434,10 @@ async def bus_route(
     # plain foot arcs when it is walking-only (see _bus_arcs).
     arc = _bus_arcs(first)
     route: dict[str, Any] = {"wkt": wkt, "distance": distance_km, "arc": arc}
+    pts = _wkt_points(wkt)
+    legs = _leg_slices(first.get("instructions") or [], pts) if pts else []
+    if legs:
+        route["legs"] = legs
     duration_ms = _journey_duration_ms(first)
     if duration_ms > 0:
         route["time"] = _fmt_hms(duration_ms)

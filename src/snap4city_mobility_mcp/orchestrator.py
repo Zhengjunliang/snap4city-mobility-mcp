@@ -693,6 +693,10 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "source_node": journey.get("source_node"),
                 "destination_node": journey.get("destination_node"),
             }
+            if isinstance(first.get("legs"), list) and first["legs"]:
+                # Per-leg geometry (walk/ride split) from bus_route: the dashboard draws
+                # the colored split + stop pins from this, no second router call (L44).
+                route["legs"] = first["legs"]
             if routetype == "public_transport" and _pt_is_foot_only(result):
                 # Walking-only journey: not a real PT option (respond gets the
                 # pt_degraded_to_foot hint and says so), but the walk itself is real —
