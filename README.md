@@ -6,13 +6,13 @@ User asks a trip question → a Langgraph **deterministic** graph (`understand �
 
 ---
 
-## Status
+## 1. Status
 
 Working end-to-end on the **Snap4City JupyterHub** (browser login, intranet-direct MCP, no VPN/SSH tunnel). The remote referente MCP server is connected over HTTP Streamable, and the **Llama4 agentic LLM client** (`src/snap4city_mobility_mcp/llm.py`, endpoint `llama4-agentic-inference`) is live there.
 
 The deterministic advisor answers **point-to-point trip questions** — on foot, by car, or by public transport — with GPS-aware endpoint resolution:
 
-- **Named places** geocode worldwide (no region lock); a city the user names always wins, and with the browser GPS available the candidate **nearest to the user** wins among equals.
+- **Named places** geocode worldwide (no region lock); a city the user names always wins, and with the browser GPS available the candidate **nearest to the user** wins among equals. Usable km4city data is Tuscany-only, so test with Tuscan places.
 - **Missing origin** ("portami al Duomo") defaults to the **user's GPS position** (reverse-geocoded once so the reply can say *"dalla tua posizione"*); without GPS the advisor asks for the starting point.
 - **Generic-category destinations** ("la farmacia più vicina") resolve via the remote `service_search_near_gps_position` tool — the nearest service of that km4city category around the user (or around the named city without GPS).
 
@@ -20,162 +20,67 @@ The remote `routing` tool is retired on the client side: **all routing** (foot /
 
 ---
 
-## Prerequisites
+## 2. Setup
 
-- Python **≥ 3.10** (project pinned to 3.10 via `.python-version`)
-- [`uv`](https://github.com/astral-sh/uv) — modern Python project + venv manager
-
-Commands below are written for **PowerShell** on Windows; bash equivalents are noted in parentheses when they differ.
-
----
-
-## 1. Install Python 3.10
-
-- **Windows**: `winget install Python.Python.3.10` *(or download from [python.org](https://www.python.org/downloads/); avoid the Microsoft Store build — known PATH issues)*
-- **macOS**: `brew install python@3.10`
-- **Linux**: use your distribution's package manager
-
-Verify:
-
-```powershell
-python --version
-# Python 3.10.x
-```
-
----
-
-## 2. Install `uv`
-
-Simplest (uses whichever Python is on PATH):
-
-```powershell
-pip install uv
-```
-
-Or via the official installer:
-
-- **Windows**: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
-- **macOS / Linux**: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-
-Verify:
-
-```powershell
-uv --version
-# uv 0.11.x or newer
-```
-
----
-
-## 3. Clone and sync dependencies
+Needs **Python ≥ 3.10** (`.python-version` pins 3.10) and [`uv`](https://github.com/astral-sh/uv) (`pip install uv`):
 
 ```powershell
 git clone <repo-url>
 cd snap4city-mobility-mcp
-uv sync
+uv sync          # creates .venv/ and installs the lockfile's exact versions
+uv run pytest -q # local mock tests: no LLM / MCP needed, runs anywhere
 ```
 
-`uv sync` reads `pyproject.toml` + `uv.lock`, creates `.venv/` inside the project, and installs `fastmcp<3` plus all transitive dependencies at the exact versions pinned in the lockfile.
+`uv run <cmd>` always uses the project's `.venv/` — activating it (`.venv\Scripts\Activate.ps1`, or `source .venv/bin/activate`) only saves you the prefix.
+
+On the **JupyterHub** (the only place the advisor really runs, see §3) `uv` is usually absent: create a conda **Python 3.11** env (`s4c`) — the default kernel 3.9 is too old for fastmcp — and `pip install -e .` (`CLAUDE.md` §5.1, `docs/lessons.md` L9/L15).
+
+The **Llama4 LLM** answers **only from the JupyterHub**: put the function-account credentials there in a `user_credentials.json` (`{"username": "...", "password": "..."}`) — it is `.gitignore`d, so upload it manually to the repo root. The client searches `S4C_CREDENTIALS_FILE` → working dir → repo root.
 
 ---
 
-## 4. Do I need to activate the venv? — Short answer: **No**
+## 3. Run it (JupyterHub)
 
-`uv run <cmd>` automatically uses the project's `.venv/`. You can work two ways — **pick one and stick with it**.
-
-### Option A — Don't activate (recommended for newcomers to `uv`)
-
-```powershell
-PS D:\...\snap4city-mobility-mcp> uv run pytest -q
-PS D:\...\snap4city-mobility-mcp> uv run ruff check src/
-```
-
-Prefix every command with `uv run`. No `(.venv)` indicator in the prompt.
-
-### Option B — Activate (shorter commands)
-
-```powershell
-# PowerShell
-PS D:\...\snap4city-mobility-mcp> .venv\Scripts\Activate.ps1
-(.venv) PS D:\...\snap4city-mobility-mcp> pytest -q
-```
-
-```cmd
-:: Windows cmd.exe
-D:\...\snap4city-mobility-mcp> .venv\Scripts\activate.bat
-(.venv) D:\...\snap4city-mobility-mcp> pytest -q
-```
-
-The `(.venv) ` prefix in the prompt means the venv is active. Type `deactivate` to leave.
-
-**bash / zsh**: `source .venv/bin/activate`.
-
-**Don't** `pip install fastmcp` into your global Python and then run `fastmcp` directly — that bypasses the lockfile and pollutes your system Python.
-
----
-
-## 5. Run modes
-
-The project runs on the **Snap4City JupyterHub** (referente requires Python dev to run on the dedicated Jupyter; browser login, intranet-direct, no VPN/SSH tunnel). The orchestrator reaches the MCP dashboard at the intranet IP `192.168.1.117:8000` by default; override with the `S4C_DASHBOARD_URL` env var if needed.
-
-The **Llama4 LLM** (`src/snap4city_mobility_mcp/llm.py`) is reachable **only from the JupyterHub**; provide the function-account creds there via a `user_credentials.json` file (`{"username": "...", "password": "..."}`; it is `.gitignore`d, so upload it manually to the repo root). The client searches `S4C_CREDENTIALS_FILE` → working dir → repo root. JupyterHub bootstrap (conda Python 3.11 env — the default kernel 3.9 is too old for fastmcp) is in `CLAUDE.md` §5.1 and `docs/lessons.md` L9.
-
-### 0. Prerequisite — JupyterHub environment
-
-The remote Snap4City MCP server lives on the intranet and is reached directly from the JupyterHub (no VPN/SSH tunnel). Set up and sanity-check there:
-
-1. Log in: snap4city.org → *Strumenti di sviluppo* → *Jupyter Hub - Python* (function account; creds in private memory, not in the repo).
-2. Create a conda Python 3.11 env (kernel `s4c`) and `pip install -e .` (see `CLAUDE.md` §5.1 / `docs/lessons.md` L9). The default kernel 3.9 is too old for fastmcp.
-3. Sanity check the dashboard is reachable:
-   ```bash
-   curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
-   ```
-   Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
-
-### Mobility advisor (dashboard chat box + bridge `api.py`)
-
-The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the **FastAPI bridge** `api.py`. Internally a Langgraph graph `understand → execute → respond`: Llama4 extracts the slots (`understand`, forced tool call) and phrases the answer (`respond`, no tools), while `execute` deterministically chains the MCP tools in Python — geocoding + routing (`route`, all modes) on the local server, reverse geocode / nearest-service search / live parking on the remote `snap4agentic_advisor_native` server over HTTP Streamable transport. The LLM never free-calls tools (see `docs/lessons.md` L13).
-
-Run **two processes** on the JupyterHub (see §11; routing uses the online whatif-router, no third process needed). First the **local MCP server**, which serves
-forward geocoding (referente's remote `address_search_location` is server-side broken, so we host
-our own tool wrapping the public km4city ServiceMap — see `docs/lessons.md` L28/L29) and the
-`route` tool (foot / car / bus, wrapping the Snap4City What-If GraphHopper router —
-`docs/lessons.md` L46). It only needs outbound HTTP to the public ServiceMap and the online
-whatif-router:
+The remote MCP server lives on the intranet and is reached directly from the JupyterHub (no VPN/SSH tunnel); the orchestrator defaults to `http://192.168.1.117:8000` (override with `S4C_DASHBOARD_URL`). Log in: snap4city.org → *Strumenti di sviluppo* → *Jupyter Hub - Python*, then check the dashboard is up:
 
 ```bash
-python -m snap4city_mobility_mcp.mcp_server          # serves http://0.0.0.0:8020/mcp/
+curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
+# JSON with mcpServers listing snap4agentic_advisor_native / _legacy / _experimental
 ```
 
-Then the bridge (where Llama4 + the remote MCP server are reachable); the browser reaches it
-same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L27, wiring in
-`frontend/README.md`). It connects to the local MCP server via `S4C_LOCAL_MCP_URL`
-(default `http://127.0.0.1:8020/mcp`):
+**Two processes**, each in its own JupyterHub terminal inside the `s4c` env, the local MCP server first. Stop them with `Ctrl-C`, never by closing the tab — a closed tab can leave the port held (`Address already in use`; check with `ss -ltn | grep -E ':8020|:8010'`).
 
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8010
+python -m snap4city_mobility_mcp.mcp_server   # terminal 1 — :8020
+uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2 — :8010
 ```
 
-The bridge speaks a **job + poll** protocol: `POST /advise` starts the turn and answers
-`{"job_id": ...}` immediately, then `GET /advise/{job_id}` returns `202` while the turn is
-computing and `200` with the widget JSON once it is done. A public-transport turn runs
-~50–70 s and the reverse proxy chain cuts any single request past ~60 s, so no HTTP request
-here may span a whole turn (`docs/lessons.md` L47 — heartbeat streaming does *not* work).
-Each `202` also carries the **stage** the turn is in (`understand` → `geocode` → `routing` /
-`routing_bus` → `respond`) and its `elapsed_s`, so the chat box can say what is running
-instead of showing a blank "thinking" bubble for the ~30–45 s a bus route currently costs.
-The stage and the job id live in the transport layer only — they never enter the widget JSON.
+- **Terminal 1, local MCP server** (`:8020`): forward geocoding (wrapping the public km4city ServiceMap — referente's remote `address_search_location` is server-side broken, `docs/lessons.md` L28/L29) and the `route` tool for all modes (wrapping the What-If GraphHopper router, L46). It only needs outbound HTTP. The client reaches it via `S4C_LOCAL_MCP_URL` (default `http://127.0.0.1:8020/mcp`).
+- **Terminal 2, advisor bridge** (`:8010`): drives the LLM and both MCP servers. The browser reaches it same-origin through `jupyter-server-proxy` (setup recipe in `docs/lessons.md` L27, wiring in `frontend/README.md`).
 
-Sanity-check the bridge without the dashboard:
+The front end is a natural-language **chat box** on the Snap4City dashboard (`frontend/mobility_advisor_dashboard.html`, a `widgetExternalContent`) talking to the bridge, with the route drawn on a sibling `widgetMap`.
+
+### The bridge protocol: job + poll
+
+`POST /advise` **starts** the turn and answers `{"job_id": ...}` immediately; `GET /advise/{job_id}` returns `202` while it computes and `200` with the widget JSON once done. A public-transport turn runs ~50–70 s and the reverse proxy chain cuts any single request past ~60 s, so no HTTP request here may span a whole turn (`docs/lessons.md` L47 — heartbeat streaming does *not* work; do not collapse this back into one request). Each `202` also carries the **stage** (`understand` → `geocode` → `routing` / `routing_bus` → `respond`) and its `elapsed_s`, so the chat box says what is running instead of showing a blank "thinking" bubble. Stage and job id live in the transport layer only — they never enter the widget JSON.
+
+Sanity-check without the dashboard:
 
 ```bash
 curl -s localhost:8010/health
 JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
   -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
   | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
-curl -s localhost:8010/advise/$JOB    # 202 {"status":"pending","stage":...} -> repeat until the JSON lands
+until curl -s -o /tmp/turn.json -w '%{http_code}' localhost:8010/advise/$JOB | grep -q 200; do sleep 2; done
+head -c 300 /tmp/turn.json    # status="success", request_type="route", data.distance_km ≈ 0.68, full data.wkt
+# GPS-aware turn: the origin defaults to the position, a category resolves to the nearest service
+curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
+  -d '{"query":"portami alla farmacia più vicina","history":[],"gps":{"lat":43.7731,"lng":11.2558}}'
 ```
 
-The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, nothing hardcoded); the route (`data.wkt`) is drawn on a sibling `widgetMap`. Follow-ups reuse history (e.g. *"e per una passeggiata tranquilla?"*). The dashboard front-end also sends the browser geolocation as `gps: {lat, lng}` (or `null`) with every turn — origin defaulting and nearest-candidate picking key off it. Every turn also appends the **full output JSON** to `outputs.txt` (gitignored) so you can inspect the whole flow offline; tool-level diagnostics (geocoded coordinates, extracted slots, raw routing payloads on failure) go to `debug.log` (gitignored). Both files are reset at every bridge start — they hold only the current session. That JSON is the widget payload the dashboard consumes:
+Each turn overwrites `outputs.txt` with the full output JSON and `debug.log` with the tool-level diagnostics (both gitignored, both in the cwd) — inspect them when a turn draws no route.
+
+### The widget payload
 
 ```json
 {
@@ -189,48 +94,54 @@ The chat bubble shows **only the LLM's own reply** (`messages[-1].content`, noth
 }
 ```
 
-The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — there is no custom top-level `answer` field. `data` carries the route payload: the full `wkt` LINESTRING + `distance_km` + `duration` + `mode`, plus a `routes` list (one per travel mode; a bus route also ships its walk/ride `legs` geometry for the map split — the `arcs` per-segment detail is currently omitted to slim the payload). `messages` is the conversation history carried forward for multi-turn (the dashboard front-end keeps it and sends it back as `history` each turn). Out-of-scope questions (including transport-network reference questions like line lists or timetables) return a friendly "unsupported" reply.
+The reply text is the **last `assistant` turn in `messages`** (OpenAI-standard) — no custom top-level `answer` field. `data` carries the full `wkt` + `distance_km` + `duration` + `mode`, plus a `routes` list (one per travel mode; a bus route also ships its walk/ride `legs` geometry for the map split). The front-end keeps `messages` and sends them back as `history` next turn, and sends the browser geolocation as `gps: {lat, lng}` (or `null`) with every turn. Out-of-scope questions (including network reference questions like line lists or timetables) return a friendly "unsupported" reply.
 
-**Travel modes.** When the question does not name one (*"da Piazza del Duomo a Santa Croce"*), all three are routed **concurrently** — on foot, by car and by public transport — so the reply compares them and the map draws a line each (`docs/lessons.md` L31). The turn answers once, when all three are in: the wall clock is the slowest of them, today the bus one, because the online whatif-router rebuilds its public-transport graph on every `vehicle=bus` request (~30–45 s) until referente merges `whatif-local/patches/pt-router-singleton.patch`; foot and car are sub-second. The chat box shows the stage and the elapsed seconds meanwhile. Naming a mode (*"a piedi"*) routes that one only, so it never pays the bus latency. A **departure time** the user gives (*"alle 18"*, *"domani alle 9"*) becomes the public-transport timetable window; an *arrival* time is not supported (the What-If servlet has no `arrive_by`).
+**Travel modes.** When the question does not name one (*"da Piazza del Duomo a Santa Croce"*), all three are routed **concurrently** — on foot, by car and by public transport — so the reply compares them and the map draws a line each (`docs/lessons.md` L31). The turn answers once, when all three are in: the wall clock is the slowest of them, today the bus one, because the online whatif-router rebuilds its public-transport graph on every `vehicle=bus` request (~30–45 s) until referente merges `whatif-local/patches/pt-router-singleton.patch`; foot and car are sub-second. Naming a mode (*"a piedi"*) routes that one only, so it never pays the bus latency. A **departure time** the user gives (*"alle 18"*, *"domani alle 9"*) becomes the public-transport timetable window; an *arrival* time is not supported (the What-If servlet has no `arrive_by`).
 
-> **Note**: the LLM only answers from the JupyterHub (with a `user_credentials.json` present in the repo root).
+**Known limitation — the bus line is drawn stop to stop.** A public-transport *ride* leg comes back with one vertex per stop (measured: 8 vertices over 1.78 km, longest hop 476 m), so the drawn line cuts straight across blocks instead of following the roads. Not missing data — both GTFS feeds carry `shapes.txt` — but **GraphHopper's GTFS importer ignores it**, so a ride leg's points are just its stop coordinates. The exact shape is recoverable client-side (`trip_id` → `trips.txt` → `shape_id` → `shapes.txt`, cut between the board and alight stops); see `docs/lessons.md` L44.
+
+### Optional — point `route` at a locally built whatif-router
+
+`route` defaults to the **online** What-If router (`https://www.snap4city.org/whatif-router/route`), which carries the Tuscany GTFS since 2026-07-10 and returns real transit — **no third process needed**. Only to validate the perf patch (or a different GTFS set) do you need a self-built router — see [`whatif-local/README.md`](whatif-local/README.md):
+
+```bash
+export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
+```
 
 ---
 
-## 6. Project layout
+## 4. Project layout
 
 ```
 snap4city-mobility-mcp/
 ├── pyproject.toml              # uv-managed project file
 ├── uv.lock                     # exact-version lockfile (committed)
-├── .python-version             # "3.10" (committed)
-├── README.md                   # this file
-├── api.py                      # FastAPI bridge for the dashboard chat box (job/poll: POST /advise + GET /advise/{job_id}; writes full JSON to outputs.txt)
+├── api.py                      # FastAPI bridge for the dashboard chat box (job/poll: POST /advise + GET /advise/{job_id})
 ├── frontend/                   # Snap4City dashboard front-end (widgetExternalContent chat box + widgetMap)
-├── whatif-local/               # referente whatif-router perf patch (patches/) + apply/test notes (see its README)
+├── whatif-local/               # referente whatif-router perf patch (patches/) + apply/test notes
 ├── docs/
 │   ├── lessons.md              # architectural traps (km4city / runtime)
 │   └── snap4city-api-notes.md  # field-by-field observations of the real API
 ├── tests/                      # local mock unit tests (no LLM / MCP needed)
 └── src/
     └── snap4city_mobility_mcp/    # client package + local MCP server — the remote advisor server is referente-managed
-        ├── __init__.py            # package version only
-        ├── mcp_tools.py           # client MCP layer: Client config, exec_tool, two-pass geocode helpers, result parsers
-        ├── mcp_server.py          # our own local MCP server: forward geocode (wraps the public km4city ServiceMap, L29) + `route` for all modes (wraps the What-If GraphHopper router, L46)
+        ├── mcp_tools.py           # client MCP layer: Client config, exec_tool, two-pass geocode, result parsers
+        ├── mcp_server.py          # our local MCP server: forward geocode (public km4city ServiceMap, L29) + `route` for all modes (What-If GraphHopper, L46)
         ├── orchestrator.py        # deterministic Langgraph graph: understand → execute → respond; run_advisor
-        ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible tool calling)
+        ├── geo.py                 # haversine, shared by the graph and the local server
+        ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible)
         └── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
 ```
 
 ---
 
-## 7. Tools consumed — 3 remote + 2 local
+## 5. Tools consumed — 3 remote + 2 local
 
-The remote `snap4agentic_advisor_native` server (referente-managed) provides reverse geocoding, the nearest-service search and live parking data; we connect to it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`). We narrow the config to that single server, so FastMCP adds **no** name prefix and tools are called bare (`coordinates_to_address`, not `snap4agentic_advisor_native_coordinates_to_address`) — see `docs/lessons.md` L6.
+The remote `snap4agentic_advisor_native` server (referente-managed) provides **reverse geocoding** (`coordinates_to_address` — labels a GPS-defaulted origin), the **nearest-service search** (`service_search_near_gps_position` — car parks near the destination + "farmacia più vicina" destinations) and **live parking** (`service_info_dev` — free-spaces per car park). We reach it via dashboard auto-discovery (`http://192.168.1.117:8000/apps.json` → `Client(config)`), narrowed to that single server, so FastMCP adds **no** name prefix and tools are called bare (`docs/lessons.md` L6).
 
-**Forward geocoding and routing are served locally.** The remote `address_search_location` is server-side broken (returns foreign hits / zero Tuscan for valid Florence queries, `docs/lessons.md` L28), and the remote `routing` tool is retired (`public_transport` never returned transit, L19, and the km4city backend needed a whole retry ladder, L3/L8 — see L46). Our own MCP server (`mcp_server.py`) hosts `address_search_location` (wrapping the **public** km4city ServiceMap) and `route` (`vehicle="foot"|"car"|"bus"` + start/end coordinates + optional `startdatetime`, wrapping the Snap4City What-If GraphHopper router). The client connects to it as a **separate** single-server client (`S4C_LOCAL_MCP_URL`); keeping it separate — rather than merging both into one config — preserves the remote tools' bare names (no prefix migration, L29).
+**Forward geocoding and routing are served locally** by `mcp_server.py`: `address_search_location` (wrapping the **public** km4city ServiceMap — the remote one is server-side broken, L28) and `route` (`vehicle="foot"|"car"|"bus"` + start/end coordinates + optional `startdatetime`, wrapping the What-If GraphHopper router — the remote `routing` tool is retired, L46). The client connects to it as a **separate** single-server client (`S4C_LOCAL_MCP_URL`); keeping it separate preserves the remote tools' bare names (L29).
 
-Live registry (run from the JupyterHub):
+The deterministic `execute` node chains them in Python — resolve origin (geocode, or the GPS point) → resolve destination (geocode, or nearest service by category) → route each mode — and `mcp_tools.exec_tool` executes every call. Concrete tool signatures live in [docs/snap4city-api-notes.md](docs/snap4city-api-notes.md) §2; re-probe the live registry from the JupyterHub with:
 
 ```powershell
 uv run python -c "
@@ -246,96 +157,21 @@ asyncio.run(main())
 "
 ```
 
-Concrete tool signatures (names + inputSchema + envelope shape) live in [docs/snap4city-api-notes.md §3](docs/snap4city-api-notes.md). Backend reference (km4city `/location/` field-by-field notes — the endpoint the geocode tool wraps) is in §1 of the same file; §2 documents the retired remote `routing` tool and is kept as evidence for the referente. The advisor drives **5 tools**: `coordinates_to_address` (labels a GPS-defaulted origin), `service_search_near_gps_position` (car parks near the destination + nearest-category destinations) and `service_info_dev` (live parking free-spaces) from the remote server, plus `address_search_location` (forward geocode) and `route` (foot / car / bus routing via the What-If router) from the **local** server (`mcp_server.py`). The deterministic `execute` node chains them in Python — resolve origin (geocode, or the GPS point) → resolve destination (geocode, or nearest service by category) → routing per mode (the LLM never picks tools). `mcp_tools.exec_tool` executes each call.
-
 ---
 
-## 8. Verification checklist
-
-- [ ] `uv sync` completes without error
-- [ ] Local mock tests green (no LLM / MCP needed — runs anywhere): `uv run pytest -q`
-- [ ] On the JupyterHub, dashboard reachable:
-  ```bash
-  curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
-  ```
-  Expected: JSON with `mcpServers` listing `snap4agentic_advisor_native` / `_legacy` / `_experimental`.
-- [ ] End-to-end advisor check via the bridge (JupyterHub — drives the LLM + both MCP servers):
-  ```bash
-  uvicorn api:app --host 0.0.0.0 --port 8010      # in one terminal
-  JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-    -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
-    | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
-  curl -s localhost:8010/advise/$JOB   # 202 while computing; repeat until the JSON lands
-  ```
-  Expected (also written to `outputs.txt`): `status="success"`, `request_type="route"`, `data.distance_km ≈ 0.68`, full `data.wkt`.
-
----
-
-## 9. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Cause / Fix |
 |---|---|
-| `fastmcp: command not found` | `uv sync` was not run, or your shell is not pointing at `.venv`. Use `uv run fastmcp …` to bypass activation. |
 | `uvicorn api:app` → `ModuleNotFoundError: snap4city_mobility_mcp` | The package isn't installed in the active env. Run `pip install -e .` (inside the `s4c` conda env on the JupyterHub) or `uv run uvicorn api:app …` locally. |
 | `POST /advise` → `Llama4Error: no user_credentials.json found` | Place `user_credentials.json` (`{"username": ..., "password": ...}`) in the repo root. The LLM only answers from the JupyterHub. |
-| `apps.json` 404 / connection refused / timeout from `http://192.168.1.117:8000` | Not running inside the JupyterHub (the intranet IP is reachable only from there), or the dashboard is down. Run from a JupyterHub terminal/notebook and make sure `S4C_DASHBOARD_URL` is not overridden. |
-| A `public_transport` request takes ~30–45 s | Known current state, not a client bug: the online whatif-router has not merged the `pt-router-singleton` perf patch yet, so every PT request rebuilds the PT graph (`docs/lessons.md` L42/L46). `BUS_ROUTE_TIMEOUT_S=120` covers it; sub-second once the patch is merged. Foot/car never touch the PT graph (~0.3–0.5 s measured). |
-| Dashboard chat shows *"bridge non raggiungibile"* on a long (bus) turn | The widget must be the current one: the bridge is **job + poll** now (`POST /advise` → `job_id`, then `GET /advise/{job_id}`). An old single-request widget hangs on the POST and the proxy chain cuts it at ~60 s even though the turn succeeds (`docs/lessons.md` L47). Re-paste `frontend/mobility_advisor_dashboard.html`. |
-| VS Code shows *"Package `fastmcp` is not installed in the selected environment"* | The IDE's Python interpreter is not pointing at `.venv\Scripts\python.exe`. Open the Command Palette → *Python: Select Interpreter* → pick the one inside `.venv`. |
+| `apps.json` 404 / connection refused / timeout | Not running inside the JupyterHub (the intranet IP is reachable only from there), or the dashboard is down. Check that `S4C_DASHBOARD_URL` is not overridden. |
+| A `public_transport` request takes ~30–45 s | Known current state, not a client bug: the online whatif-router has not merged the `pt-router-singleton` perf patch, so every PT request rebuilds the PT graph (`docs/lessons.md` L42/L46). `BUS_ROUTE_TIMEOUT_S=120` covers it; sub-second once merged. Foot/car never touch the PT graph (~0.3–0.5 s). |
+| Chat shows *"bridge non raggiungibile"* on a long (bus) turn | The widget must be the current one (job + poll). An old single-request widget hangs on the POST and the proxy chain cuts it at ~60 s even though the turn succeeded (L47). Re-paste `frontend/mobility_advisor_dashboard.html`. |
+| VS Code: *"Package `fastmcp` is not installed in the selected environment"* | Point the IDE's interpreter at `.venv\Scripts\python.exe` (Command Palette → *Python: Select Interpreter*). |
 
 ---
 
-## 10. License
+## 7. License
 
 TBD — academic project.
-
----
-
-## 11. JupyterHub quick start (run order)
-
-Run from a **JupyterHub terminal** inside the `s4c` conda env (Python 3.11). Two processes are needed — the local MCP server (`:8020`) and the advisor bridge (`:8010`). Routing (all modes) goes to the **online** whatif-router (Tuscany GTFS deployed 2026-07-10); a local whatif-router (`:8080`) is only a dev harness, see §"Optional".
-
-Start each process in its **own terminal** (in the `s4c` conda env), the local MCP server first. **Always stop a process with `Ctrl-C`, never by just closing the tab** — a closed tab can leave the process holding its port so the next boot fails with `Address already in use`. If a port is stuck, confirm it is free before restarting:
-
-```bash
-ss -ltn | grep -E ':8020|:8010' || echo "all ports free"
-```
-
-**Terminal 1 — local MCP server** (forward geocode wrapping the public km4city ServiceMap, `docs/lessons.md` L29, + `route` for all modes wrapping the What-If GraphHopper router, L46). Must be up before the bridge:
-
-```bash
-python -m snap4city_mobility_mcp.mcp_server
-```
-
-Listens on `:8020` (client connects via `S4C_LOCAL_MCP_URL`, default `http://127.0.0.1:8020/mcp`). Reverse geocode / nearest-service search / live parking still go to the referente remote server.
-
-**Terminal 2 — advisor bridge (FastAPI)** (drives the LLM + remote MCP server, dashboard 联动):
-
-```bash
-uvicorn api:app --host 0.0.0.0 --port 8010
-```
-
-Self-check (separate terminal) — POST starts the job, then poll it out (§7):
-
-```bash
-JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
-  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
-until curl -s -o /tmp/turn.json -w '%{http_code}' localhost:8010/advise/$JOB | grep -q 200; do sleep 2; done
-head -c 300 /tmp/turn.json
-# GPS-aware turns: origin defaults to the position, categories resolve to the nearest service
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"portami alla farmacia più vicina","history":[],"gps":{"lat":43.7731,"lng":11.2558}}'
-```
-
-Each call appends the full JSON to `outputs.txt`; diagnostics go to `debug.log`. Browser reaches the bridge same-origin via jupyter-server-proxy (`docs/lessons.md` L27).
-
-### Optional — point `route` at a local whatif-router
-
-`route` (all modes: foot / car / bus) calls the Snap4City What-If GraphHopper router; the default (`mcp_server.py`'s `WHATIF_ROUTER_URL`) is the **online** instance `https://www.snap4city.org/whatif-router/route`, which carries the Tuscany GTFS since 2026-07-10 and returns real transit. **No extra process is needed.** Foot/car never touch the PT graph and answer sub-second (0.3–0.5 s measured); the online instance does not yet run the `pt-router-singleton` perf patch, so each PT (bus) request takes ~30-45 s (`BUS_ROUTE_TIMEOUT_S` covers it; tighten it back once the patch is merged).
-
-Only to validate that perf patch (or a different GTFS set) do you need a self-built router — apply the patch and point `route` at your build with an env override, see [`whatif-local/README.md`](whatif-local/README.md) and `whatif-local/patches/`:
-
-```bash
-export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
-```

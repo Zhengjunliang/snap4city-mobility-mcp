@@ -872,6 +872,24 @@ def test_results_view_carries_the_requested_departure():
     assert "departure_time" not in _results_view(entry, unsupported=False)
 
 
+def test_results_view_parking_item_carries_the_live_free_spaces():
+    """The LLM's car-park item speaks for the ENRICHED list (free-spaces from service_info_dev),
+    not the raw search: the search envelope never carries occupancy (L33), so re-slimming it
+    would show free_spaces: null on every spot and the reply could never say there are free
+    spots. Without an enriched list, the raw search still speaks (availability unknown)."""
+    entry = [{
+        "name": "service_search_near_gps_position",
+        "args": json.dumps({"categories": "Car_park"}),
+        "result": _parking_search(("P1", 11.26, 43.76)),
+    }]
+    parking = [{"name": "P1", "free_spaces": 31, "total_spaces": 202, "distance_km": 0.08}]
+    item = _results_view(entry, unsupported=False, parking=parking)["results"][0]
+    assert item["categories"] == "Car_park"
+    assert item["result"] == {"count": 1, "services": [{"name": "P1", "free_spaces": 31}]}
+    raw = _results_view(entry, unsupported=False)["results"][0]
+    assert raw["result"]["services"][0]["free_spaces"] is None
+
+
 # --- graph wiring ------------------------------------------------------------
 
 def test_graph_compiles(make_client, make_llm):

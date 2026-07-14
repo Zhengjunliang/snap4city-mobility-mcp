@@ -36,11 +36,11 @@ road-snapped WKT endpoint, which drifts ~27 m up the street; the WKT endpoints a
 fallback), and Gea-Night's bus pin (TransferServiceAndRenting_Urban_bus) on the ride
 boundaries (board/alight stops). EVERY point must carry `mode` and an `icon` field (empty
 string = no marker) or the map crashes in addCustomTrajectoryToMap - the old L30 crash was a
-missing icon field. The ride shape is stop-to-stop straight lines: the GTFS carries no shapes.
-PARKING (car routes): data.parking lists free car parks near the destination; we show a compact
-list under the reply and plot each on the map via the widgetMap "addSelectorPin" event (one per
-serviceUri, Snap4City's own pin pattern). The pin payload + clear event are real-machine-calibrated
-against the PA.php parking dashboard (L30); the list always renders even if the pins balk.
+missing icon field. A ride leg is drawn stop to stop (straight hops across blocks): the router
+gives one vertex per stop, because GraphHopper's GTFS importer ignores shapes.txt (L44).
+PARKING (car routes): data.parking lists car parks near the destination; each is plotted on the
+map via the widgetMap "addSelectorPin" event (one per serviceUri, Snap4City's own pin pattern).
+No list in the chat: the reply text already sums up the availability in one sentence (L37).
 GPS (near-me): each send fetches the browser geolocation (getCurrentPosition, 5s timeout, 60s
 cache) and POSTs it as `gps: {lat, lng}` (null on denial/unsupported/blocked). The backend uses
 it to start the trip from the user's position when no origin is given and to pick the nearest
@@ -56,7 +56,10 @@ Configure MAP_WIDGET_ID and BRIDGE_BASE below.
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <style>
-html, body { margin: 0; background: #1b2a4d; }
+/* Every selector MUST stay .adv-scoped: this file is pasted straight into the dashboard DOM
+(not an iframe), so a bare html/body/tag rule styles the WHOLE dashboard - an "html, body"
+rule once wiped the widget title bar and gave the parent page a ghost scrollbar (L37,
+CLAUDE.md rule 9). The .adv box fills the host container on its own (position: absolute). */
 .adv { font-family: Arial, Helvetica, sans-serif; color: #e8ecf4; background: #1b2a4d; padding: 8px; display: flex; flex-direction: column; position: absolute; top: 0; right: 0; bottom: 0; left: 0; box-sizing: border-box; }
 .adv #advChat { flex: 1; overflow-y: auto; min-height: 0; padding-right: 4px; }
 .adv .msg { margin: 6px 0; padding: 7px 10px; border-radius: 10px; font-size: 13px; line-height: 1.35; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
@@ -101,7 +104,7 @@ var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "La
 // REAL-MACHINE NOTE (L30): addSelectorPin fields are documented; removeSelectorPin (clear) is
 // the documented mirror but its exact passedData is unconfirmed - capture from the PA.php
 // dashboard via DevTools if pins don't clear. All wrapped in try/catch so a mismatch never
-// breaks the chat; the parking list always renders regardless.
+// breaks the chat (the reply text still states the availability).
 var SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1/";
 var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", display: "pins", queryType: "Default" };
 // One vivid color per vehicle (foot green, car blue, bus orange). Every drawn route uses
@@ -252,8 +255,8 @@ trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs 
 // Map pins via addSelectorPin (one event per car park, by serviceUri - Snap4City's own widget
 // loops one event per pin, so we do too). REAL-MACHINE NOTE (L30): the passedData fields, the
 // SuperServiceMap base, and the clear-pins event are the documented/likely shape but UNVERIFIED
-// against a live PA.php payload - confirm via DevTools. All wrapped in try/catch so the chat
-// list above is never affected if the widget balks. lastParkingUris lets us clear last turn's
+// against a live PA.php payload - confirm via DevTools. All wrapped in try/catch so the reply
+// bubble is never affected if the widget balks. lastParkingUris lets us clear last turn's
 // pins (a foot follow-up must wipe the previous car parking pins).
 var lastParkingUris = [];
 function parkQuery(uri) { return SERVICEMAP_BASE + "?serviceUri=" + encodeURIComponent(uri); }
@@ -278,7 +281,7 @@ pinattr: PARK_PIN.pinattr
 } });
 lastParkingUris.push(p.uri);
 });
-} catch (e) { /* L30: addSelectorPin shape unverified; chat list still shows parking */ }
+} catch (e) { /* L30: addSelectorPin shape unverified; the reply text still states availability */ }
 }
 // ---- Send a turn to the bridge (job + poll) ------------------------------
 // The bridge does NOT answer the turn on the POST: a public-transport turn takes ~50-70s

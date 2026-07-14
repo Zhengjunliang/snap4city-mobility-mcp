@@ -54,7 +54,8 @@ TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 LOCAL_ONLY_TOOLS = frozenset({"route"})
 
 # Parking discovery (car routes): search car parks near the destination, then read live
-# free-spaces per spot. Calibrated from scripts/probe_parking.py on the JupyterHub (2026-06-26):
+# free-spaces per spot. Calibrated by a JupyterHub probe (2026-06-26; the one-shot script is
+# gone, see git history):
 # - PARKING_CATEGORY="Car_park" CONFIRMED (serviceType "TransferServiceAndRenting_Car_park").
 # - The search result carries NO free-spaces; the live count is on the orion/IoT car-park
 #   entities and is fetched per-spot via service_info_dev, whose `realtime.results.bindings`
@@ -287,16 +288,10 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
     return legs
 
 
-# Property keys that might carry a parking's free-space count inline, tried in order. The
-# live value usually comes from read_parking_realtime (service_info_dev); these only catch an
-# inline count if the search ever starts returning one.
-_PARKING_FREE_KEYS = ("freeParkingLots", "freeParking", "free", "available", "freeSpaces")
-
-
 def read_parking_realtime(result: Any) -> dict[str, int | None]:
     """Latest free/total spaces from a service_info_dev response for a car park.
 
-    Shape (probe_parking.py, 2026-06-26): result["realtime"]["results"]["bindings"] is a
+    Shape (JupyterHub probe, 2026-06-26): result["realtime"]["results"]["bindings"] is a
     list newest-first; bindings[0] carries {"freeParkingLots": {"value": "31"},
     "capacity": {"value": "202"}, ...} as string values. Returns {"free_spaces", "total_spaces"}
     with None when realtime is absent (plain POI car parks) or unparseable."""
@@ -321,7 +316,7 @@ def read_parking_realtime(result: Any) -> dict[str, int | None]:
 def _find_feature_list(obj: Any) -> list | None:
     """Locate the GeoJSON features list inside a service-search result of unknown nesting.
 
-    The live envelope (probe_parking.py, 2026-06-26) is
+    The live envelope (JupyterHub probe, 2026-06-26) is
     {"result": [[uri, ...], {"Services": {"features": [...]}}]} — a 2-element list whose
     second item nests the features under "Services". We also accept a direct `features`,
     a `Service`/`Services` wrapper, or a `result` dict, so the parser survives shape drift."""
@@ -352,11 +347,10 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
     URIs, raw grouped GeoJSON, and flattened GeoJSON" (probe-native-tools.json); the live
     shape nests the features under result[1].Services (see _find_feature_list), already
     sorted by distance from the search point. Each item yields
-    {name, lat, lng, uri, free_spaces} with missing fields as None — free_spaces only
-    matters for car parks and is currently empty server-side (parking
-    `realtimeAttributes`/`realtime` come back {}, lesson L33); the key lookup stays
-    for when the backend starts loading occupancy. Returns [] on error / unrecognized
-    shape."""
+    {name, lat, lng, uri, free_spaces} with missing fields as None. free_spaces starts as
+    None on every spot: the search itself carries no occupancy (L33). A car park's live
+    count is fetched afterwards, per spot, from service_info_dev (read_parking_realtime,
+    driven by orchestrator._enrich_parking). Returns [] on error / unrecognized shape."""
     if not isinstance(result, dict) or "error" in result:
         return []
     feats = _find_feature_list(result)
@@ -375,28 +369,12 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
                 lng, lat = float(coords[0]), float(coords[1])
             except (TypeError, ValueError):
                 lat = lng = None
-        # Free spaces may live directly on properties or, once the backend loads occupancy,
-        # inside realtimeAttributes (currently {} — L33). Check both.
-        rt = props.get("realtimeAttributes")
-        sources = [props, rt] if isinstance(rt, dict) else [props]
-        free = None
-        for src in sources:
-            for k in _PARKING_FREE_KEYS:
-                v = src.get(k)
-                if v is not None:
-                    try:
-                        free = int(float(v))
-                    except (TypeError, ValueError):
-                        free = None
-                    break
-            if free is not None:
-                break
         out.append({
             "name": props.get("name") or props.get("serviceName") or props.get("address"),
             "lat": lat,
             "lng": lng,
             "uri": props.get("serviceUri") or props.get("serviceuri") or f.get("serviceUri"),
-            "free_spaces": free,
+            "free_spaces": None,  # filled from service_info_dev (car parks only)
         })
     return out
 
@@ -452,11 +430,7 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
     if name == "routing" and isinstance(result.get("journey"), dict):
         journey = result["journey"]
         first = (journey.get("routes") or [{}])[0]
-        base = {
-            "distance_km": first.get("distance"),
-            "eta": first.get("eta"),
-            "time": first.get("time"),
-        }
+        base = {"distance_km": first.get("distance"), "time": first.get("time")}
         legs = group_arc_legs(first.get("arc") or [])
         if len(legs) > 1:
             # A change of transport (a public-transport journey: walk + ride

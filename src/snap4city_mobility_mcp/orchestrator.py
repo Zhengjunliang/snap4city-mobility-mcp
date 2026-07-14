@@ -549,7 +549,7 @@ async def execute(
             "start_longitude": origin[0],
             "end_latitude": dest[1],
             "end_longitude": dest[0],
-            "vehicle": _ROUTER_VEHICLE.get(mode, mode),
+            "vehicle": _VEHICLE.get(mode, mode),
         }
         if mode == "public_transport":
             # The GTFS timetable window: the user's requested departure, else now. Pinned to
@@ -677,16 +677,10 @@ def _routetype_of(entry: dict[str, Any]) -> str | None:
         return None
 
 
-# Slot mode -> What-If router vehicle (the slot keeps the user-facing public_transport
-# name; the router speaks vehicle=bus).
-_ROUTER_VEHICLE = {"foot": "foot", "car": "car", "public_transport": "bus"}
-
-# Maps a slot mode to the dashboard vehicle family (mirrors the front-end vehicleOf).
-_VEHICLE = {
-    "foot": "foot",
-    "car": "car",
-    "public_transport": "bus",
-}
+# Slot mode -> vehicle name, for the router request AND the dashboard vehicle family (the
+# front-end vehicleOf mirrors it). The slot keeps the user-facing public_transport name; both
+# consumers say bus.
+_VEHICLE = {"foot": "foot", "car": "car", "public_transport": "bus"}
 
 
 def _route_minutes(route: dict[str, Any]) -> float:
@@ -851,8 +845,6 @@ def _template_answer(
         bits = [f"{data['distance_km']} km"]
         if data.get("duration"):
             bits.append(f"~{data['duration']}")
-        if data.get("eta"):
-            bits.append(f"arrivo {data['eta']}")
         return " · ".join(bits)
     if data.get("route_error"):
         return data["route_error"]
@@ -897,11 +889,17 @@ def _results_view(
     unsupported: bool,
     missing: list[str] | None = None,
     departure: str = "",
+    parking: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (no huge WKT).
 
     `departure` is the HH:MM the user asked to leave at ('' = they asked for no time): it
-    rides at the root, not on a routing item, because it applies to the whole request."""
+    rides at the root, not on a routing item, because it applies to the whole request.
+
+    `parking` is the ENRICHED car-park list (execute filled each spot's live free-spaces from
+    service_info_dev). The raw Car_park search entry in `results` carries no occupancy at all
+    (L33), so the parking item is rebuilt from this list instead — otherwise the model would
+    see free_spaces: null on every spot and could never say there are free spots."""
     if missing:
         return {"status": "missing_place", "missing": missing}
     if unsupported:
@@ -914,9 +912,9 @@ def _results_view(
     for e in results:
         name = e.get("name")
         # Near-search entries ARE shown to the LLM (slimmed to count + per-spot name/
-        # free_spaces by slim_result_for_llm): the parking one feeds the availability
-        # sentence, a category-destination one names the found place. The map still
-        # plots parking pins (data.parking); the reply no longer lists spot names.
+        # free_spaces): the parking one feeds the availability sentence, a category-
+        # destination one names the found place. The map still plots parking pins
+        # (data.parking); the reply no longer lists spot names.
         item = {"name": name, "result": slim_result_for_llm(name, e.get("result"))}
         if name == "routing":
             # Surface which mode this attempt used: on failure the LLM can only
@@ -936,6 +934,16 @@ def _results_view(
                 item["categories"] = json.loads(e.get("args") or "{}").get("categories")
             except (json.JSONDecodeError, TypeError):
                 pass
+            if item.get("categories") == PARKING_CATEGORY and parking:
+                # The car-park item speaks for the ENRICHED list (live free-spaces per spot),
+                # not the raw search: the search itself never carries occupancy (L33).
+                item["result"] = {
+                    "count": len(parking),
+                    "services": [
+                        {"name": p.get("name"), "free_spaces": p.get("free_spaces")}
+                        for p in parking[:PARKING_MAX]
+                    ],
+                }
         view.append(item)
     out = {"status": "ok", "results": view}
     if departure:
@@ -993,6 +1001,7 @@ async def respond(
         unsupported=unsupported,
         missing=missing,
         departure=state.get("departure") or "",
+        parking=parking,
     )
     answer: str | None = None
     try:

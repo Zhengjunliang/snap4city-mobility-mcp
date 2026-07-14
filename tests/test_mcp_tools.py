@@ -169,7 +169,7 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     full = {"journey": {
         "routes": [{
             "wkt": "LINESTRING(11.25 43.77, 11.26 43.78, ...)",  # huge — must be dropped
-            "distance": 0.83, "eta": "10:11:00", "time": "00:11:00",
+            "distance": 0.83, "time": "00:11:00",
             "arc": [{"desc": "Via Ricasoli"}, {"desc": "nd"}, {"desc": "Via Ricasoli"},
                     {"desc": "Borgo degli Albizi"}],
         }],
@@ -178,7 +178,7 @@ def test_slim_routing_drops_wkt_and_lists_streets():
     slim = slim_result_for_llm("routing", full)
     j = slim["journey"]
     assert "wkt" not in json.dumps(slim)  # WKT fully gone from the model's view
-    assert j["distance_km"] == 0.83 and j["eta"] == "10:11:00"
+    assert j["distance_km"] == 0.83 and j["time"] == "00:11:00"
     assert j["streets"] == ["Via Ricasoli", "Borgo degli Albizi"]  # deduped, "nd" dropped
     assert "source_node" not in j and "destination_node" not in j  # no raw coordinates
 

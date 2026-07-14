@@ -16,8 +16,9 @@ split as per-leg geometry (`data.routes[].legs`, cut by the backend from the sin
 router response); foot/car draw the whole route WKT as one leg. Each segment takes the
 current point's `color` (a string); a point's non-empty `icon` becomes a marker —
 start/finish flags on the precise geocoded origin/destination, the Gea-Night bus pin
-(`TransferServiceAndRenting_Urban_bus.png`) on the board/alight vertices. (The ride
-shape is stop-to-stop straight lines: the GTFS carries no shapes.)
+(`TransferServiceAndRenting_Urban_bus.png`) on the board/alight vertices. (A ride leg is
+drawn stop to stop: the router gives one vertex per stop, because GraphHopper's GTFS
+importer ignores `shapes.txt` — `docs/lessons.md` L44.)
 
 One trap that cost a debugging round (now encoded in the code + `docs/lessons.md` L30/L44):
 every point must carry `mode` and an `icon` field (empty string = no marker) — a missing
