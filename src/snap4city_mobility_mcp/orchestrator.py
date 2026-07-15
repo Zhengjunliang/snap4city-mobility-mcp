@@ -873,7 +873,7 @@ def _bus_detail_lines(arc: list[Any]) -> list[str]:
                 ) if t
             ) or "In autobus"
             if leg.get("headsign"):
-                head += f" → {leg['headsign']}"
+                head += f" -> {leg['headsign']}"
             lines.append(head)
             for stop in leg.get("stops") or []:
                 sv = _stop_view(stop)
