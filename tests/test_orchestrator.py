@@ -14,6 +14,7 @@ from snap4city_mobility_mcp.orchestrator import (
     _build_graph,
     _extract_data,
     _extract_parking,
+    _format_detail,
     _parse_departure,
     _pick_coord,
     _request_to_intent,
@@ -888,6 +889,127 @@ def test_results_view_parking_item_carries_the_live_free_spaces():
     assert item["result"] == {"count": 1, "services": [{"name": "P1", "free_spaces": 31}]}
     raw = _results_view(entry, unsupported=False)["results"][0]
     assert raw["result"]["services"][0]["free_spaces"] is None
+
+
+def test_results_view_routing_item_carries_only_distance_and_time():
+    """The LLM's routing view is stripped to distance + duration — no legs, no streets. With
+    nothing to enumerate, the reply is concise by construction (the Python detail block owns
+    stops/streets); the model cannot narrate what it cannot see."""
+    entry = [_routing_entry("public_transport", route={
+        "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38, "time": "0:47:03",
+        "arc": [{"transport": "foot", "desc": "Via X", "distance": 0.4},
+                {"transport": "bus", "transport_provider": "at", "line": "57",
+                 "desc": "linea 57", "stops": [{"name": "S1", "time": "2026-01-01T08:00:00+01:00"}]}],
+    })]
+    item = _results_view(entry, unsupported=False)["results"][0]
+    assert item["result"] == {"journey": {"distance_km": 4.38, "time": "0:47:03"}}
+    assert item["routetype"] == "public_transport"
+
+
+# --- _format_detail (deterministic single-mode step block, Python not LLM) ----
+
+def _bus_arc_with_stops() -> list:
+    """A realistic multimodal bus arc (walk -> ride -> walk) whose ride carries the FULL stop
+    list with ISO times, in the shape mcp_server._bus_arcs emits for group_arc_legs."""
+    stops = [
+        {"name": "PORTE NUOVE", "time": "2026-07-13T17:38:00+02:00"},
+        {"name": "PONTE MOSSE", "time": "2026-07-13T17:45:00+02:00"},
+        {"name": "STAZIONE", "time": "2026-07-13T17:52:00+02:00"},
+    ]
+    return [
+        {"transport": "foot", "transport_provider": None, "desc": "a piedi 453 m", "distance": 0.453},
+        {"transport": "bus", "transport_provider": "at - Firenze urbano",
+         "desc": "linea 56 da PORTE NUOVE", "line": "56", "headsign": "NICCOLO' DA TOLENTINO",
+         "stops": stops, "start_datetime": stops[0]["time"]},
+        {"transport": "bus", "transport_provider": "at - Firenze urbano",
+         "desc": "a STAZIONE", "end_datetime": stops[-1]["time"]},
+        {"transport": "foot", "transport_provider": None, "desc": "a piedi 200 m", "distance": 0.2},
+    ]
+
+
+def test_format_detail_bus_lists_every_fermata_with_local_time():
+    """The bus block names the line/operator/headsign and lists EVERY stop (fermate) with its
+    HH:MM (timeline) — not just board/alight — built exactly from the audit, never the LLM.
+    No dates or seconds leak (L43)."""
+    results = [_routing_entry("public_transport", route={
+        "wkt": "LINESTRING(0 0,3 3)", "distance": 42.6, "time": "0:47:03", "arc": _bus_arc_with_stops(),
+    })]
+    route = {"mode": "public_transport", "distance_km": 42.6, "duration": "0:47:03"}
+    block = _format_detail(results, route, departure="17:32")
+    assert "Linea 56" in block and "at - Firenze urbano" in block
+    assert "NICCOLO' DA TOLENTINO" in block
+    for name in ("PORTE NUOVE", "PONTE MOSSE", "STAZIONE"):  # every fermata, not just endpoints
+        assert name in block
+    for hhmm in ("17:38", "17:45", "17:52"):  # the timeline
+        assert hhmm in block
+    assert "Partenza: 17:32" in block
+    assert "Totale: 42.6 km · 0:47:03" in block
+    # L43: no dates, no seconds, no ISO offset in the user-facing block.
+    assert "2026-07-13" not in block and ":00+02:00" not in block and "T17:38" not in block
+
+
+def test_format_detail_foot_lists_streets_merges_consecutive():
+    """A foot/car block is a turn-by-turn street list: consecutive same-street arcs merge
+    (distances summed), unnamed 'nd' arcs drop, no bus/stop concepts appear."""
+    arc = [
+        {"transport": "foot", "transport_provider": None, "desc": "Via Ricasoli", "distance": 0.3},
+        {"transport": "foot", "transport_provider": None, "desc": "Via Ricasoli", "distance": 0.2},
+        {"transport": "foot", "transport_provider": None, "desc": "nd", "distance": 0.1},
+        {"transport": "foot", "transport_provider": None, "desc": "Borgo degli Albizi", "distance": 0.4},
+    ]
+    results = [_routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 0.9, "time": "0:12:00", "arc": arc})]
+    route = {"mode": "foot", "distance_km": 0.9, "duration": "0:12:00"}
+    block = _format_detail(results, route)
+    assert "Via Ricasoli (0.5 km)" in block  # 0.3 + 0.2 merged
+    assert "Borgo degli Albizi (0.4 km)" in block
+    assert "nd" not in block and "Linea" not in block
+    assert "Totale: 0.9 km · 0:12:00" in block
+
+
+def test_format_detail_missing_arc_yields_totals_only():
+    """Defensive: a route whose audit entry has no arc still yields the totals line, no raise."""
+    results = [_routing_entry("car", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 1.83, "time": "00:23:18"})]
+    route = {"mode": "car", "distance_km": 1.83, "duration": "00:23:18"}
+    assert _format_detail(results, route) == "Totale: 1.83 km · 00:23:18"
+
+
+async def test_respond_appends_detail_block_for_single_mode(make_llm):
+    """A single-mode request with a drawable route → the concise LLM reply gets the
+    deterministic step block appended (fermate + orari for bus)."""
+    llm = make_llm([_text_response("In autobus, circa 42.6 km.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B in autobus"}],
+        "tool_results": [_routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,3 3)", "distance": 42.6, "time": "0:47:03", "arc": _bus_arc_with_stops(),
+        })],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "public_transport"},
+    }
+    out = await respond(state, llm=llm)
+    reply = out["response"]["messages"][-1]["content"]
+    assert "In autobus, circa 42.6 km." in reply  # the LLM lead survives
+    assert "Linea 56" in reply and "PONTE MOSSE" in reply and "17:45" in reply  # block appended
+
+
+async def test_respond_no_detail_block_for_multi_mode(make_llm):
+    """The default multi-mode (no mode specified) reply is the LLM's concise comparison
+    only — no step block appended."""
+    llm = make_llm([_text_response("A piedi 2 km, in auto 3.5 km. Più veloce: in auto.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B"}],
+        "tool_results": [
+            _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+            _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
+        ],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": ""},
+    }
+    out = await respond(state, llm=llm)
+    reply = out["response"]["messages"][-1]["content"]
+    assert reply == "A piedi 2 km, in auto 3.5 km. Più veloce: in auto."
+    assert "Totale:" not in reply and "Partenza:" not in reply
 
 
 # --- graph wiring ------------------------------------------------------------

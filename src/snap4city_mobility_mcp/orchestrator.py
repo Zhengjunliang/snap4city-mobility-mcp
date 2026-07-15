@@ -49,6 +49,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
     _label_tokens,
     _local_config,
+    _stop_view,
     exec_tool,
     group_arc_legs,
     parse_service_features,
@@ -111,30 +112,19 @@ from coordinates, not from general knowledge, not "approximately". Do not call t
 entries, say plainly you don't have that information — NEVER list line numbers or name \
 an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
 - Never include raw coordinates in your answer.
-- For a successful route: give the distance in km and the duration/ETA; main streets, \
-if listed, are a nice touch. For a public-transport route whose RESULTS carry `legs`, \
-narrate the trip leg by leg (walk to the boarding stop, ride the <line> of <provider> \
-toward <headsign> from the board stop to the alight stop, then walk on), using ONLY the \
-leg fields — the leg's `line`, `provider`, `headsign`, `board` and `alight` (each a stop \
-name + time) and `stops_total`. Give the scheduled boarding and arrival \
-times (`board.time` / `alight.time`); write every time \
-you mention as plain \
-HH:MM (never seconds or dates) and each distance once, in km. NO disclaimers — never \
-comment on real-time information, traffic, dates, data validity, or timetable accuracy. \
-You may say \
-how many stops the ride covers (`stops_total`) and name the board/alight stops, but the \
-stops in between are NOT given: never invent one, nor a line, operator, or time not in \
-the fields. A \
-route that carries a distance HAS BEEN FOUND: present it directly and NEVER ask the user \
-to restate, clarify, or give a nearby landmark for the origin/destination — they were \
-already located. When a bus route carries a `duration`, present it as an approximate ride \
+- For a route, give ONLY each found mode's distance (in km) and duration/ETA, and when \
+more than one mode is present say which is fastest — using ONLY the RESULTS fields. Keep \
+it short: do NOT narrate legs, list stops, or list streets (RESULTS deliberately carries \
+none; for a single-mode request a precise step-by-step list is appended separately after \
+your reply, so do not attempt one yourself). Write any time as plain HH:MM (never seconds \
+or dates). NO disclaimers — never comment on real-time information, traffic, dates, data \
+validity, or timetable accuracy. A route that carries a distance HAS BEEN FOUND: present \
+it directly and NEVER ask the user to restate, clarify, or give a nearby landmark for the \
+origin/destination — they were already located. A bus duration is an approximate ride \
 time (walking + in-vehicle, excluding the wait at the stop), not a precise arrival. If a \
 route has no duration/ETA at all (e.g. a bus route with no timetable), give its distance \
-and main streets and simply note the schedule/time is not available — do not invent one \
-and do not treat it as a failure.
-- When RESULTS holds more than one successful route for the same trip (different travel \
-modes), give each mode its own distance and duration and say which is faster, using \
-ONLY the RESULTS fields.
+and simply note the schedule/time is not available — do not invent one and do not treat \
+it as a failure.
 - When RESULTS carries a `departure_time`, the trip was planned for that departure: say so \
 plainly (e.g. "partendo alle 18:00"), using that field as written. With no such field, \
 never mention a departure time.
@@ -851,6 +841,107 @@ def _template_answer(
     return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
 
 
+def _routing_entry_for(
+    results: list[dict[str, Any]], mode: str | None
+) -> dict[str, Any] | None:
+    """The routing audit entry for `mode` (its routetype), for the detail block to mine.
+
+    Prefers an exact routetype match; falls back to the sole routing entry when none
+    matches (an explicit-bus request that degraded to a foot-only journey keeps its
+    audit entry under routetype 'public_transport' while data.routes relabels it 'foot').
+    None when the match is ambiguous (more than one routing entry, none matching)."""
+    routing = [e for e in results if e.get("name") == "routing"]
+    for e in routing:
+        if _routetype_of(e) == mode:
+            return e
+    return routing[0] if len(routing) == 1 else None
+
+
+def _bus_detail_lines(arc: list[Any]) -> list[str]:
+    """Leg-by-leg lines for a public-transport journey: walk legs + each ride with its
+    FULL stop list (name + HH:MM = fermate + timeline). Built from the audit arc via
+    group_arc_legs (which keeps the whole stop list on a ride leg — only slim's
+    _leg_boarding collapses it to board/alight). Stop times are ISO in the arc; _stop_view
+    formats each to HH:MM (L43)."""
+    lines: list[str] = []
+    for leg in group_arc_legs(arc):
+        if leg.get("transport") == "bus":
+            head = " ".join(
+                t for t in (
+                    f"Linea {leg['line']}" if leg.get("line") else None,
+                    f"({leg['provider']})" if leg.get("provider") else None,
+                ) if t
+            ) or "In autobus"
+            if leg.get("headsign"):
+                head += f" → {leg['headsign']}"
+            lines.append(head)
+            for stop in leg.get("stops") or []:
+                sv = _stop_view(stop)
+                if not sv or not sv.get("name"):
+                    continue
+                lines.append(f"  {sv['name']}  {sv['time']}" if sv.get("time") else f"  {sv['name']}")
+        else:  # walking leg between/around rides
+            dist = leg.get("distance_km")
+            if dist is not None:
+                lines.append(f"A piedi {dist} km")
+            elif leg.get("from"):
+                lines.append(str(leg["from"]))
+    return lines
+
+
+def _street_detail_lines(arc: list[Any]) -> list[str]:
+    """Turn-by-turn street lines for a foot/car journey, one per named stretch (consecutive
+    same-street arcs merge, their distances summed; unnamed 'nd' arcs drop). Each line is
+    '<street> (<km> km)', or just the street when the arc carries no distance."""
+    steps: list[list[Any]] = []  # [street, dist_km_or_None]
+    for a in arc:
+        if not isinstance(a, dict):
+            continue
+        desc = a.get("desc")
+        if not desc or desc == "nd":
+            continue
+        dist = a.get("distance") if isinstance(a.get("distance"), (int, float)) else None
+        if steps and steps[-1][0] == desc:
+            prev = steps[-1][1]
+            steps[-1][1] = (prev or 0) + (dist or 0) if (prev is not None or dist is not None) else None
+        else:
+            steps.append([desc, dist])
+    return [f"{name} ({round(d, 3)} km)" if d is not None else str(name) for name, d in steps]
+
+
+def _format_detail(
+    results: list[dict[str, Any]], route: dict[str, Any], departure: str = ""
+) -> str:
+    """Deterministic, exact step-by-step block for a SINGLE-mode reply (Italian).
+
+    Built in Python from the audit — never through the LLM — so the timetable stays exact:
+    Llama4 garbles long stop lists (the very reason slim's _leg_boarding collapses them to
+    board/alight, L12). respond appends it beneath its concise reply when the user asked for
+    one mode. `route` is data.routes[0] (the drawn route: its real mode + totals); `results`
+    is the tool audit (full arc/stops). Defensive: a route whose audit arc is missing yields
+    just the totals line, never raises. '' when there is nothing to add."""
+    mode = route.get("mode")
+    entry = _routing_entry_for(results, mode)
+    arc: list[Any] = []
+    if entry is not None:
+        result = entry.get("result")
+        if isinstance(result, dict) and isinstance(result.get("journey"), dict):
+            first = (result["journey"].get("routes") or [{}])[0]
+            arc = first.get("arc") or []
+    lines: list[str] = []
+    if departure:
+        lines.append(f"Partenza: {departure}")
+    lines.extend(_bus_detail_lines(arc) if mode == "public_transport" else _street_detail_lines(arc))
+    bits = []
+    if route.get("distance_km") is not None:
+        bits.append(f"{route['distance_km']} km")
+    if route.get("duration"):
+        bits.append(str(route["duration"]))
+    if bits:
+        lines.append(f"Totale: {' · '.join(bits)}")
+    return "\n".join(line for line in lines if line).strip()
+
+
 def _missing_route_slots(slots: dict[str, Any], user_gps: Any) -> list[str]:
     """Which route endpoints are unresolvable (mirrors execute's endpoint gate).
 
@@ -917,6 +1008,16 @@ def _results_view(
         # (data.parking); the reply no longer lists spot names.
         item = {"name": name, "result": slim_result_for_llm(name, e.get("result"))}
         if name == "routing":
+            # Keep only distance + duration in the LLM's view: it must never narrate legs
+            # or list stops/streets. The deterministic detail block (respond, single mode)
+            # owns that. With no leg/street rows in view the reply is concise BY
+            # CONSTRUCTION — the model cannot enumerate what it cannot see — not by it
+            # obeying a "be brief" instruction (which Llama4 follows unreliably). The full
+            # slim view (legs/streets) still lives in the audit for the block to mine.
+            slim = item["result"]
+            if isinstance(slim, dict) and isinstance(slim.get("journey"), dict):
+                j = slim["journey"]
+                item["result"] = {"journey": {"distance_km": j.get("distance_km"), "time": j.get("time")}}
             # Surface which mode this attempt used: on failure the LLM can only
             # suggest a sensible alternative ("in auto non si può, prova a piedi")
             # when it knows which mode failed.
@@ -980,6 +1081,19 @@ async def respond(
     parking = state.get("parking")
     if intent == "route" and parking:
         data["parking"] = parking
+    # Single-mode request with a drawable route → a deterministic step-by-step block (fermate
+    # + orari for bus, turn-by-turn streets for foot/car) is appended to the reply below. The
+    # block is built in Python from the audit, NOT the LLM (exact timetable; the LLM view now
+    # carries no legs/streets). Multi-mode (default) and failures get no block — a concise
+    # comparison only. Keyed off the mode the user asked for, but rendered for the route
+    # ACTUALLY drawn (data.routes[0]), so an explicit-bus request that degraded to a foot-only
+    # journey renders the walk while the concise reply still explains there was no direct bus.
+    requested_mode = ((state.get("slots") or {}).get("mode") or "").strip()
+    detail_route = (
+        data["routes"][0]
+        if intent == "route" and requested_mode and data.get("routes")
+        else None
+    )
     # A route intent execute refused means an endpoint was unresolvable (no text and
     # nothing covering it). respond then asks for it instead of claiming the request
     # is unsupported; a GPS-covered origin is never asked for.
@@ -1030,6 +1144,10 @@ async def respond(
         pass  # fall back to the deterministic template below
     if answer is None:
         answer = _template_answer(data, unsupported=unsupported, missing=missing)
+    if detail_route:
+        block = _format_detail(results, detail_route, state.get("departure") or "")
+        if block:
+            answer = answer.rstrip() + "\n\n" + block
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no
