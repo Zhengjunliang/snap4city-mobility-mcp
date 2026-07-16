@@ -199,9 +199,9 @@ return MODE_LABELS[vehicleOf(route.mode)] || "Percorso";
 // closure; renderTurn empties the dock on every routes-bearing turn, so stale chips (and
 // their closures) simply disappear. Clicks are ignored while a turn is in flight:
 // renderTurn's `history = response.messages` would drop entries pushed mid-flight, and
-// the incoming turn redraws the map anyway. The selection echoes into the chat AND into
-// `history` (user + assistant, same texts as the bubbles) so a follow-up's understand
-// sees the chosen mode in context.
+// the incoming turn redraws the map anyway. The selection echoes into the chat, and ONLY
+// the user echo line into `history` (the detail block stays a bubble): one line is enough
+// for a follow-up's understand to keep the chosen mode in context, at minimal LLM cost.
 function addChoices(routes, origin, destination, parking) {
 var $box = $("#advChips");
 routes.forEach(function (route) {
@@ -220,12 +220,15 @@ var echo = "Scelgo l'opzione: " + label;
 var text = route.detail || label;
 addMsg(echo, "user");
 addMsg(text, "bot");
-// Re-selecting the same option (after "Mostra tutte" cleared .sel) re-shows the bubbles
-// but must not stack identical pairs in the carried history (prompt noise on follow-ups).
-var prev = history.length > 1 ? history[history.length - 2] : null;
+// Only the USER echo goes into the carried history: that one line is all a follow-up's
+// understand needs to keep the chosen mode in context, while the detail block (stop
+// lists, streets) would ride into every later LLM prompt as a few hundred tokens of
+// noise on a gateway that is already minute-slow on bad days (L54). The bubble above
+// still shows the full detail. Re-selecting the same option (after "Mostra tutte"
+// cleared .sel) must not stack identical echoes.
+var prev = history.length ? history[history.length - 1] : null;
 if (!prev || prev.role !== "user" || prev.content !== echo) {
 history.push({ role: "user", content: echo });
-history.push({ role: "assistant", content: text });
 }
 });
 $box.append($chip);
@@ -420,7 +423,10 @@ return out;
 // the widget JSON). Every HTTP call is sub-second, so no proxy can time it out. NEVER turn
 // this back into one long request.
 var POLL_MS = 1500;         // gap between polls
-var POLL_MAX_MS = 240000;   // give up after this (worst case: unpatched router + slow LLM)
+// Give up after this. Sized on a MEASURED worst turn (L54): understand LLM 67s + bus
+// routing 33-45s + along-route services + respond LLM ~60s can pass 240s while the job
+// is still healthily running server-side — the window must cover the real tail latency.
+var POLL_MAX_MS = 420000;
 // What the bridge's 202 stage means, in the user's language. The turn reports where it is in
 // the graph (understand -> geocode -> routing -> respond); a bus route gets its own line
 // because it is the one that makes the user wait (~30-45s: the router rebuilds its

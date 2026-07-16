@@ -265,7 +265,11 @@ async def understand(
     """
     _emit(on_stage, "understand")
     history = state["messages"]
-    convo = [m for m in history if m.get("role") in ("user", "assistant")]
+    # Slot extraction needs only the RECENT exchange (follow-up carry-over lives in the
+    # last few turns); an unbounded history makes the LLM prompt grow every turn and the
+    # gateway is already minute-slow on bad days (67s measured, L54). 8 messages ≈ 4
+    # turns, comfortably covering the mode/place carry-over the few-shots exercise.
+    convo = [m for m in history if m.get("role") in ("user", "assistant")][-8:]
     slots: dict[str, Any] = {"intent": "other"}
     # Today's Rome date goes into the prompt: without it the model cannot date "domani alle 9"
     # (it has no clock), and a dateless departure slot cannot be told apart from today's.

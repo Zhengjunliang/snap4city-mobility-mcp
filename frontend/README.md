@@ -115,8 +115,10 @@ Two environment requirements, both **outside this file's control**:
   as a chat bubble, toggles the parking pins (car shows them, foot/bus hides them) and
   swaps the along-route service pins to that route's own set.
   The selection is **purely local** — no new backend turn (a bus re-route would cost
-  another 30-45 s) — and is echoed into the carried `history` so follow-ups keep the
-  chosen mode in context. Every routes-bearing turn **replaces** the dock (a single-route
+  another 30-45 s) — and only the one-line user echo ("Scelgo l'opzione: …") enters the
+  carried `history`: that keeps the chosen mode in context for follow-ups while the
+  detail block stays a bubble, off every later LLM prompt (`docs/lessons.md` L54).
+  Every routes-bearing turn **replaces** the dock (a single-route
   turn empties it); the dock hides itself when empty.
 - **Along-route service pins** (`docs/lessons.md` L53): when the user asked to see a
   category along the way, each route carries `data.routes[].services` and the map plots

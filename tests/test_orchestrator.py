@@ -135,6 +135,17 @@ async def test_understand_parses_slots(make_llm):
     assert out["slots"]["mode"] == "foot"
 
 
+async def test_understand_trims_history_to_recent_messages(make_llm):
+    """The slot-extraction prompt is bounded: only the last 8 user/assistant messages ride
+    along (L54 — the gateway is minute-slow on bad days; unbounded history amplifies it)."""
+    llm = make_llm([_slots_response('{"request_type":"other"}')])
+    msgs = [{"role": "user", "content": "m" + str(i)} for i in range(12)]
+    await understand({"messages": msgs}, llm=llm)
+    sent = llm.calls[0]["messages"]
+    assert sent[0]["role"] == "system" and len(sent) == 1 + 8
+    assert sent[1]["content"] == "m4" and sent[-1]["content"] == "m11"
+
+
 def test_request_to_intent():
     assert _request_to_intent({"request_type": "journey"}) == "route"
     assert _request_to_intent({"request_type": "other"}) == "other"
