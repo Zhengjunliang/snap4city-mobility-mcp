@@ -22,6 +22,13 @@ there is no primary/alternate dimming and no legend. (Every route carries start/
 omitting them on some trajectories crashed the widget, so the markers overlap at the shared
 O/D.) When only one route comes back (mode specified, or a mode empty / very short trip / no
 PT for that OD), a single line is drawn.
+ROUTE PICKER: a multi-mode turn also appends a chips bubble (one chip per mode, labeled
+"In autobus · 3.0 km · 15 min", plus "Mostra tutte"): tapping a chip redraws the map with
+ONLY that route and shows its pre-rendered step-by-step block (data.routes[].detail, built
+backend-side from the audit) as a chat bubble - all LOCAL, no new backend turn (a bus
+re-route costs 30-45s). The selection also echoes into the carried history so follow-ups
+keep the chosen mode in context. A later routes-bearing turn marks old pickers stale
+(dimmed, inert): their chips describe lines no longer on the map.
 HOW THE MAP DRAWS: every route goes through the widgetMap's MANUAL branch
 (addCustomTrajectory with per-point mode.routing.manual): the widget just connects the given
 points with straight segments, so we feed it the backend's own route geometry and the map
@@ -36,8 +43,8 @@ road-snapped WKT endpoint, which drifts ~27 m up the street; the WKT endpoints a
 fallback), and Gea-Night's bus pin (TransferServiceAndRenting_Urban_bus) on the ride
 boundaries (board/alight stops). EVERY point must carry `mode` and an `icon` field (empty
 string = no marker) or the map crashes in addCustomTrajectoryToMap - the old L30 crash was a
-missing icon field. A ride leg is drawn stop to stop (straight hops across blocks): the router
-gives one vertex per stop, because GraphHopper's GTFS importer ignores shapes.txt (L44).
+missing icon field. A ride leg carries the real GTFS shape (backend swap via the km4city tpl
+API, L51); when no variant matches it degrades to the router's stop-to-stop chords (L44).
 PARKING (car routes): data.parking lists car parks near the destination; each is plotted on the
 map via the widgetMap "addSelectorPin" event (one per serviceUri, Snap4City's own pin pattern).
 No list in the chat: the reply text already sums up the availability in one sentence (L37).
@@ -71,6 +78,10 @@ CLAUDE.md rule 9). The .adv box fills the host container on its own (position: a
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
 .adv .msg.thinking { color: #9aa6b8; font-style: italic; animation: advPulse 1.2s ease-in-out infinite; }
+.adv .msg.choices { background: none; border: none; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 6px; max-width: 100%; }
+.adv .chip { padding: 6px 10px; border: 1px solid #3a4564; border-radius: 14px; background: #28324d; color: #e8ecf4; font-size: 12px; font-family: inherit; cursor: pointer; }
+.adv .chip.sel { background: #f5c518; border-color: #f5c518; color: #1f2a44; font-weight: bold; }
+.adv .msg.choices.stale .chip { opacity: .45; cursor: default; }
 @keyframes advPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 </style>
 </head>
@@ -112,6 +123,8 @@ var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", displa
 // reads the current point's color as a plain STRING. (Line width is left alone: the
 // widgetMap may not support a width field and L30 warns unsupported fields crash it.)
 var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
+// Italian chip labels for the route picker, keyed by the front-end vehicle family.
+var MODE_LABELS = { foot: "A piedi", car: "In auto", bus: "In autobus" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 var gpsDenied = false;  // remembered PERMISSION_DENIED: skip further prompts this session
@@ -157,6 +170,72 @@ return msgs[i].content.trim();
 }
 }
 return "(nessuna risposta)";
+}
+// ---- Route option picker (multi-mode turns) -------------------------------
+// "H:MM:SS" -> "8 min" / "1 h 5 min" (seconds >= 30 round the minute up; a sub-minute
+// route still says "1 min"). An unparseable duration passes through as-is.
+function fmtDur(dur) {
+var m = /^(\d+):(\d{2}):(\d{2})$/.exec(dur || "");
+if (!m) return dur || "";
+var h = parseInt(m[1], 10);
+var min = parseInt(m[2], 10) + (parseInt(m[3], 10) >= 30 ? 1 : 0);
+if (min === 60) { h += 1; min = 0; }
+if (h > 0) return h + " h" + (min ? " " + min + " min" : "");
+return (min || 1) + " min";
+}
+// Chip label: "In autobus · 3.0 km · 15 min" (mode + whatever totals came back).
+function chipLabel(route) {
+var bits = [MODE_LABELS[vehicleOf(route.mode)] || "Percorso"];
+if (route.distance_km != null) bits.push(route.distance_km + " km");
+if (route.duration) bits.push(fmtDur(route.duration));
+return bits.join(" · ");
+}
+// One chip per returned route + "Mostra tutte". Selection is PURELY LOCAL - no new backend
+// turn (a bus re-route costs 30-45s, L31): the chip redraws the map with ONLY that route
+// and shows its pre-rendered route.detail (backend-built step block) in a bot bubble;
+// "Mostra tutte" restores all the lines. routes/origin/destination live in this closure
+// (per-bubble data: a later turn can never make these chips act on ITS routes); a new
+// routes-bearing turn marks the bubble .stale (renderTurn), which kills the clicks. Clicks
+// are also ignored while a turn is in flight: renderTurn's `history = response.messages`
+// would drop entries pushed mid-flight, and the incoming turn redraws the map anyway. The
+// selection echoes into the chat AND into `history` (user + assistant, same texts as the
+// bubbles) so a follow-up's understand sees the chosen mode in context.
+function addChoices(routes, origin, destination) {
+var $box = $("<div>").addClass("msg bot choices");
+function guard() { return inFlight || $box.hasClass("stale"); }
+routes.forEach(function (route) {
+var label = chipLabel(route);
+var $chip = $("<button>").attr("type", "button").addClass("chip").text(label);
+$chip.on("click", function () {
+if (guard() || $chip.hasClass("sel")) return;
+try { drawRoutes([route], origin, destination); }
+catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); return; }
+$box.find(".chip").removeClass("sel");
+$chip.addClass("sel");
+var echo = "Scelgo l'opzione: " + label;
+var text = route.detail || label;
+addMsg(echo, "user");
+addMsg(text, "bot");
+// Re-selecting the same option (after "Mostra tutte" cleared .sel) re-shows the bubbles
+// but must not stack identical pairs in the carried history (prompt noise on follow-ups).
+var prev = history.length > 1 ? history[history.length - 2] : null;
+if (!prev || prev.role !== "user" || prev.content !== echo) {
+history.push({ role: "user", content: echo });
+history.push({ role: "assistant", content: text });
+}
+});
+$box.append($chip);
+});
+var $all = $("<button>").attr("type", "button").addClass("chip").text("Mostra tutte");
+$all.on("click", function () {
+if (guard()) return;
+try { drawRoutes(routes, origin, destination); }
+catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); return; }
+$box.find(".chip").removeClass("sel");
+});
+$box.append($all);
+$("#advChat").append($box);
+$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
 }
 // ---- Map drawing (widgetMap manual branch via addCustomTrajectory) -------
 // The backend route mode (foot/car/public_transport) maps to the front-end vehicle
@@ -351,8 +430,11 @@ var data = (response && response.data) || {};
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
 if (routes.length) {
-try { drawRoutes(routes, data.origin, data.destination); }
-catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
+$("#advChat .choices").addClass("stale");  // the map is about to change: old pickers now lie
+try {
+drawRoutes(routes, data.origin, data.destination);
+if (routes.length > 1) addChoices(routes, data.origin, data.destination);
+} catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
 }
 // Parking (car routes). Clear last turn's pins unconditionally so a non-car follow-up wipes
 // them; then plot the pins when present (independent of routes - parking pins show even if the

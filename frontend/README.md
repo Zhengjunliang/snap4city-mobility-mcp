@@ -16,9 +16,10 @@ split as per-leg geometry (`data.routes[].legs`, cut by the backend from the sin
 router response); foot/car draw the whole route WKT as one leg. Each segment takes the
 current point's `color` (a string); a point's non-empty `icon` becomes a marker —
 start/finish flags on the precise geocoded origin/destination, the Gea-Night bus pin
-(`TransferServiceAndRenting_Urban_bus.png`) on the board/alight vertices. (A ride leg is
-drawn stop to stop: the router gives one vertex per stop, because GraphHopper's GTFS
-importer ignores `shapes.txt` — `docs/lessons.md` L44.)
+(`TransferServiceAndRenting_Urban_bus.png`) on the board/alight vertices. (A ride leg
+carries the real GTFS shape — the backend swaps the router's one-vertex-per-stop chords
+for the km4city tpl shape cut, `docs/lessons.md` L51; when no variant matches, the leg
+degrades to the stop-to-stop chords of L44.)
 
 One trap that cost a debugging round (now encoded in the code + `docs/lessons.md` L30/L44):
 every point must carry `mode` and an `icon` field (empty string = no marker) — a missing
@@ -105,3 +106,12 @@ Two environment requirements, both **outside this file's control**:
   ride orange with bus pins at the board/alight stops. A walking-only bus itinerary
   (short trip — walking beats any bus, L39) comes back relabeled as a foot route, so the
   map draws a plain green walking line.
+- **Route picker**: a multi-mode turn (no mode specified → 2-3 routes back) also appends
+  a chips bubble — one chip per mode ("In autobus · 3.0 km · 15 min") plus "Mostra
+  tutte". Tapping a chip redraws the map with **only** that route and shows its
+  step-by-step block (`data.routes[].detail`, pre-rendered backend-side: fermate + orari
+  for bus, turn-by-turn streets for foot/car) as a chat bubble. The selection is **purely
+  local** — no new backend turn (a bus re-route would cost another 30-45 s) — and is
+  echoed into the carried `history` so follow-ups keep the chosen mode in context. A
+  later routes-bearing turn dims the old picker (stale: its chips describe lines no
+  longer on the map).

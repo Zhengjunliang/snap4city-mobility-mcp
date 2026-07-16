@@ -3,21 +3,24 @@ from types import SimpleNamespace
 
 import pytest
 
+from snap4city_mobility_mcp.gtfs_shapes import reset_caches as gtfs_shapes_reset
 from snap4city_mobility_mcp.mcp_tools import geocode_cache_clear
 
 
 @pytest.fixture(autouse=True)
 def _clean_geocode_cache():
-    """Empty the process-wide geocode cache around every test.
+    """Empty the process-wide caches (geocode + tpl shapes) around every test.
 
-    Mandatory, not hygiene: the cache outlives a test, while FakeClient is a single FIFO
-    queue of responses. A cached search would consume no queued response, so every later
+    Mandatory, not hygiene: the caches outlive a test, while the fakes are single FIFO
+    queues of responses. A cached search would consume no queued response, so every later
     pop in that test would shift by one — a silent, confusing failure (a routing call would
     receive a FeatureCollection). Several tests already geocode the same place text
-    ("Duomo, Firenze" appears in five)."""
+    ("Duomo, Firenze" appears in five); the gtfs_shapes lines index has the same trap."""
     geocode_cache_clear()
+    gtfs_shapes_reset()
     yield
     geocode_cache_clear()
+    gtfs_shapes_reset()
 
 
 class FakeResult:

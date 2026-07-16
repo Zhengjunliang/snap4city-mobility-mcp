@@ -7,6 +7,7 @@ request/response assembly, leg slicing, arc synthesis).
 import httpx
 
 from snap4city_mobility_mcp import mcp_server
+from snap4city_mobility_mcp.geo import wkt_length_km, wkt_points
 from snap4city_mobility_mcp.mcp_server import (
     _bus_arcs,
     _fmt_hms,
@@ -16,8 +17,6 @@ from snap4city_mobility_mcp.mcp_server import (
     _normalize_feature,
     _servicemap_search,
     _street_arcs,
-    _wkt_length_km,
-    _wkt_points,
 )
 
 
@@ -182,9 +181,9 @@ def test_journey_duration_and_fmt():
 
 def test_wkt_length_km():
     # A ~1 km north hop in Florence (0.009 deg lat ≈ 1 km). Parses "lng lat" pairs, sums haversine.
-    d = _wkt_length_km("LINESTRING (11.2558 43.7731, 11.2558 43.7821)")
+    d = wkt_length_km("LINESTRING (11.2558 43.7731, 11.2558 43.7821)")
     assert d is not None and 0.9 < d < 1.1
-    assert _wkt_length_km("not a linestring") is None
+    assert wkt_length_km("not a linestring") is None
 
 
 def test_wkt_points_and_leg_slices_single_ride():
@@ -192,7 +191,7 @@ def test_wkt_points_and_leg_slices_single_ride():
     # vertices 2..4 cuts the line into walk / ride / walk, boundary vertices shared so the
     # drawn segments connect.
     wkt = "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0, 11.003 43.0, 11.004 43.0, 11.005 43.0)"
-    pts = _wkt_points(wkt)
+    pts = wkt_points(wkt)
     assert pts is not None and len(pts) == 6 and pts[0] == (11.0, 43.0)
     ins = [
         {"text": "Continue", "interval": [0, 2], "leg": None},
@@ -204,7 +203,7 @@ def test_wkt_points_and_leg_slices_single_ride():
     assert legs[0]["wkt"] == "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0)"
     assert legs[1]["wkt"] == "LINESTRING (11.002 43.0, 11.003 43.0, 11.004 43.0)"
     assert legs[2]["wkt"] == "LINESTRING (11.004 43.0, 11.005 43.0)"
-    assert _wkt_points("not a linestring") is None
+    assert wkt_points("not a linestring") is None
 
 
 def test_leg_slices_transfer_and_defenses():
@@ -304,8 +303,65 @@ async def test_route_bus_forwards_datetime_and_slices_legs(monkeypatch):
     assert captured["timeout"] == mcp_server.BUS_ROUTE_TIMEOUT_S
     found = out["journey"]["routes"][0]
     assert [leg["type"] for leg in found["legs"]] == ["foot", "bus", "foot"]
-    assert found["distance"] == _wkt_length_km(wkt)  # geometry length, not the 160 m access metres
+    assert found["distance"] == wkt_length_km(wkt)  # geometry length, not the 160 m access metres
     assert found["time"] == _fmt_hms(57600 + 120000 + 57600)
+
+
+async def test_route_bus_swaps_ride_chords_for_gtfs_shape(monkeypatch):
+    # With the tpl API answering, the ride leg's chord geometry is replaced by the real
+    # shape cut (L51) and the route-level wkt/distance are re-derived from the legs so
+    # the mirror matches what the dashboard draws. Walking legs stay router geometry.
+    from tests.test_gtfs_shapes import PATH_PTS, S1, S2, SHAPE_FWD, _install_fake_tpl
+
+    from snap4city_mobility_mcp.geo import fmt_linestring
+    wkt = fmt_linestring(PATH_PTS)
+    body = {"paths": [{
+        "wkt": wkt, "distance": 160.0,
+        "instructions": [
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
+            {"text": "Pt_start_trip", "interval": [1, 2],
+             "leg": {"map": {"type": "pt", "travelTime": 120000, "route_name": "57"}}},
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
+        ],
+    }]}
+    _install_fake_httpx(monkeypatch, body=body)
+    _install_fake_tpl(
+        monkeypatch, agencies=["ag1"], lines={"ag1": ["57"]},
+        routes={("ag1", "57"): [SHAPE_FWD]},
+    )
+    out = await mcp_server.route.fn(43.0, 10.9995, 43.0, 11.0045, vehicle="bus")
+    found = out["journey"]["routes"][0]
+    ride = wkt_points(found["legs"][1]["wkt"])
+    assert ride[0] == S1 and ride[-1] == S2 and len(ride) > 2  # boundary vertices kept
+    # Mirror re-derived: full wkt spans door to door through the shape, distance grew
+    # beyond the chord length.
+    full = wkt_points(found["wkt"])
+    assert full[0] == PATH_PTS[0] and full[-1] == PATH_PTS[-1]
+    assert found["distance"] > wkt_length_km(wkt)
+
+
+async def test_route_bus_keeps_chords_when_tpl_is_down(monkeypatch):
+    # tpl unreachable: the output is byte-identical to the pre-enhancement behavior.
+    from tests.test_gtfs_shapes import PATH_PTS, S1, S2, _install_fake_tpl
+
+    from snap4city_mobility_mcp.geo import fmt_linestring
+    wkt = fmt_linestring(PATH_PTS)
+    body = {"paths": [{
+        "wkt": wkt, "distance": 160.0,
+        "instructions": [
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
+            {"text": "Pt_start_trip", "interval": [1, 2],
+             "leg": {"map": {"type": "pt", "travelTime": 120000, "route_name": "57"}}},
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
+        ],
+    }]}
+    _install_fake_httpx(monkeypatch, body=body)
+    _install_fake_tpl(monkeypatch, raise_exc=RuntimeError("tpl down"))
+    out = await mcp_server.route.fn(43.0, 10.9995, 43.0, 11.0045, vehicle="bus")
+    found = out["journey"]["routes"][0]
+    assert found["wkt"] == wkt
+    assert wkt_points(found["legs"][1]["wkt"]) == [S1, S2]
+    assert found["distance"] == wkt_length_km(wkt)
 
 
 async def test_route_rejects_unknown_vehicle_and_surfaces_errors(monkeypatch):

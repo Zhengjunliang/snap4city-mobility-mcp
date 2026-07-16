@@ -1015,14 +1015,16 @@ def _street_detail_lines(arc: list[Any]) -> list[str]:
 def _format_detail(
     results: list[dict[str, Any]], route: dict[str, Any], departure: str = ""
 ) -> str:
-    """Deterministic, exact step-by-step block for a SINGLE-mode reply (Italian).
+    """Deterministic, exact step-by-step block for ONE route (Italian).
 
     Built in Python from the audit — never through the LLM — so the timetable stays exact:
     Llama4 garbles long stop lists (the very reason slim's _leg_boarding collapses them to
-    board/alight, L12). respond appends it beneath its concise reply when the user asked for
-    one mode. `route` is data.routes[0] (the drawn route: its real mode + totals); `results`
-    is the tool audit (full arc/stops). Defensive: a route whose audit arc is missing yields
-    just the totals line, never raises. '' when there is nothing to add."""
+    board/alight, L12). respond attaches it to every drawable route as routes[i].detail
+    (the dashboard picker shows it on selection, L50) and appends it beneath its concise
+    reply when the user asked for one mode. `route` is a data.routes entry (its real mode +
+    totals); `results` is the tool audit (full arc/stops). Defensive: a route whose audit
+    arc is missing yields just the totals line, never raises. '' when there is nothing to
+    add."""
     mode = route.get("mode")
     entry = _routing_entry_for(results, mode)
     arc: list[Any] = []
@@ -1184,13 +1186,24 @@ async def respond(
     parking = state.get("parking")
     if intent == "route" and parking:
         data["parking"] = parking
-    # Single-mode request with a drawable route → a deterministic step-by-step block (fermate
-    # + orari for bus, turn-by-turn streets for foot/car) is appended to the reply below. The
-    # block is built in Python from the audit, NOT the LLM (exact timetable; the LLM view now
-    # carries no legs/streets). Multi-mode (default) and failures get no block — a concise
-    # comparison only. Keyed off the mode the user asked for, but rendered for the route
-    # ACTUALLY drawn (data.routes[0]), so an explicit-bus request that degraded to a foot-only
-    # journey renders the walk while the concise reply still explains there was no direct bus.
+    # Every drawable route ships its deterministic step-by-step block (fermate + orari for
+    # bus, turn-by-turn streets for foot/car) as routes[i].detail: the dashboard's local mode
+    # picker shows it when the user taps an option, WITHOUT starting a new turn (a bus
+    # re-route costs 30-45s, L31). Built in Python from the audit, NOT the LLM (exact
+    # timetable; the LLM view carries no legs/streets). Small strings only — no raw arcs (the
+    # rule-8 note on data.arcs stands). Consumed by our own front-end, like data.origin/
+    # destination/parking.
+    if intent == "route":
+        for r in data.get("routes") or []:
+            block = _format_detail(results, r, state.get("departure") or "")
+            if block:
+                r["detail"] = block
+    # Single-mode request with a drawable route → that same block is ALSO appended to the
+    # reply below. Multi-mode (default) and failures get no block in the text — a concise
+    # comparison only (the picker covers the detail). Keyed off the mode the user asked for,
+    # but rendered for the route ACTUALLY drawn (data.routes[0]), so an explicit-bus request
+    # that degraded to a foot-only journey renders the walk while the concise reply still
+    # explains there was no direct bus.
     requested_mode = ((state.get("slots") or {}).get("mode") or "").strip()
     detail_route = (
         data["routes"][0]
@@ -1247,10 +1260,8 @@ async def respond(
         pass  # fall back to the deterministic template below
     if answer is None:
         answer = _template_answer(data, unsupported=unsupported, missing=missing)
-    if detail_route:
-        block = _format_detail(results, detail_route, state.get("departure") or "")
-        if block:
-            answer = answer.rstrip() + "\n\n" + block
+    if detail_route and detail_route.get("detail"):
+        answer = answer.rstrip() + "\n\n" + detail_route["detail"]
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no

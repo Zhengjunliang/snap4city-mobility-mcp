@@ -26,7 +26,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastmcp import FastMCP
 
-from snap4city_mobility_mcp.geo import haversine_km
+from snap4city_mobility_mcp.geo import fmt_linestring, wkt_length_km, wkt_points
+from snap4city_mobility_mcp.gtfs_shapes import enhance_bus_legs
 
 logger = logging.getLogger(__name__)
 
@@ -106,49 +107,6 @@ def _pt_stops(legmap: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _wkt_points(wkt: str) -> list[tuple[float, float]] | None:
-    """(lng, lat) vertex list of a 'LINESTRING (lng lat, lng lat, ...)', or None.
-
-    Vertex indices match the router instructions' `interval` fields (live-verified: the
-    last instruction's interval names the last vertex, and a ride interval's endpoints
-    land on the board/alight stops) — which is what lets _leg_slices cut the geometry.
-    """
-    lo, hi = wkt.find("("), wkt.rfind(")")
-    if lo < 0 or hi <= lo:
-        return None
-    pts: list[tuple[float, float]] = []
-    for pair in wkt[lo + 1 : hi].split(","):
-        xy = pair.split()
-        if len(xy) >= 2:
-            try:
-                pts.append((float(xy[0]), float(xy[1])))
-            except ValueError:
-                continue
-    return pts or None
-
-
-def _wkt_length_km(wkt: str) -> float | None:
-    """Total geodesic length (km) of a 'LINESTRING (lng lat, lng lat, ...)'.
-
-    The router's paths[0].distance counts only the walking-access metres — a GTFS transit
-    leg's in-vehicle ride contributes 0 to it (whatif-local/test-output.json: distance 2017 m
-    is exactly the walk to/from the stops), so the real door-to-door distance is recovered by
-    measuring the full drawn geometry instead. None when the WKT can't be parsed.
-    """
-    pts = _wkt_points(wkt)
-    if pts is None or len(pts) < 2:
-        return None
-    total = sum(
-        haversine_km(a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:])
-    )
-    return round(total, 3)
-
-
-def _fmt_linestring(pts: list[tuple[float, float]]) -> str:
-    """'LINESTRING (lng lat, ...)' from a (lng, lat) vertex list (router WKT shape)."""
-    return "LINESTRING (" + ", ".join(f"{lng} {lat}" for lng, lat in pts) + ")"
-
-
 def _leg_slices(
     instructions: list[Any], pts: list[tuple[float, float]]
 ) -> list[dict[str, Any]]:
@@ -177,11 +135,11 @@ def _leg_slices(
     start = 0
     for a, b in rides:
         if a > start:
-            legs.append({"type": "foot", "wkt": _fmt_linestring(pts[start : a + 1])})
-        legs.append({"type": "bus", "wkt": _fmt_linestring(pts[a : b + 1])})
+            legs.append({"type": "foot", "wkt": fmt_linestring(pts[start : a + 1])})
+        legs.append({"type": "bus", "wkt": fmt_linestring(pts[a : b + 1])})
         start = b
     if legs and start < len(pts) - 1:
-        legs.append({"type": "foot", "wkt": _fmt_linestring(pts[start:])})
+        legs.append({"type": "foot", "wkt": fmt_linestring(pts[start:])})
     return legs
 
 
@@ -414,8 +372,10 @@ async def route(
     walking-pace / semantically mixed there), `arc` is the walk -> ride -> walk sequence
     with line/operator/stops (_bus_arcs) — a walking-only itinerary (short trip, L39)
     yields honest foot arcs the client presents as a walk — and `legs` carries the
-    walk/ride geometry slices the dashboard draws (L44). startdatetime (GTFS timetable
-    window) only matters here.
+    walk/ride geometry slices the dashboard draws (L44). Ride slices are upgraded from
+    the router's stop-to-stop chords to the real GTFS shape via the km4city tpl API
+    (gtfs_shapes; on any miss the chords stay). startdatetime (GTFS timetable window)
+    only matters here.
 
     vehicle="foot"/"car" never touch the PT graph (sub-second): `distance` and `time` come
     straight from the path's true totals, `arc` is one street arc per instruction
@@ -450,16 +410,30 @@ async def route(
         return {"error": f"whatif-router {vehicle} path has no wkt"}
     if vehicle == "bus":
         # Door-to-door length from the geometry; paths[0].distance is walking-access only
-        # (see _wkt_length_km). Fall back to the router metres only if the WKT can't be
-        # measured.
-        distance_km = _wkt_length_km(wkt)
+        # (see geo.wkt_length_km). Fall back to the router metres only if the WKT can't
+        # be measured.
+        distance_km = wkt_length_km(wkt)
         if distance_km is None:
             dist = first.get("distance")
             distance_km = round(dist / 1000, 3) if isinstance(dist, (int, float)) else None
         found: dict[str, Any] = {"wkt": wkt, "distance": distance_km, "arc": _bus_arcs(first)}
-        pts = _wkt_points(wkt)
+        pts = wkt_points(wkt)
         legs = _leg_slices(first.get("instructions") or [], pts) if pts else []
         if legs:
+            # Swap each ride's stop-to-stop chords for the real GTFS shape cut (km4city
+            # tpl API, gtfs_shapes); any miss keeps the router chords. When a leg did
+            # change, the route-level mirror is re-derived from the legs so wkt/distance
+            # match what the dashboard actually draws.
+            if await enhance_bus_legs(legs, first.get("instructions") or [], len(pts)):
+                joined: list[tuple[float, float]] = []
+                for leg in legs:
+                    leg_pts = wkt_points(leg["wkt"]) or []
+                    if joined and leg_pts and leg_pts[0] == joined[-1]:
+                        leg_pts = leg_pts[1:]
+                    joined.extend(leg_pts)
+                if len(joined) >= 2:
+                    found["wkt"] = fmt_linestring(joined)
+                    found["distance"] = wkt_length_km(found["wkt"]) or distance_km
             found["legs"] = legs
         duration_ms = _journey_duration_ms(first)
         if duration_ms > 0:
@@ -469,7 +443,7 @@ async def route(
         dist = first.get("distance")
         found = {
             "wkt": wkt,
-            "distance": round(dist / 1000, 3) if isinstance(dist, (int, float)) else _wkt_length_km(wkt),
+            "distance": round(dist / 1000, 3) if isinstance(dist, (int, float)) else wkt_length_km(wkt),
             "arc": _street_arcs(first, vehicle),
         }
         t = first.get("time")

@@ -1093,6 +1093,77 @@ async def test_respond_no_detail_block_for_multi_mode(make_llm):
     assert "Totale:" not in reply and "Partenza:" not in reply
 
 
+async def test_respond_attaches_detail_to_every_route_multi_mode(make_llm):
+    """Multi-mode: every route in data.routes carries its pre-rendered `detail` block for
+    the dashboard's local mode picker (no new turn on selection), while the reply text
+    stays the LLM's concise comparison. A route whose audit has no arc degrades to the
+    totals line (plus the departure line when set)."""
+    llm = make_llm([_text_response("Tre opzioni trovate.")])
+    foot_arc = [
+        {"transport": "foot", "transport_provider": None, "desc": "Via Ricasoli", "distance": 2.0},
+    ]
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B alle 18"}],
+        "tool_results": [
+            _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00", "arc": foot_arc}),
+            _routing_entry("car", route={"wkt": "LINESTRING(0 0,2 2)", "distance": 3.5, "time": "00:08:00"}),
+            _routing_entry("public_transport", route={"wkt": "LINESTRING(0 0,3 3)", "distance": 42.6, "time": "0:47:03", "arc": _bus_arc_with_stops()}),
+        ],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": ""},
+        "departure": "18:00",
+    }
+    out = await respond(state, llm=llm)
+    reply = out["response"]["messages"][-1]["content"]
+    assert reply == "Tre opzioni trovate."  # no block leaks into the text
+    routes = out["response"]["data"]["routes"]
+    by_mode = {r["mode"]: r for r in routes}
+    assert set(by_mode) == {"foot", "car", "public_transport"}
+    assert all(r.get("detail") for r in routes)
+    pt = by_mode["public_transport"]["detail"]
+    assert "Linea 56" in pt and "PONTE MOSSE" in pt and "17:45" in pt
+    assert "Via Ricasoli" in by_mode["foot"]["detail"]
+    # No arc in the car audit → departure + totals only, never a raise.
+    assert by_mode["car"]["detail"] == "Partenza: 18:00\nTotale: 3.5 km · 00:08:00"
+
+
+async def test_respond_single_mode_detail_field_equals_appended_block(make_llm):
+    """Single-mode: the same pre-rendered detail rides both the payload (routes[0].detail)
+    and the reply tail — one rendering, no second _format_detail path to drift."""
+    llm = make_llm([_text_response("In autobus, circa 42.6 km.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B in autobus"}],
+        "tool_results": [_routing_entry("public_transport", route={
+            "wkt": "LINESTRING(0 0,3 3)", "distance": 42.6, "time": "0:47:03", "arc": _bus_arc_with_stops(),
+        })],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "public_transport"},
+    }
+    out = await respond(state, llm=llm)
+    detail = out["response"]["data"]["routes"][0].get("detail")
+    assert detail and "Linea 56" in detail
+    assert out["response"]["messages"][-1]["content"].endswith(detail)
+
+
+async def test_respond_no_detail_on_route_error(make_llm):
+    """All routing failed → data carries route_error and no routes; respond neither
+    raises nor invents a detail field anywhere."""
+    llm = make_llm([_text_response("Nessun percorso trovato.")])
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B"}],
+        "tool_results": [_routing_entry("car", error="no route")],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "car"},
+    }
+    out = await respond(state, llm=llm)
+    data = out["response"]["data"]
+    assert data.get("route_error") and "routes" not in data
+    assert "detail" not in json.dumps(data)
+
+
 # --- graph wiring ------------------------------------------------------------
 
 def test_graph_compiles(make_client, make_llm):
