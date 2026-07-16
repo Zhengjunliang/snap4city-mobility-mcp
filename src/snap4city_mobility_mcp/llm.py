@@ -190,6 +190,14 @@ class Llama4Client:
                 # Network-level failure (read timeout, connection reset): transient.
                 last_exc = Llama4Error(f"inference request failed: {e}")
                 if attempt < LLM_RETRIES:
+                    # WARNING so the failed attempt is visible in debug.log (evidence
+                    # for the gateway owner: a retried turn otherwise shows only the
+                    # final "ok" line after a minutes-long hole, L54/L55).
+                    logger.warning(
+                        "llm attempt %d/%d failed after %.1fs (%r); retrying in %.0fs",
+                        attempt + 1, LLM_RETRIES + 1, time.perf_counter() - t0,
+                        e, LLM_RETRY_BACKOFF_S * (attempt + 1),
+                    )
                     time.sleep(LLM_RETRY_BACKOFF_S * (attempt + 1))
                     continue
                 raise last_exc from e
@@ -217,6 +225,13 @@ class Llama4Client:
             # raise hard errors (bad creds, inactive rule) on the first try.
             if _is_transient(msg, resp.status_code) and attempt < LLM_RETRIES:
                 last_exc = err
+                # Same evidence line as the network branch; the envelope message is
+                # capped so a wrapped HTML error page cannot flood the log.
+                logger.warning(
+                    "llm attempt %d/%d failed after %.1fs (HTTP %d: %s); retrying in %.0fs",
+                    attempt + 1, LLM_RETRIES + 1, time.perf_counter() - t0,
+                    resp.status_code, str(err)[:200], LLM_RETRY_BACKOFF_S * (attempt + 1),
+                )
                 time.sleep(LLM_RETRY_BACKOFF_S * (attempt + 1))
                 continue
             raise err

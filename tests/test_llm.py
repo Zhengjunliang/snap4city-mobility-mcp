@@ -4,6 +4,9 @@ Lean core suite: the gateway-wrapped 500 (L12 — HTTP 200 body hiding an upstre
 vLLM error must be retried), the credentials-file contract, and chat() retry vs
 hard-error (L10 — "Rule not found" is auth-level, never retried).
 """
+import logging
+
+import httpx
 import pytest
 
 from snap4city_mobility_mcp import llm as llm_mod
@@ -76,22 +79,34 @@ def test_load_credentials_missing_raises(monkeypatch):
 
 # --- chat() retry behavior ---------------------------------------------------
 
-def test_chat_retries_then_succeeds(client, monkeypatch):
+def test_chat_retries_then_succeeds(client, monkeypatch, caplog):
+    # Both transient branches in one run: a gateway error envelope, then a network-level
+    # httpx failure, then success. Each failed attempt must leave a WARNING in the log —
+    # the retried-turn evidence for the gateway owner (L54: without it a 3-attempt turn
+    # shows only the final "ok" line after a minutes-long hole).
     ok = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
     calls = _queue_posts(monkeypatch, client, [
         _Resp({"message": "The upstream server is timing out"}),
+        httpx.ReadTimeout("read timed out"),
         _Resp(ok),
     ])
-    out = client.chat([{"role": "user", "content": "x"}])
+    with caplog.at_level(logging.WARNING, logger="snap4city_mobility_mcp.llm"):
+        out = client.chat([{"role": "user", "content": "x"}])
     assert out == ok
-    assert len(calls) == 2  # retried once, then succeeded
+    assert len(calls) == 3  # retried twice, then succeeded
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "attempt 1/3" in warnings[0] and "timing out" in warnings[0]
+    assert "attempt 2/3" in warnings[1] and "ReadTimeout" in warnings[1]
 
 
-def test_chat_hard_error_not_retried(client, monkeypatch):
+def test_chat_hard_error_not_retried(client, monkeypatch, caplog):
     # L10: "Rule not found" is an auth/authorization failure, not transient — no retry.
     calls = _queue_posts(monkeypatch, client, [
         _Resp({"message": "Rule not found for this user/path"}),
     ])
-    with pytest.raises(Llama4Error, match="Rule not found"):
-        client.chat([{"role": "user", "content": "x"}])
+    with caplog.at_level(logging.WARNING, logger="snap4city_mobility_mcp.llm"):
+        with pytest.raises(Llama4Error, match="Rule not found"):
+            client.chat([{"role": "user", "content": "x"}])
     assert len(calls) == 1  # hard error: no retry
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
