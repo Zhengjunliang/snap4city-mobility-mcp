@@ -24,6 +24,7 @@ end-to-end only on the Snap4City JupyterHub.
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -34,7 +35,7 @@ from zoneinfo import ZoneInfo
 from fastmcp import Client
 from langgraph.graph import END, StateGraph
 
-from snap4city_mobility_mcp.geo import haversine_km
+from snap4city_mobility_mcp.geo import haversine_km, wkt_points
 from snap4city_mobility_mcp.llm import (
     Llama4Client,
     Llama4Error,
@@ -93,6 +94,7 @@ alle 9") goes in departure_time; leave it '' when they give none. NEVER invent o
 "da piazza Duomo a piazza Dalmazia in Firenze" → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze"
 "portami al Duomo" → request_type=journey, origin_text='', destination_text="Duomo"
 "dov'è la farmacia più vicina?" → request_type=journey, origin_text='', destination_text="farmacia", destination_category="Pharmacy"
+"portami al Duomo e mostrami i ristoranti lungo il percorso" → request_type=journey, origin_text='', destination_text="Duomo", services_category="Restaurant"
 "e in bus?" (follow-up to the piazza Duomo → piazza Dalmazia trip) → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze", mode=public_transport
 "da Santa Croce alla stazione in bus alle 18" → request_type=journey, origin_text="Santa Croce", destination_text="stazione", mode=public_transport, departure_time="18:00"
 </examples>"""
@@ -154,6 +156,11 @@ or coordinates: the map already shows their pins. Keep it to that single sentenc
 - A `service_search_near_gps_position` entry with any OTHER `categories` is how the \
 destination was resolved — the nearest place of that kind: name the found place (the \
 first listed service) naturally in the answer.
+- An `along_route_services` entry lists services of a kind the user asked to SEE along \
+the route: add ONE short sentence — how many were found along the way, naming at most \
+the nearest one; if its count is 0, say plainly none of that kind were found along the \
+route. Do NOT list the other names, addresses, or coordinates: the map already shows \
+their pins. Keep it to that single sentence.
 - If RESULTS has status "unsupported", explain in your own words that for now you \
 answer point-to-point trip questions (on foot, by car, or by public transport), \
 including trips to the nearest place of a kind ("la farmacia più vicina"), and invite \
@@ -186,6 +193,10 @@ _EXTRACT_SLOTS_SCHEMA = {
                     "type": "string",
                     "description": "Only when the destination is a GENERIC KIND of place rather than a named one ('la farmacia più vicina', 'un supermercato'): the matching English km4city service category, e.g. Pharmacy, Hospital, Supermarket, Museum, Hotel, Restaurant, Car_park, Fuel_station. '' when the destination is a named place.",
                 },
+                "services_category": {
+                    "type": "string",
+                    "description": "Only when the user asks to SEE services of a generic kind ALONG the trip, not as its destination ('con le farmacie lungo il percorso', 'mostrami i ristoranti lungo la strada', follow-up 'ci sono supermercati sul percorso?'): the matching English km4city service category, e.g. Pharmacy, Restaurant, Supermarket, Fuel_station. On such a follow-up keep the previous origin/destination and fill only this. '' when the user asked to see nothing along the way.",
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["car", "public_transport", "foot", ""],
@@ -201,7 +212,7 @@ _EXTRACT_SLOTS_SCHEMA = {
             # the destination). An empty string '' marks a slot the user didn't give.
             "required": [
                 "request_type", "origin_text", "destination_text",
-                "destination_category", "mode", "departure_time",
+                "destination_category", "services_category", "mode", "departure_time",
             ],
         },
     },
@@ -217,6 +228,7 @@ class AdvisorState(TypedDict, total=False):
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
     endpoints: dict[str, Any]  # precise resolved {origin, destination} {lat,lng} for the route
     parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
+    services: dict[str, list[dict[str, Any]]]  # along-route services per mode, when the user asked for a category
     departure: str  # requested departure "HH:MM" ('' = leave now), for the reply to state
     response: dict[str, Any]  # widget JSON assembled by respond
 
@@ -292,6 +304,31 @@ def _feature_coords(feature: dict[str, Any]) -> list[float] | None:
     return None
 
 
+# Road-type words carry no identity on their own: an augmented-geocode candidate that
+# shares ONLY these with the user's text ("Verde sportivo di VIA ..." for "via Verdi")
+# is noise, not a match (see _signal_subset); a label that HAS one is street-shaped
+# (see the civic ladder in _pick_feature).
+_ROAD_WORDS = frozenset("via viale piazza piazzale corso largo vicolo strada".split())
+
+# Italian civics are short trailing numbers; 5+ digit tokens (postal codes) never match.
+_CIVIC_RE = re.compile(r"\b(\d{1,4})\b")
+
+
+def _house_number(search: str) -> str | None:
+    """The house number in a place text ("via Laura 11, Firenze" -> "11"), or None.
+
+    The LAST standalone 1-4 digit token wins: Italian civics follow the street name,
+    so a numbered street name ("via venti settembre 5") still yields the civic."""
+    nums = _CIVIC_RE.findall(search)
+    return nums[-1] if nums else None
+
+
+def _feature_label(f: dict[str, Any]) -> str:
+    """address + name joined — the label the pick/subset filters match against."""
+    props = f.get("properties") or {}
+    return " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
+
+
 def _pick_feature(
     geocode: Any, search: str, gps: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
@@ -301,9 +338,13 @@ def _pick_feature(
     1.1 km west of "Piazza Duomo"), so the candidate pool prefers features whose
     address/name tokens are all covered by the search text (rejecting extra-token
     labels). When no label matches (e.g. stations, whose features carry no address)
-    the pool is the full list. With `gps` (the user's position) the nearest pool
-    candidate wins (haversine — the geocoder's own proximity bias is a no-op, probed
-    2026-07-09); without it, the pool's first (best-score) hit wins, as before.
+    the pool is the full list. A search that carries a house number then narrows the
+    pool to the civic-exact StreetNumber hits (the server ranks them first but the
+    anchor override below would bury them, L52) — or, with no civic hit, to
+    street-shaped labels (a name-only POI like "LAURA" must not beat "VIA LAURA" for
+    "via Laura 11"). With `gps` (the anchor) the nearest pool candidate wins
+    (haversine — the geocoder's own proximity bias is a no-op, probed 2026-07-09);
+    without it, the pool's first (best-score) hit wins, as before.
     """
     if not isinstance(geocode, dict) or "error" in geocode:
         return None
@@ -315,15 +356,31 @@ def _pick_feature(
     if want:
         matching = []
         for f in features:
-            props = f.get("properties") or {}
-            label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
-            toks = _label_tokens(label)
+            toks = _label_tokens(_feature_label(f))
             # Skip a label that is just the municipality ("FIRENZE"): it matches any
             # search ending in ", Firenze" but is never a useful pick.
+            props = f.get("properties") or {}
             if toks and toks <= want and not toks <= _label_tokens(str(props.get("city") or "")):
                 matching.append(f)
         if matching:
             pool = matching
+    # Civic ladder: each level narrows only on a hit, so a number-less search (or an
+    # empty level) leaves the pool — and every L17/L43/L49 behavior — exactly as is.
+    civic = _house_number(search)
+    if civic:
+        exact = [
+            f for f in pool
+            if str((f.get("properties") or {}).get("civic") or "").strip() == civic
+        ]
+        if exact:
+            pool = exact  # civic-exact StreetNumber hits outrank anchor-nearest
+        else:
+            # Address-shaped query with no civic hit in the pool (none returned, or a
+            # compound civic like "11/A" missing the exact match): street features
+            # (label carries a road-type word) beat name-only POIs (the 'LAURA' bug).
+            streets = [f for f in pool if _label_tokens(_feature_label(f)) & _ROAD_WORDS]
+            if streets:
+                pool = streets
     best = None
     if gps:
         best_dist = None
@@ -337,8 +394,9 @@ def _pick_feature(
     if best is None:
         best = pool[0]
     logger.debug(
-        "geocode %r picked feature (address=%r, gps=%s)",
-        search, (best.get("properties") or {}).get("address"), bool(gps),
+        "geocode %r picked feature (address=%r, civic=%r, gps=%s)",
+        search, (best.get("properties") or {}).get("address"),
+        (best.get("properties") or {}).get("civic"), bool(gps),
     )
     return best
 
@@ -349,12 +407,6 @@ def _pick_coord(
     """Best feature's [lng, lat] for `search` from a geocode result (see _pick_feature)."""
     best = _pick_feature(geocode, search, gps)
     return _feature_coords(best) if best else None
-
-
-# Road-type words carry no identity on their own: an augmented-geocode candidate that
-# shares ONLY these with the user's text ("Verde sportivo di VIA ..." for "via Verdi")
-# is noise, not a match (see _signal_subset).
-_ROAD_WORDS = frozenset("via viale piazza piazzale corso largo vicolo strada".split())
 
 
 def _signal_subset(geocode: Any, search: str) -> dict[str, Any] | None:
@@ -376,9 +428,7 @@ def _signal_subset(geocode: Any, search: str) -> dict[str, Any] | None:
         return None
     kept = []
     for f in features:
-        props = f.get("properties") or {}
-        label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
-        if _label_tokens(label) & signal:
+        if _label_tokens(_feature_label(f)) & signal:
             kept.append(f)
     return {"features": kept} if kept else None
 
@@ -401,6 +451,19 @@ def _rev_municipality(rev: Any) -> str | None:
 # field (probed 2026-07-09), so [0] is the nearest.
 NEAREST_SERVICE_RADII_KM = (0.5, 2.0, 10.0)
 NEAREST_SERVICE_MAX = 10
+
+# Along-route services (referente item 3): when the user names a category to SEE along
+# the trip ("con le farmacie lungo il percorso"), execute samples anchor points on each
+# found route's geometry and near-searches each one — the remote tool is point+radius
+# only (no corridor parameter), so the corridor is client-made: RADIUS is its half-width,
+# SPACING ≈ 2x radius keeps the sampled discs covering the line without stacking, and the
+# anchor / per-route caps bound the remote fan-out (worst case MAX_ANCHORS calls per
+# routed mode).
+SERVICES_RADIUS_KM = 0.25
+SERVICES_SPACING_KM = 0.4
+SERVICES_MAX_ANCHORS = 8
+SERVICES_PER_CALL = 10
+SERVICES_MAX = 10
 
 
 def _parse_departure(text: str, now: datetime) -> datetime | None:
@@ -716,6 +779,16 @@ async def execute(
         if spots:
             parking = await _enrich_parking(client, spots)
 
+    # Along-route services (referente item 3): only when the user named a category to see.
+    # A second, sequential gather — the anchors are sampled FROM the routed geometry, so
+    # this cannot join the routing gather above (and FakeClient's FIFO stays deterministic:
+    # all routing/parking responses first, then the anchor searches in modes order).
+    services_category = (slots.get("services_category") or "").strip()
+    services: dict[str, list[dict[str, Any]]] = {}
+    if services_category:
+        _emit(on_stage, "services")
+        services = await _along_route_services(client, services_category, modes, primary)
+
     # Surface the precise geocoded endpoints (origin/dest are [lng, lat]) so the front-end
     # pins markers on the real civic address, not on the routing service's road-snapped WKT
     # endpoint (which drifts ~27 m up the street). See docs/lessons.md.
@@ -728,6 +801,7 @@ async def execute(
         "unsupported": False,
         "endpoints": endpoints,
         "parking": parking,
+        "services": services,
         # HH:MM only (never a date or seconds, L43): this is the one form the reply may print.
         # Absent when the user asked for no particular time — respond then says nothing about
         # departure rather than announcing "now".
@@ -759,6 +833,112 @@ async def _enrich_parking(
 
     enriched = await asyncio.gather(*(one(s) for s in spots))
     return sorted(enriched, key=_parking_sort_key)
+
+
+def _sample_polyline(
+    pts: list[tuple[float, float]], spacing_km: float
+) -> list[tuple[float, float]]:
+    """Points every ~spacing_km of arc length along a (lng, lat) polyline, endpoints
+    included (existing vertices only — no interpolation, a vertex is never farther than
+    one hop past the spacing mark and real route geometry is dense)."""
+    out = [pts[0]]
+    acc = 0.0
+    for a, b in zip(pts, pts[1:]):
+        acc += haversine_km(a[1], a[0], b[1], b[0])
+        if acc >= spacing_km:
+            out.append(b)
+            acc = 0.0
+    if out[-1] != pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def _service_anchors(routetype: str, first: dict[str, Any]) -> list[tuple[float, float]]:
+    """Anchor points on one found route for the along-route service search.
+
+    foot/car: the full geometry sampled every SERVICES_SPACING_KM. public_transport:
+    per referente item 3, services are shown near the board/alight stops and along the
+    walking legs — so each bus leg contributes only its boundary vertices while foot
+    legs are sampled like a foot route (a ride's intermediate stops are not places the
+    user can stop at). Deduped, then evenly thinned to SERVICES_MAX_ANCHORS (first/last
+    kept) to bound the remote fan-out.
+    """
+    anchors: list[tuple[float, float]] = []
+    legs = first.get("legs") if isinstance(first.get("legs"), list) else None
+    if routetype == "public_transport" and legs:
+        for leg in legs:
+            pts = wkt_points(leg.get("wkt") or "") if isinstance(leg, dict) else None
+            if not pts:
+                continue
+            if leg.get("type") == "bus":
+                anchors += [pts[0], pts[-1]]
+            else:
+                anchors += _sample_polyline(pts, SERVICES_SPACING_KM)
+    else:
+        pts = wkt_points(first.get("wkt") or "")
+        if pts:
+            anchors = _sample_polyline(pts, SERVICES_SPACING_KM)
+    seen: set[tuple[float, float]] = set()
+    uniq = [p for p in anchors if not (p in seen or seen.add(p))]
+    if len(uniq) > SERVICES_MAX_ANCHORS:
+        n = len(uniq)
+        keep = {round(i * (n - 1) / (SERVICES_MAX_ANCHORS - 1)) for i in range(SERVICES_MAX_ANCHORS)}
+        uniq = [p for i, p in enumerate(uniq) if i in keep]
+    return uniq
+
+
+async def _along_route_services(
+    client: Client, category: str, modes: list[str], entries: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Services of `category` along each successfully routed mode: {mode: [spots]}.
+
+    One near-search per anchor (anchors per _service_anchors), concurrent within a mode.
+    The calls are NOT audited — internal like _enrich_parking, and an audited non-Car_park
+    near-search entry would trip respond's "how the destination was resolved" rule; the
+    LLM view gets its own along_route_services item instead (_results_view). Spots are
+    deduped across anchors by uri (keeping the smallest anchor distance), sorted by that
+    distance and capped to SERVICES_MAX per mode. Item shape mirrors data.parking minus
+    the occupancy fields: {name, lat, lng, uri, distance_km}. Modes whose routing failed
+    (or found nothing nearby) simply contribute no key.
+    """
+    per_mode: dict[str, list[dict[str, Any]]] = {}
+    for mode, entry in zip(modes, entries):
+        result = entry.get("result")
+        if not (isinstance(result, dict) and isinstance(result.get("journey"), dict)):
+            continue
+        first = (result["journey"].get("routes") or [{}])[0]
+        anchors = _service_anchors(mode, first if isinstance(first, dict) else {})
+        if not anchors:
+            continue
+
+        async def one(pt: tuple[float, float]) -> tuple[tuple[float, float], list[dict[str, Any]]]:
+            res = await exec_tool(client, "service_search_near_gps_position", {
+                "latitude": pt[1],
+                "longitude": pt[0],
+                "categories": category,
+                "maxdistance": SERVICES_RADIUS_KM,
+                "maxresults": SERVICES_PER_CALL,
+            })
+            return pt, parse_service_features(res)
+
+        found = await asyncio.gather(*(one(p) for p in anchors))
+        by_uri: dict[str, dict[str, Any]] = {}
+        for pt, spots in found:
+            for s in spots:
+                if not s.get("uri") or s.get("lat") is None or s.get("lng") is None:
+                    continue
+                d = round(haversine_km(pt[1], pt[0], s["lat"], s["lng"]), 3)
+                prev = by_uri.get(s["uri"])
+                if prev is None or d < prev["distance_km"]:
+                    by_uri[s["uri"]] = {
+                        "name": s.get("name"), "lat": s["lat"], "lng": s["lng"],
+                        "uri": s["uri"], "distance_km": d,
+                    }
+        spots = sorted(by_uri.values(), key=lambda s: s["distance_km"])[:SERVICES_MAX]
+        if spots:
+            per_mode[mode] = spots
+            logger.debug("along-route %s (%s): %d services", category, mode, len(spots))
+    return per_mode
 
 
 def _routetype_of(entry: dict[str, Any]) -> str | None:
@@ -1086,6 +1266,8 @@ def _results_view(
     missing: list[str] | None = None,
     departure: str = "",
     parking: list[dict[str, Any]] | None = None,
+    services: dict[str, list[dict[str, Any]]] | None = None,
+    services_category: str = "",
 ) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (no huge WKT).
 
@@ -1151,6 +1333,26 @@ def _results_view(
                     ],
                 }
         view.append(item)
+    if services_category:
+        # The anchor searches are not audited (see _along_route_services), so the LLM's
+        # along-route summary is built here from the deduped per-mode lists — distinct
+        # label on purpose: a service_search item with a non-Car_park category means
+        # "how the destination was resolved" to the prompt. count 0 lets the reply say
+        # honestly that nothing of that kind was found along the way.
+        uris: set[str] = set()
+        names: list[dict[str, Any]] = []
+        for spots in (services or {}).values():
+            for s in spots:
+                if s["uri"] in uris:
+                    continue
+                uris.add(s["uri"])
+                if len(names) < PARKING_MAX:
+                    names.append({"name": s.get("name")})
+        view.append({
+            "name": "along_route_services",
+            "categories": services_category,
+            "result": {"count": len(uris), "services": names},
+        })
     out = {"status": "ok", "results": view}
     if departure:
         out["departure_time"] = departure
@@ -1186,6 +1388,19 @@ async def respond(
     parking = state.get("parking")
     if intent == "route" and parking:
         data["parking"] = parking
+    # Along-route services (referente item 3), keyed per mode in execute: each drawable
+    # route gets ITS OWN list as routes[i].services, so the front-end pin set follows the
+    # chips picker locally (car shows the car route's services, bus the stop-vicinity
+    # ones). Own-frontend field like origin/destination/parking/detail (rule 8 precedent).
+    # A PT journey degraded to foot (mode relabelled by _extract_data) misses its key and
+    # simply ships none — its anchors were bus-stop-based and no longer match the walk.
+    services_map = state.get("services") or {}
+    services_category = ((state.get("slots") or {}).get("services_category") or "").strip()
+    if intent == "route" and services_map:
+        for r in data.get("routes") or []:
+            svc = services_map.get(r.get("mode") or "")
+            if svc:
+                r["services"] = svc
     # Every drawable route ships its deterministic step-by-step block (fermate + orari for
     # bus, turn-by-turn streets for foot/car) as routes[i].detail: the dashboard's local mode
     # picker shows it when the user taps an option, WITHOUT starting a new turn (a bus
@@ -1232,6 +1447,10 @@ async def respond(
         missing=missing,
         departure=state.get("departure") or "",
         parking=parking,
+        services=services_map,
+        # The summary item appears only for a route turn that actually asked for it —
+        # count 0 on a failed/short route still gets an honest "none found" sentence.
+        services_category=services_category if intent == "route" else "",
     )
     answer: str | None = None
     try:

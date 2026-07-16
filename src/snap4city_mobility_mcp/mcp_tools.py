@@ -419,13 +419,13 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
     if not isinstance(result, dict) or "error" in result:
         return result
     if name == "address_search_location" and isinstance(result.get("features"), list):
-        feats = [
-            {
-                "address": (f.get("properties") or {}).get("address"),
-                "city": (f.get("properties") or {}).get("city"),
-            }
-            for f in result["features"][:GEOCODE_LLM_KEEP]
-        ]
+        feats = []
+        for f in result["features"][:GEOCODE_LLM_KEEP]:
+            props = f.get("properties") or {}
+            item = {"address": props.get("address"), "city": props.get("city")}
+            if props.get("civic"):
+                item["civic"] = props["civic"]  # house-number hit (StreetNumber, L52)
+            feats.append(item)
         return {"count": result.get("count"), "features": feats}
     if name == "routing" and isinstance(result.get("journey"), dict):
         journey = result["journey"]

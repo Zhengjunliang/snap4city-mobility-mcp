@@ -106,12 +106,28 @@ Two environment requirements, both **outside this file's control**:
   ride orange with bus pins at the board/alight stops. A walking-only bus itinerary
   (short trip — walking beats any bus, L39) comes back relabeled as a foot route, so the
   map draws a plain green walking line.
-- **Route picker**: a multi-mode turn (no mode specified → 2-3 routes back) also appends
-  a chips bubble — one chip per mode ("In autobus · 3.0 km · 15 min") plus "Mostra
-  tutte". Tapping a chip redraws the map with **only** that route and shows its
-  step-by-step block (`data.routes[].detail`, pre-rendered backend-side: fermate + orari
-  for bus, turn-by-turn streets for foot/car) as a chat bubble. The selection is **purely
-  local** — no new backend turn (a bus re-route would cost another 30-45 s) — and is
-  echoed into the carried `history` so follow-ups keep the chosen mode in context. A
-  later routes-bearing turn dims the old picker (stale: its chips describe lines no
-  longer on the map).
+- **Route picker**: a multi-mode turn (no mode specified → 2-3 routes back) fills the
+  `#advChips` dock (a fixed strip between the chat and the input row) with one
+  mode-named chip per route ("A piedi" / "In auto" / "In autobus" — distance/ETA already
+  live in the reply text) plus "Mostra tutte". Tapping a chip redraws the map with
+  **only** that route, shows its step-by-step block (`data.routes[].detail`,
+  pre-rendered backend-side: fermate + orari for bus, turn-by-turn streets for foot/car)
+  as a chat bubble, toggles the parking pins (car shows them, foot/bus hides them) and
+  swaps the along-route service pins to that route's own set.
+  The selection is **purely local** — no new backend turn (a bus re-route would cost
+  another 30-45 s) — and is echoed into the carried `history` so follow-ups keep the
+  chosen mode in context. Every routes-bearing turn **replaces** the dock (a single-route
+  turn empties it); the dock hides itself when empty.
+- **Along-route service pins** (`docs/lessons.md` L53): when the user asked to see a
+  category along the way, each route carries `data.routes[].services` and the map plots
+  them with the same `addSelectorPin` pipeline as parking, violet pins — the widget
+  resolves each `serviceUri` itself and renders the service's own category icon (a
+  pharmacy pin looks like a pharmacy with zero icon code here). While all routes are
+  shown the pin set is the deduped union; a chip narrows it to that route's list (bus
+  lists only stop-vicinity and walking-leg services, backend rule).
+- **Parking pins** are removed with the `removeSelectorPin` event **keyed by `desc`**
+  (verified in `widgetMap.php`, disit/dashboard-builder: the map indexes each pin layer
+  by `passedData.desc` and the remove handler also dereferences `passedData.query`
+  unguarded) — the clear must resend the same `desc` + `query` + `display` used on add.
+  Sending only `{query, queryType}` makes removal a silent no-op and pins pile up
+  (`docs/lessons.md` L52). Service pins ride the same rule with their own bookkeeping.

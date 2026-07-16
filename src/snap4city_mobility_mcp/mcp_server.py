@@ -282,7 +282,11 @@ def _normalize_feature(feature: dict[str, Any]) -> dict[str, Any]:
     The address endpoint carries properties.{address, city, score}; the full-text
     endpoint carries properties.name with city/score often absent. We map name -> address
     so _pick_coord / _narrow_by_city / slim_result_for_llm read the same fields either way,
-    and keep the original name. Geometry (GeoJSON [lng, lat]) passes through untouched.
+    and keep the original name. civic + serviceType pass through because /location/ marks
+    house-number hits as serviceType "StreetNumber" with the civic number (ranked first,
+    L32) and the client's _pick_feature narrows to the exact civic when the user gave one
+    (a bare anchor-nearest pick lands street-level, L52). Geometry (GeoJSON [lng, lat])
+    passes through untouched.
     """
     props = feature.get("properties") or {}
     return {
@@ -292,6 +296,8 @@ def _normalize_feature(feature: dict[str, Any]) -> dict[str, Any]:
             "city": props.get("city"),
             "score": props.get("score"),
             "name": props.get("name"),
+            "civic": props.get("civic"),
+            "serviceType": props.get("serviceType"),
         },
     }
 

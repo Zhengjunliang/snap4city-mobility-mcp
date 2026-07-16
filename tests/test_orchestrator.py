@@ -7,10 +7,13 @@ import json
 from datetime import datetime
 
 from snap4city_mobility_mcp import mcp_tools
+from snap4city_mobility_mcp.geo import fmt_linestring
 from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
     ROME,
+    SERVICES_MAX_ANCHORS,
+    SERVICES_RADIUS_KM,
     _build_graph,
     _extract_data,
     _extract_parking,
@@ -20,6 +23,8 @@ from snap4city_mobility_mcp.orchestrator import (
     _request_to_intent,
     _results_view,
     _routing_hint,
+    _sample_polyline,
+    _service_anchors,
     execute,
     respond,
     understand,
@@ -90,12 +95,15 @@ def _feature_collection(lng: float, lat: float) -> dict:
 
 
 def _fc_with_addresses(*entries, city="FIRENZE") -> dict:
-    """FeatureCollection from (lng, lat, address) triples (address may be None)."""
-    return {"type": "FeatureCollection", "features": [
-        {"geometry": {"coordinates": [lng, lat]},
-         "properties": {"address": addr, "city": city}}
-        for lng, lat, addr in entries
-    ]}
+    """FeatureCollection from (lng, lat, address[, civic]) tuples (address may be None);
+    a 4th element marks a /location/ house-number hit (serviceType StreetNumber)."""
+    feats = []
+    for e in entries:
+        props = {"address": e[2], "city": city}
+        if len(e) > 3:
+            props.update(civic=e[3], serviceType="StreetNumber")
+        feats.append({"geometry": {"coordinates": [e[0], e[1]]}, "properties": props})
+    return {"type": "FeatureCollection", "features": feats}
 
 
 def _journey(distance=1.83, routes=None) -> dict:
@@ -138,8 +146,8 @@ def test_extract_slots_schema_requires_all_fields():
     it was optional. All slots must stay required ('' marks an absent one)."""
     params = _EXTRACT_SLOTS_SCHEMA["function"]["parameters"]
     assert set(params["required"]) == {
-        "request_type", "origin_text", "destination_text", "destination_category", "mode",
-        "departure_time",
+        "request_type", "origin_text", "destination_text", "destination_category",
+        "services_category", "mode", "departure_time",
     }
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
 
@@ -194,6 +202,64 @@ def test_pick_coord_gps_picks_nearest_candidate():
     florence_gps = {"lat": 43.7731, "lng": 11.2558}
     assert _pick_coord(fc, "Piazza Duomo", gps=florence_gps) == [11.2560, 43.7731]
     assert _pick_coord(fc, "Piazza Duomo") == [10.2270, 43.9580]
+
+
+def test_pick_coord_civic_exact_beats_anchor_nearest():
+    """Regression for 'via Laura 11' (L52): the anchor sat right on a POI named 'LAURA'
+    and anchor-nearest buried the civic-exact StreetNumber hit the server ranked first.
+    With a house number in the search, the civic-exact feature must win — with and
+    without an anchor."""
+    fc = _fc_with_addresses(
+        (11.2640, 43.7790, "VIA LAURA"),            # street-level entry
+        (11.2616, 43.7821, "LAURA"),                # name-only POI, nearest to the anchor
+        (11.2647, 43.7784, "VIA LAURA", "11"),      # civic-exact StreetNumber
+    )
+    anchor = {"lat": 43.7822, "lng": 11.2615}       # = the resolved origin, on the POI
+    assert _pick_coord(fc, "via Laura 11, Firenze", gps=anchor) == [11.2647, 43.7784]
+    assert _pick_coord(fc, "via Laura 11, Firenze") == [11.2647, 43.7784]
+
+
+def test_pick_coord_number_prefers_street_over_poi_without_civic():
+    """No civic feature in the pool but the search has a number: street-shaped labels
+    (road-type word) beat name-only POIs — the 'LAURA' bug without StreetNumber data."""
+    fc = _fc_with_addresses(
+        (11.2640, 43.7790, "VIA LAURA"),
+        (11.2616, 43.7821, "LAURA"),
+    )
+    anchor = {"lat": 43.7822, "lng": 11.2615}
+    assert _pick_coord(fc, "via Laura 11, Firenze", gps=anchor) == [11.2640, 43.7790]
+
+
+def test_pick_coord_civic_mismatch_keeps_anchor_fallback():
+    """A civic in the pool that does NOT match the searched number is no shortcut:
+    the street layer applies and anchor-nearest picks among street features as today."""
+    fc = _fc_with_addresses(
+        (11.2640, 43.7790, "VIA LAURA", "7"),
+        (11.2648, 43.7783, "VIA LAURA"),
+    )
+    anchor = {"lat": 43.7784, "lng": 11.2648}
+    assert _pick_coord(fc, "via Laura 11, Firenze", gps=anchor) == [11.2648, 43.7783]
+
+
+def test_pick_coord_numberless_query_keeps_anchor_nearest():
+    """No house number in the search → the civic ladder must not fire at all: the
+    anchor-nearest candidate (here a name-only POI) still wins, exactly as before."""
+    fc = _fc_with_addresses(
+        (11.2640, 43.7790, "VIA LAURA"),
+        (11.2616, 43.7821, "LAURA"),
+    )
+    anchor = {"lat": 43.7822, "lng": 11.2615}
+    assert _pick_coord(fc, "via Laura, Firenze", gps=anchor) == [11.2616, 43.7821]
+
+
+def test_pick_coord_civic_is_last_number_token():
+    """Numbered street names keep working: in 'via 20 settembre 5' the civic is the
+    LAST standalone number (5), not the street's own 20."""
+    fc = _fc_with_addresses(
+        (11.2500, 43.7800, "VIA 20 SETTEMBRE", "20"),
+        (11.2510, 43.7810, "VIA 20 SETTEMBRE", "5"),
+    )
+    assert _pick_coord(fc, "via 20 settembre 5, Firenze") == [11.2510, 43.7810]
 
 
 # --- execute -----------------------------------------------------------------
@@ -771,6 +837,100 @@ async def test_execute_foot_only_skips_parking(make_client, make_result):
     out = await execute({"slots": slots}, client=client)
     assert not any(n == "service_search_near_gps_position" for n, _ in client.calls)
     assert out["parking"] == []
+    assert out["services"] == {}  # no services_category asked → zero along-route searches
+
+
+# --- along-route services (referente item 3, L53) ------------------------------
+
+def test_sample_polyline_spacing_endpoints_and_anchor_cap():
+    # 0.001 deg of latitude ≈ 111 m; spacing 0.4 km emits roughly every 4th vertex.
+    pts = [(11.0, 43.0 + i * 0.001) for i in range(40)]
+    out = _sample_polyline(pts, 0.4)
+    assert out[0] == pts[0] and out[-1] == pts[-1]
+    assert 5 < len(out) < len(pts)
+    # _service_anchors then thins to the cap, keeping the endpoints.
+    anchors = _service_anchors("foot", {"wkt": fmt_linestring(pts)})
+    assert len(anchors) <= SERVICES_MAX_ANCHORS
+    assert anchors[0] == pts[0] and anchors[-1] == pts[-1]
+
+
+def test_service_anchors_bus_takes_stops_and_walk_legs_only():
+    # PT rule: a bus leg contributes only its board/alight vertices (never the mid-ride
+    # stop), foot legs sample like a walk; shared boundary vertices dedupe.
+    a, b = (11.0, 43.0), (11.001, 43.0)
+    mid, c = (11.01, 43.0), (11.02, 43.0)
+    d = (11.021, 43.0)
+    first = {
+        "wkt": fmt_linestring([a, b, mid, c, d]),
+        "legs": [
+            {"type": "foot", "wkt": fmt_linestring([a, b])},
+            {"type": "bus", "wkt": fmt_linestring([b, mid, c])},
+            {"type": "foot", "wkt": fmt_linestring([c, d])},
+        ],
+    }
+    anchors = _service_anchors("public_transport", first)
+    assert anchors == [a, b, c, d]  # mid-ride stop excluded, boundaries deduped
+
+
+async def test_execute_services_searched_along_route(make_client, make_result):
+    """services_category set → one near-search per sampled anchor (NOT audited), results
+    deduped by uri across anchors and keyed by mode in state['services']."""
+    # Route geometry with 2 anchors (single ~1.9 km hop ≥ spacing → first + last vertex).
+    wkt = "LINESTRING (11.24 43.77, 11.26 43.76)"
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey(routes=[{"wkt": wkt, "distance": 1.9, "time": "00:23:00"}])),
+        # anchor 1: FarmaciaA; anchor 2: FarmaciaA again (dedup) + FarmaciaB
+        make_result(structured=_parking_search(("FarmaciaA", 11.245, 43.768))),
+        make_result(structured=_parking_search(("FarmaciaA", 11.245, 43.768), ("FarmaciaB", 11.259, 43.761))),
+    ])
+    slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze",
+             "mode": "foot", "services_category": "Pharmacy"}
+    out = await execute({"slots": slots}, client=client)
+    near = [a for n, a in client.calls if n == "service_search_near_gps_position"]
+    assert len(near) == 2
+    assert all(c["categories"] == "Pharmacy" and c["maxdistance"] == SERVICES_RADIUS_KM for c in near)
+    spots = out["services"]["foot"]
+    # Deduped by uri (FarmaciaA appears at both anchors → once) and sorted by distance to
+    # the nearest anchor: B sits ~140 m from the last anchor, A ~460 m from the first.
+    assert [s["name"] for s in spots] == ["FarmaciaB", "FarmaciaA"]
+    assert spots[0]["distance_km"] < spots[1]["distance_km"]
+    assert all(set(s) == {"name", "lat", "lng", "uri", "distance_km"} for s in spots)
+    # Anchor searches are internal (like parking enrichment): none in the audit.
+    assert not any(e["name"] == "service_search_near_gps_position" for e in out["tool_results"])
+
+
+async def test_respond_attaches_services_per_route_and_summarizes(make_llm):
+    """Each drawable route gets ITS mode's list as routes[i].services; the LLM view carries
+    the distinct along_route_services item (deduped count), never the raw anchor calls."""
+    llm = make_llm([_text_response("A piedi 2 km. Lungo il percorso trovi 2 farmacie.")])
+    svc_foot = [{"name": "FarmaciaA", "lat": 43.768, "lng": 11.245, "uri": "http://a", "distance_km": 0.05}]
+    svc_car = [{"name": "FarmaciaB", "lat": 43.761, "lng": 11.259, "uri": "http://b", "distance_km": 0.1}]
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B con le farmacie lungo il percorso"}],
+        "slots": {"services_category": "Pharmacy"},
+        "endpoints": {"origin": {"lat": 43.77, "lng": 11.24}, "destination": {"lat": 43.76, "lng": 11.26}},
+        "tool_results": [
+            _routing_entry("foot", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0, "time": "00:20:00"}),
+            _routing_entry("car", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.5, "time": "00:08:00"}),
+        ],
+        "services": {"foot": svc_foot, "car": svc_car},
+    }
+    out = (await respond(state, llm=llm))["response"]
+    by_mode = {r["mode"]: r for r in out["data"]["routes"]}
+    assert by_mode["foot"]["services"] == svc_foot
+    assert by_mode["car"]["services"] == svc_car
+    sent = llm.calls[0]["messages"][1]["content"]
+    assert '"along_route_services"' in sent and '"count": 2' in sent
+
+
+def test_results_view_services_summary_counts_zero_honestly():
+    view = _results_view([], unsupported=False, services={}, services_category="Pharmacy")
+    item = view["results"][-1]
+    assert item["name"] == "along_route_services" and item["categories"] == "Pharmacy"
+    assert item["result"] == {"count": 0, "services": []}
 
 
 def test_extract_data_drops_foot_only_pt_when_real_foot_present():

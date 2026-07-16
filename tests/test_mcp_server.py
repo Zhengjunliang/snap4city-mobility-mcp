@@ -55,21 +55,27 @@ def _install_fake_httpx(monkeypatch, *, body=None, raise_exc=None):
 
 def test_normalize_maps_name_to_address_for_fulltext():
     # Full-text features carry properties.name (no address/city/score); the client reads
-    # `address`, so name must land there while the original name is kept.
+    # `address`, so name must land there while the original name is kept. civic/serviceType
+    # are absent on full-text hits but the shape stays uniform (None).
     feat = {"geometry": {"coordinates": [11.2556, 43.7731]}, "properties": {"name": "Duomo"}}
     out = _normalize_feature(feat)
     assert out["properties"]["address"] == "Duomo"
     assert out["properties"]["name"] == "Duomo"
+    assert out["properties"]["civic"] is None and out["properties"]["serviceType"] is None
     assert out["geometry"]["coordinates"] == [11.2556, 43.7731]
 
 
-def test_normalize_keeps_address_city_score_for_location():
+def test_normalize_keeps_address_city_score_civic_for_location():
+    # /location/ house-number hits carry serviceType "StreetNumber" + civic (L32); both
+    # must survive normalization — _pick_feature narrows to the exact civic (L52).
     feat = {
         "geometry": {"coordinates": [11.25, 43.77]},
-        "properties": {"address": "VIA ZARA", "city": "FIRENZE", "score": 12.6, "name": None},
+        "properties": {"address": "VIA ZARA", "city": "FIRENZE", "score": 12.6, "name": None,
+                       "serviceType": "StreetNumber", "civic": "3"},
     }
     out = _normalize_feature(feat)["properties"]
-    assert out == {"address": "VIA ZARA", "city": "FIRENZE", "score": 12.6, "name": None}
+    assert out == {"address": "VIA ZARA", "city": "FIRENZE", "score": 12.6, "name": None,
+                   "civic": "3", "serviceType": "StreetNumber"}
 
 
 async def test_search_excludepoi_true_hits_location_endpoint(monkeypatch):

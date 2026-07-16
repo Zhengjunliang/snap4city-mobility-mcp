@@ -22,13 +22,16 @@ there is no primary/alternate dimming and no legend. (Every route carries start/
 omitting them on some trajectories crashed the widget, so the markers overlap at the shared
 O/D.) When only one route comes back (mode specified, or a mode empty / very short trip / no
 PT for that OD), a single line is drawn.
-ROUTE PICKER: a multi-mode turn also appends a chips bubble (one chip per mode, labeled
-"In autobus · 3.0 km · 15 min", plus "Mostra tutte"): tapping a chip redraws the map with
-ONLY that route and shows its pre-rendered step-by-step block (data.routes[].detail, built
-backend-side from the audit) as a chat bubble - all LOCAL, no new backend turn (a bus
-re-route costs 30-45s). The selection also echoes into the carried history so follow-ups
-keep the chosen mode in context. A later routes-bearing turn marks old pickers stale
-(dimmed, inert): their chips describe lines no longer on the map.
+ROUTE PICKER: a multi-mode turn fills the #advChips dock (a fixed strip between the chat
+and the input row) with one mode-named chip per route ("A piedi" / "In auto" / "In
+autobus" - distance/ETA already live in the reply text) plus "Mostra tutte": tapping a
+chip redraws the map with ONLY that route, shows its pre-rendered step-by-step block
+(data.routes[].detail, built backend-side from the audit) as a chat bubble, and toggles
+the parking pins (car chip shows them, foot/bus hides them) - all LOCAL, no new backend
+turn (a bus re-route costs 30-45s). The selection also echoes into the carried history so
+follow-ups keep the chosen mode in context. Every routes-bearing turn REPLACES the dock
+(a single-route turn empties it); a routes-less turn leaves it alone (map unchanged, the
+chips still tell the truth). The dock hides itself when empty (CSS :empty).
 HOW THE MAP DRAWS: every route goes through the widgetMap's MANUAL branch
 (addCustomTrajectory with per-point mode.routing.manual): the widget just connects the given
 points with straight segments, so we feed it the backend's own route geometry and the map
@@ -48,6 +51,10 @@ API, L51); when no variant matches it degrades to the router's stop-to-stop chor
 PARKING (car routes): data.parking lists car parks near the destination; each is plotted on the
 map via the widgetMap "addSelectorPin" event (one per serviceUri, Snap4City's own pin pattern).
 No list in the chat: the reply text already sums up the availability in one sentence (L37).
+SERVICES (user-asked category, L53): routes[i].services lists services along that route (bus:
+near board/alight stops + walking legs); same addSelectorPin pipeline, violet pins - the widget
+resolves each serviceUri itself and renders the service's own category icon, so pharmacy pins
+look like pharmacies with zero icon code here. The chips picker swaps the set per shown route.
 GPS (near-me): each send fetches the browser geolocation (getCurrentPosition, 5s timeout, 60s
 cache) and POSTs it as `gps: {lat, lng}` (null on denial/unsupported/blocked). The backend uses
 it to start the trip from the user's position when no origin is given and to pick the nearest
@@ -78,18 +85,19 @@ CLAUDE.md rule 9). The .adv box fills the host container on its own (position: a
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
 .adv #advSend:disabled { opacity: .5; cursor: default; }
 .adv .msg.thinking { color: #9aa6b8; font-style: italic; animation: advPulse 1.2s ease-in-out infinite; }
-.adv .msg.choices { background: none; border: none; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 6px; max-width: 100%; }
+.adv #advChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.adv #advChips:empty { display: none; }
 .adv .chip { padding: 6px 10px; border: 1px solid #3a4564; border-radius: 14px; background: #28324d; color: #e8ecf4; font-size: 12px; font-family: inherit; cursor: pointer; }
 .adv .chip.sel { background: #f5c518; border-color: #f5c518; color: #1f2a44; font-weight: bold; }
-.adv .msg.choices.stale .chip { opacity: .45; cursor: default; }
 @keyframes advPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 </style>
 </head>
 <body>
 <div class="adv">
 <div id="advChat"></div>
+<div id="advChips"></div>
 <div class="row">
-<input id="advInput" type="text" placeholder='es. "da Piazza del Duomo a Santa Croce a piedi"' autocomplete="off">
+<input id="advInput" type="text" autocomplete="off">
 <button id="advSend" type="button">Invia</button>
 </div>
 </div>
@@ -112,12 +120,19 @@ var ICONS = { start: ICON_BASE + "FirstStopOfRoute.png", finish: ICON_BASE + "La
 // (one event per car park). The `query` is a ServiceMap API URL; the docs show an individual
 // device is selected with "?serviceUri=<URI>" (a category query "?categories=Car_park" would
 // plot ALL of them, which we avoid). Base = the public ServiceMap (same as mcp_server.py).
-// REAL-MACHINE NOTE (L30): addSelectorPin fields are documented; removeSelectorPin (clear) is
-// the documented mirror but its exact passedData is unconfirmed - capture from the PA.php
-// dashboard via DevTools if pins don't clear. All wrapped in try/catch so a mismatch never
-// breaks the chat (the reply text still states the availability).
+// REMOVAL (verified in widgetMap.php, disit/dashboard-builder): the map keys each pin layer
+// by passedData.desc (gisLayersOnMap[desc]; empty desc falls back to query), and its
+// 'removeSelectorPin' handler looks up THAT desc and also dereferences passedData.query
+// unguarded - so removal must resend the SAME desc + query (+ display) used on add.
+// Our first version sent only {query, queryType}: desc came out undefined, the lookup
+// missed, and pins piled up forever (L52). Same-name car parks collide on the desc key
+// (the widget dedups adds by desc) - rare, accepted.
 var SERVICEMAP_BASE = "https://servicemap.disit.org/WebAppGrafo/api/v1/";
 var PARK_PIN = { color1: "#1e66ff", color2: "#1e66ff", pinattr: "square", display: "pins", queryType: "Default" };
+// Along-route service pins (violet): same pipeline and pinattr as parking (known-good values,
+// L30 warns unsupported ones crash the widget); the category icon inside the pin comes from
+// the widget's own serviceUri lookup, not from us.
+var SERVICE_PIN = { color1: "#8e44ad", color2: "#8e44ad", pinattr: "square", display: "pins", queryType: "Default" };
 // One vivid color per vehicle (foot green, car blue, bus orange). Every drawn route uses
 // its mode color; there is no primary/alternate dimming. In the manual branch each segment
 // reads the current point's color as a plain STRING. (Line width is left alone: the
@@ -172,44 +187,33 @@ return msgs[i].content.trim();
 return "(nessuna risposta)";
 }
 // ---- Route option picker (multi-mode turns) -------------------------------
-// "H:MM:SS" -> "8 min" / "1 h 5 min" (seconds >= 30 round the minute up; a sub-minute
-// route still says "1 min"). An unparseable duration passes through as-is.
-function fmtDur(dur) {
-var m = /^(\d+):(\d{2}):(\d{2})$/.exec(dur || "");
-if (!m) return dur || "";
-var h = parseInt(m[1], 10);
-var min = parseInt(m[2], 10) + (parseInt(m[3], 10) >= 30 ? 1 : 0);
-if (min === 60) { h += 1; min = 0; }
-if (h > 0) return h + " h" + (min ? " " + min + " min" : "");
-return (min || 1) + " min";
-}
-// Chip label: "In autobus · 3.0 km · 15 min" (mode + whatever totals came back).
+// Chip label = mode name only ("In auto"): distance/ETA already live in the reply text.
 function chipLabel(route) {
-var bits = [MODE_LABELS[vehicleOf(route.mode)] || "Percorso"];
-if (route.distance_km != null) bits.push(route.distance_km + " km");
-if (route.duration) bits.push(fmtDur(route.duration));
-return bits.join(" · ");
+return MODE_LABELS[vehicleOf(route.mode)] || "Percorso";
 }
-// One chip per returned route + "Mostra tutte". Selection is PURELY LOCAL - no new backend
-// turn (a bus re-route costs 30-45s, L31): the chip redraws the map with ONLY that route
-// and shows its pre-rendered route.detail (backend-built step block) in a bot bubble;
-// "Mostra tutte" restores all the lines. routes/origin/destination live in this closure
-// (per-bubble data: a later turn can never make these chips act on ITS routes); a new
-// routes-bearing turn marks the bubble .stale (renderTurn), which kills the clicks. Clicks
-// are also ignored while a turn is in flight: renderTurn's `history = response.messages`
-// would drop entries pushed mid-flight, and the incoming turn redraws the map anyway. The
-// selection echoes into the chat AND into `history` (user + assistant, same texts as the
-// bubbles) so a follow-up's understand sees the chosen mode in context.
-function addChoices(routes, origin, destination) {
-var $box = $("<div>").addClass("msg bot choices");
-function guard() { return inFlight || $box.hasClass("stale"); }
+// Fill the #advChips dock: one chip per returned route + "Mostra tutte". Selection is
+// PURELY LOCAL - no new backend turn (a bus re-route costs 30-45s, L31): the chip redraws
+// the map with ONLY that route, shows its pre-rendered route.detail (backend-built step
+// block) in a bot bubble, and toggles the parking pins (car shows, foot/bus hides;
+// "Mostra tutte" restores lines and pins). routes/origin/destination/parking live in this
+// closure; renderTurn empties the dock on every routes-bearing turn, so stale chips (and
+// their closures) simply disappear. Clicks are ignored while a turn is in flight:
+// renderTurn's `history = response.messages` would drop entries pushed mid-flight, and
+// the incoming turn redraws the map anyway. The selection echoes into the chat AND into
+// `history` (user + assistant, same texts as the bubbles) so a follow-up's understand
+// sees the chosen mode in context.
+function addChoices(routes, origin, destination, parking) {
+var $box = $("#advChips");
 routes.forEach(function (route) {
 var label = chipLabel(route);
 var $chip = $("<button>").attr("type", "button").addClass("chip").text(label);
 $chip.on("click", function () {
-if (guard() || $chip.hasClass("sel")) return;
+if (inFlight || $chip.hasClass("sel")) return;
 try { drawRoutes([route], origin, destination); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); return; }
+if (vehicleOf(route.mode) === "car") drawParkingPins(parking);
+else clearParkingPins();
+drawServicePins(route.services || []);
 $box.find(".chip").removeClass("sel");
 $chip.addClass("sel");
 var echo = "Scelgo l'opzione: " + label;
@@ -228,14 +232,14 @@ $box.append($chip);
 });
 var $all = $("<button>").attr("type", "button").addClass("chip").text("Mostra tutte");
 $all.on("click", function () {
-if (guard()) return;
+if (inFlight) return;
 try { drawRoutes(routes, origin, destination); }
 catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); return; }
+drawParkingPins(parking);
+drawServicePins(allServices(routes));
 $box.find(".chip").removeClass("sel");
 });
 $box.append($all);
-$("#advChat").append($box);
-$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
 }
 // ---- Map drawing (widgetMap manual branch via addCustomTrajectory) -------
 // The backend route mode (foot/car/public_transport) maps to the front-end vehicle
@@ -332,20 +336,19 @@ trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs 
 }
 // ---- Parking near the destination (car routes) --------------------------
 // Map pins via addSelectorPin (one event per car park, by serviceUri - Snap4City's own widget
-// loops one event per pin, so we do too). REAL-MACHINE NOTE (L30): the passedData fields, the
-// SuperServiceMap base, and the clear-pins event are the documented/likely shape but UNVERIFIED
-// against a live PA.php payload - confirm via DevTools. All wrapped in try/catch so the reply
-// bubble is never affected if the widget balks. lastParkingUris lets us clear last turn's
-// pins (a foot follow-up must wipe the previous car parking pins).
-var lastParkingUris = [];
-function parkQuery(uri) { return SERVICEMAP_BASE + "?serviceUri=" + encodeURIComponent(uri); }
+// loops one event per pin, so we do too). Removal is the verified 'removeSelectorPin' event
+// keyed by desc (see the config note above): lastParkingPins remembers each added pin's
+// {desc, query} so the clear resends exactly those. try/catch keeps any widget balk away
+// from the chat (the reply text still states the availability).
+var lastParkingPins = [];
+function serviceQuery(uri) { return SERVICEMAP_BASE + "?serviceUri=" + encodeURIComponent(uri); }
 function clearParkingPins() {
 try {
-lastParkingUris.forEach(function (uri) {
-trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { query: parkQuery(uri), queryType: PARK_PIN.queryType } });
+lastParkingPins.forEach(function (pin) {
+trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { desc: pin.desc, query: pin.query, display: PARK_PIN.display } });
 });
-} catch (e) { /* removeSelectorPin is the documented mirror but its passedData is unconfirmed; ignore */ }
-lastParkingUris = [];
+} catch (e) { /* widget balked; never break the chat */ }
+lastParkingPins = [];
 }
 function drawParkingPins(parking) {
 clearParkingPins();
@@ -353,14 +356,59 @@ if (!parking || !parking.length) return;
 try {
 parking.forEach(function (p) {
 if (!p.uri) return;
+var desc = p.name || "Parcheggio";
+var query = serviceQuery(p.uri);
 trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
-query: parkQuery(p.uri), queryType: PARK_PIN.queryType, display: PARK_PIN.display,
-desc: p.name || "Parcheggio", color1: PARK_PIN.color1, color2: PARK_PIN.color2,
+query: query, queryType: PARK_PIN.queryType, display: PARK_PIN.display,
+desc: desc, color1: PARK_PIN.color1, color2: PARK_PIN.color2,
 pinattr: PARK_PIN.pinattr
 } });
-lastParkingUris.push(p.uri);
+lastParkingPins.push({ desc: desc, query: query });
 });
-} catch (e) { /* L30: addSelectorPin shape unverified; the reply text still states availability */ }
+} catch (e) { /* widget balked; the reply text still states availability */ }
+}
+// ---- Along-route services (user-asked category, L53) ----------------------
+// Same pin pipeline as parking, separate bookkeeping so the two sets clear independently
+// (a chip tap swaps the service set but only toggles parking). Same-name services collide
+// on the widget's desc key like same-name car parks - rare, accepted.
+var lastServicePins = [];
+function clearServicePins() {
+try {
+lastServicePins.forEach(function (pin) {
+trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { desc: pin.desc, query: pin.query, display: SERVICE_PIN.display } });
+});
+} catch (e) { /* widget balked; never break the chat */ }
+lastServicePins = [];
+}
+function drawServicePins(services) {
+clearServicePins();
+if (!services || !services.length) return;
+try {
+services.forEach(function (s) {
+if (!s.uri) return;
+var desc = s.name || "Servizio";
+var query = serviceQuery(s.uri);
+trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
+query: query, queryType: SERVICE_PIN.queryType, display: SERVICE_PIN.display,
+desc: desc, color1: SERVICE_PIN.color1, color2: SERVICE_PIN.color2,
+pinattr: SERVICE_PIN.pinattr
+} });
+lastServicePins.push({ desc: desc, query: query });
+});
+} catch (e) { /* widget balked; the reply text still sums the services up */ }
+}
+// Union of every route's services, deduped by uri (routes share stretches, so the same
+// service can ride on more than one route's list).
+function allServices(routes) {
+var seen = {}, out = [];
+(routes || []).forEach(function (route) {
+(route.services || []).forEach(function (s) {
+if (!s.uri || seen[s.uri]) return;
+seen[s.uri] = true;
+out.push(s);
+});
+});
+return out;
 }
 // ---- Send a turn to the bridge (job + poll) ------------------------------
 // The bridge does NOT answer the turn on the POST: a public-transport turn takes ~50-70s
@@ -384,6 +432,7 @@ understand: "Sto capendo la richiesta…",
 geocode: "Cerco gli indirizzi…",
 routing: "Calcolo il percorso…",
 routing_bus: "Calcolo il percorso in bus (può richiedere un minuto)…",
+services: "Cerco i servizi lungo il percorso…",
 respond: "Preparo la risposta…"
 };
 // The bubble text for a 202 body. The seconds only appear once the turn is visibly slow, so a
@@ -430,17 +479,21 @@ var data = (response && response.data) || {};
 // Prefer the multi-route list; fall back to the single top-level route for safety.
 var routes = data.routes || (data.wkt ? [{ wkt: data.wkt, mode: data.mode }] : []);
 if (routes.length) {
-$("#advChat .choices").addClass("stale");  // the map is about to change: old pickers now lie
+$("#advChips").empty();  // the map is about to change: the old picker now lies
 try {
 drawRoutes(routes, data.origin, data.destination);
-if (routes.length > 1) addChoices(routes, data.origin, data.destination);
+if (routes.length > 1) addChoices(routes, data.origin, data.destination, data.parking);
 } catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
-}
-// Parking (car routes). Clear last turn's pins unconditionally so a non-car follow-up wipes
-// them; then plot the pins when present (independent of routes - parking pins show even if the
-// car route itself came back empty). The availability is stated in the reply text, not a list.
-clearParkingPins();
+// Parking pins live and die with the map content: refreshed only on a routes-bearing
+// turn (drawParkingPins clears first, so a non-car turn wipes the previous car's pins).
+// A routes-less turn (chat, follow-up question) leaves lines, dock AND pins alone.
+// The availability is stated in the reply text, not a list.
 drawParkingPins(data.parking);
+// Along-route service pins: the union across routes while every line is shown (the
+// chips then narrow the set per route). Same lifecycle as parking - a turn without a
+// services request draws none, wiping the previous turn's.
+drawServicePins(allServices(routes));
+}
 }
 // One turn at a time: a turn now stays in flight for as long as the polling lasts (up to
 // POLL_MAX_MS), and two overlapping turns would race on `history` (the later job's messages

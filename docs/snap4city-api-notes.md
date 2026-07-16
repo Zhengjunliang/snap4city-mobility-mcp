@@ -28,7 +28,8 @@ shape below is what both return, so the client's parsing is identical either way
   "features": [
     {
       "geometry": { "type": "Point", "coordinates": [11.250053, 43.773357] },  // [lng, lat], GeoJSON order
-      "properties": { "name": "CHIESA DI SANTA MARIA NOVELLA", "address": "...", "city": "..." }
+      "properties": { "name": "CHIESA DI SANTA MARIA NOVELLA", "address": "...", "city": "...",
+                      "serviceType": "StreetNumber", "civic": "3" }  // civic fields on /location/ house-number hits only
     }
   ]
 }
@@ -42,6 +43,7 @@ uppercase KB service name and may be `null`.
 - **Not region-locked**: the index holds Valencia (ES) / southern France / Maastricht (NL) entries, so `"...Firenze"` can return 100 out-of-region hits and zero Tuscan. There is no geo-constraint parameter; the client narrows to a city the user named ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)) and otherwise picks the candidate nearest an anchor ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)) — no distance cap (a 150 km sentinel mis-killed legitimate named-city trips and was removed, L41). Usable data is effectively Tuscany-only (live-tested: no Brescia/Milan streets anywhere, L41), so out-of-region queries return fuzzy noise: test with Tuscan places.
 - **POIs outrank the real place**: with `excludePOI=false`, `"Piazza del Duomo"` returns the `PRIZIO STEFANO` company before the actual square. The advisor geocodes in two passes (`excludePOI=true` first, POI fallback only when the address pass has no named-city hit, [mcp_tools._geocode_address_first](../src/snap4city_mobility_mcp/mcp_tools.py)), then prefers features whose label tokens are a subset of the search tokens ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)).
 - **Same-name towns**: `"Piazza Duomo"` also matches squares in Castelnuovo / Pietrasanta (90 km away). A city the user names wins; otherwise the candidate nearest an anchor does — the destination anchors on the resolved origin, the origin on the user's GPS (live-tested: without the origin anchor, "via Pisana 166" from a Florence origin picked Lucca's VIA PISANA, the server's first hit — L43).
+- **House numbers ride the search text** (no dedicated query param exists): `/location/?search=via Zara 3` ranks the exact `serviceType:"StreetNumber", civic:"3"` feature first with the top score (L32 evidence). But the client's anchor-nearest pick would bury it (the destination is always anchored) — so `_normalize_feature` passes `civic`/`serviceType` through and [orchestrator._pick_feature](../src/snap4city_mobility_mcp/orchestrator.py) narrows to the civic-exact hit when the user's text carries a house number, falling back to street-shaped labels (a name-only POI like "LAURA" must not win "via Laura 11") and only then to anchor-nearest (L52).
 - **Pure-noise input gives HTTP 500**, not an empty FeatureCollection. Callers must tolerate 5xx, and an empty / `[]` result is not a clean "no match" signal.
 - **Backend is non-deterministic over time**: the same string can return all-foreign one minute and the correct Tuscan hit the next.
 
