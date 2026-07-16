@@ -68,7 +68,23 @@ def make_result():
 
 @pytest.fixture
 def make_client():
-    return FakeClient
+    """FakeClient factory that asserts every queued response was consumed at teardown.
+
+    Mandatory guard, not hygiene: exec_tool converts ANY failure — including FakeClient's
+    own empty-queue AssertionError — into an {"error": ...} payload, so a queue/call
+    misalignment does not fail the test by itself; it silently degrades the flow under
+    test (a geocode 'succeeds' with an error dict). Leftover responses are the visible
+    symptom, so they fail the test here."""
+    created = []
+
+    def factory(responses=(), tools=()):
+        c = FakeClient(responses, tools)
+        created.append(c)
+        return c
+
+    yield factory
+    leftover = [c._responses for c in created if c._responses]
+    assert not leftover, f"unconsumed FakeClient responses: {leftover}"
 
 
 @pytest.fixture

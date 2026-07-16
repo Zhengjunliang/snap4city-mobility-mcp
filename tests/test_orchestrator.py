@@ -89,11 +89,11 @@ def _feature_collection(lng: float, lat: float) -> dict:
     }
 
 
-def _fc_with_addresses(*entries) -> dict:
+def _fc_with_addresses(*entries, city="FIRENZE") -> dict:
     """FeatureCollection from (lng, lat, address) triples (address may be None)."""
     return {"type": "FeatureCollection", "features": [
         {"geometry": {"coordinates": [lng, lat]},
-         "properties": {"address": addr, "city": "FIRENZE"}}
+         "properties": {"address": addr, "city": city}}
         for lng, lat, addr in entries
     ]}
 
@@ -238,12 +238,16 @@ async def test_execute_no_gps_missing_origin_unsupported(make_client):
 
 async def test_execute_gps_default_origin(make_client, make_result):
     """No origin text + GPS → the origin IS the GPS point (no origin geocode); it is
-    reverse-geocoded once (success → audited) so respond can say 'dalla tua posizione'."""
+    reverse-geocoded once (success → audited) so respond can say 'dalla tua posizione'.
+    Its municipality then augments the no-city destination (anchor-city re-query, L49):
+    the plain result only has another town's hit, the augmented one wins and is the
+    deciding audited call."""
     rev = {"result": [{"number": "3", "address": "VIA ZARA", "municipality": "FIRENZE"}]}
     client = make_client([
         make_result(structured=rev),                                  # coordinates_to_address
-        make_result(structured=_feature_collection(11.26, 43.76)),   # geocode dest (address pass)
-        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass (no city named)
+        make_result(structured=_fc_with_addresses((11.0948, 43.8805, "SANTA CROCE"), city="PRATO")),  # dest plain (address pass)
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest plain POI pass (no city named)
+        make_result(structured=_fc_with_addresses((11.26, 43.76, "PIAZZA SANTA CROCE"))),  # augmented ", FIRENZE" pass
         make_result(structured=_journey()),                           # routing
     ])
     slots = {"intent": "route", "origin_text": "", "destination_text": "Santa Croce", "mode": "foot"}
@@ -251,8 +255,11 @@ async def test_execute_gps_default_origin(make_client, make_result):
     assert out["unsupported"] is False
     names = [e["name"] for e in out["tool_results"]]
     assert names == ["coordinates_to_address", "address_search_location", "routing"]
+    geocode_args = json.loads(out["tool_results"][1]["args"])
+    assert geocode_args["search"] == "Santa Croce, FIRENZE"  # the deciding call is the augmented one
     route_args = json.loads(out["tool_results"][-1]["args"])
     assert route_args["start_latitude"] == 43.7731 and route_args["start_longitude"] == 11.2558
+    assert route_args["end_latitude"] == 43.76 and route_args["end_longitude"] == 11.26  # NOT Prato
     assert out["endpoints"]["origin"] == {"lat": 43.7731, "lng": 11.2558}
 
 
@@ -299,15 +306,20 @@ async def test_execute_category_destination_uses_near_tool(make_client, make_res
 async def test_execute_dest_geocode_anchors_to_origin(make_client, make_result):
     """Same-name streets in different towns, no named city, no GPS: the destination
     candidate nearest the resolved ORIGIN wins, not the server's first hit (live-tested:
-    "via Pisana 166" from a Florence origin got routed to Lucca's VIA PISANA, 65 km)."""
+    "via Pisana 166" from a Florence origin got routed to Lucca's VIA PISANA, 65 km).
+    Here the anchor-city re-query (fed by the origin feature's city) comes back empty,
+    so the anchor-nearest pick over the plain result is the safety net."""
     dest_fc = _fc_with_addresses(
         (10.4901, 43.8424, "VIA PISANA"),  # Lucca — the server's first hit
         (11.2216, 43.7747, "VIA PISANA"),  # Florence — nearest to the origin
     )
+    empty = {"type": "FeatureCollection", "features": []}
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # origin (city-named, 1 call)
-        make_result(structured=dest_fc),                             # dest address pass
-        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+        make_result(structured=dest_fc),                             # dest plain address pass
+        make_result(structured=empty),                               # dest plain POI pass
+        make_result(structured=empty),                               # augmented address pass (miss)
+        make_result(structured=empty),                               # augmented POI pass (miss)
         make_result(structured=_journey()),                          # routing
     ])
     slots = {"intent": "route", "origin_text": "via Mortuli 40, Firenze",
@@ -338,6 +350,74 @@ async def test_execute_far_gps_named_city_still_routes(make_client, make_result)
     assert route_args["start_latitude"] == 43.77 and route_args["end_latitude"] == 43.76
 
 
+async def test_execute_augmented_geocode_rejects_road_word_noise(make_client, make_result):
+    """The anchor-city re-query must not hijack a famous place in ANOTHER town: an
+    augmented candidate sharing only road-type words with the user's text ("PIAZZA ..."
+    for "piazza dei Miracoli") is noise (_signal_subset), so the plain result stands
+    and the deciding audited call is the plain one (live-probed 2026-07-16)."""
+    rev = {"result": [{"address": "VIA ZARA", "municipality": "FIRENZE"}]}
+    client = make_client([
+        make_result(structured=rev),                                  # coordinates_to_address
+        make_result(structured=_fc_with_addresses((10.3966, 43.7231, "PIAZZA DEI MIRACOLI"), city="PISA")),  # dest plain
+        make_result(structured={"type": "FeatureCollection", "features": []}),  # dest plain POI pass
+        make_result(structured=_fc_with_addresses((11.25, 43.77, "PIAZZA DELLA REPUBBLICA"))),  # augmented: road-word-only overlap
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "", "destination_text": "piazza dei Miracoli", "mode": "foot"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    geocode_args = json.loads(out["tool_results"][1]["args"])
+    assert geocode_args["search"] == "piazza dei Miracoli"  # plain call decided, not the augmented one
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["end_latitude"] == 43.7231 and route_args["end_longitude"] == 10.3966  # Pisa kept
+
+
+async def test_execute_named_city_skips_augmentation(make_client, make_result):
+    """A city the user named still dominates: the named-city subset short-circuits the
+    anchor-city re-query — no augmented call goes out at all."""
+    rev = {"result": [{"address": "VIA ZARA", "municipality": "FIRENZE"}]}
+    client = make_client([
+        make_result(structured=rev),                                  # coordinates_to_address
+        make_result(structured=_fc_with_addresses((10.4018, 43.7160, "VIA ROMA"), city="PISA")),  # dest: named-city hit
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "", "destination_text": "via Roma, Pisa", "mode": "foot"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    searches = [args["search"] for name, args in client.calls if name == "address_search_location"]
+    assert searches == ["via Roma, Pisa"]  # one pass, never "..., FIRENZE"
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["end_latitude"] == 43.7160 and route_args["end_longitude"] == 10.4018
+
+
+async def test_execute_origin_no_city_augments_via_lazy_reverse_geocode(make_client, make_result):
+    """An origin TYPED without a city rides the same anchor-city re-query: the GPS is
+    reverse-geocoded lazily for its municipality only (NOT audited — an entry would make
+    respond claim the trip starts from the user's position), and the resolved origin's
+    city then anchors the destination's own augmentation."""
+    rev = {"result": [{"address": "VIA ZARA", "municipality": "FIRENZE"}]}
+    empty = {"type": "FeatureCollection", "features": []}
+    client = make_client([
+        make_result(structured=_fc_with_addresses((11.0948, 43.8805, "VIA ROMA"), city="PRATO")),  # origin plain
+        make_result(structured=empty),                                # origin plain POI pass
+        make_result(structured=rev),                                  # lazy coordinates_to_address
+        make_result(structured=_fc_with_addresses((11.25, 43.77, "VIA ROMA"))),  # origin augmented ", FIRENZE"
+        make_result(structured=_fc_with_addresses((11.0946, 43.8803, "SANTA CROCE"), city="PRATO")),  # dest plain
+        make_result(structured=empty),                                # dest plain POI pass
+        make_result(structured=_fc_with_addresses((11.26, 43.76, "PIAZZA SANTA CROCE"))),  # dest augmented ", FIRENZE"
+        make_result(structured=_journey()),                           # routing
+    ])
+    slots = {"intent": "route", "origin_text": "via Roma", "destination_text": "Santa Croce", "mode": "foot"}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "address_search_location", "routing"]  # rev NOT audited
+    assert len([n for n, _ in client.calls if n == "coordinates_to_address"]) == 1  # called once, lazily
+    origin_args = json.loads(out["tool_results"][0]["args"])
+    dest_args = json.loads(out["tool_results"][1]["args"])
+    assert origin_args["search"] == "via Roma, FIRENZE"
+    assert dest_args["search"] == "Santa Croce, FIRENZE"
+    route_args = json.loads(out["tool_results"][-1]["args"])
+    assert route_args["start_latitude"] == 43.77 and route_args["end_latitude"] == 43.76
+
+
 async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, make_result):
     """All near-search rungs empty (bad category / nothing within 10 km) → only the last
     empty attempt is audited and the destination degrades to the plain text geocode."""
@@ -349,6 +429,7 @@ async def test_execute_category_ladder_empty_falls_back_to_geocode(make_client, 
         make_result(structured=empty),                                # near rung 10
         make_result(structured=_feature_collection(11.26, 43.76)),   # dest geocode (address pass)
         make_result(structured={"type": "FeatureCollection", "features": []}),  # dest POI pass
+        make_result(structured=_fc_with_addresses((11.26, 43.76, "FARMACIA COMUNALE"))),  # augmented ", FIRENZE" pass
         make_result(structured=_journey()),                           # routing
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "farmacia",

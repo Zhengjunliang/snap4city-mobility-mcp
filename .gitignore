@@ -33,6 +33,9 @@ clearml_config.json
 .omc/
 .claude/
 
+# Local whatif-router checkout/build leftovers (patch delivery dropped 2026-07-16, delay accepted)
+whatif-local/
+
 # Full-output audit dumps (api.py writes outputs.txt per turn)
 outputs*.txt
 

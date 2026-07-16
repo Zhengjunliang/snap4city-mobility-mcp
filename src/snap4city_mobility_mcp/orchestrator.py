@@ -49,6 +49,7 @@ from snap4city_mobility_mcp.mcp_tools import (
     _build_config,
     _label_tokens,
     _local_config,
+    _narrow_by_city,
     _stop_view,
     exec_tool,
     group_arc_legs,
@@ -291,10 +292,10 @@ def _feature_coords(feature: dict[str, Any]) -> list[float] | None:
     return None
 
 
-def _pick_coord(
+def _pick_feature(
     geocode: Any, search: str, gps: dict[str, Any] | None = None
-) -> list[float] | None:
-    """Best feature's [lng, lat] for `search` from a geocode result, or None.
+) -> dict[str, Any] | None:
+    """Best feature for `search` from a geocode result, or None.
 
     The server sometimes ranks a fuzzy POI hit above the real place (once a company
     1.1 km west of "Piazza Duomo"), so the candidate pool prefers features whose
@@ -339,7 +340,58 @@ def _pick_coord(
         "geocode %r picked feature (address=%r, gps=%s)",
         search, (best.get("properties") or {}).get("address"), bool(gps),
     )
-    return _feature_coords(best)
+    return best
+
+
+def _pick_coord(
+    geocode: Any, search: str, gps: dict[str, Any] | None = None
+) -> list[float] | None:
+    """Best feature's [lng, lat] for `search` from a geocode result (see _pick_feature)."""
+    best = _pick_feature(geocode, search, gps)
+    return _feature_coords(best) if best else None
+
+
+# Road-type words carry no identity on their own: an augmented-geocode candidate that
+# shares ONLY these with the user's text ("Verde sportivo di VIA ..." for "via Verdi")
+# is noise, not a match (see _signal_subset).
+_ROAD_WORDS = frozenset("via viale piazza piazzale corso largo vicolo strada".split())
+
+
+def _signal_subset(geocode: Any, search: str) -> dict[str, Any] | None:
+    """The geocode's features that share a non-road token with `search`, or None.
+
+    Guards the anchor-city augmented re-query (_geocode): its result is dominated by the
+    injected city, so a candidate must still share an identity token with the user's own
+    text ("garibaldi", "stazione") to count — sharing only via/piazza-type words means the
+    city matched but the place did not, and the caller must fall back to the plain result
+    (a famous landmark in another town keeps winning there).
+    """
+    if not isinstance(geocode, dict) or "error" in geocode:
+        return None
+    features = geocode.get("features")
+    if not isinstance(features, list):
+        return None
+    signal = _label_tokens(search) - _ROAD_WORDS
+    if not signal:
+        return None
+    kept = []
+    for f in features:
+        props = f.get("properties") or {}
+        label = " ".join(str(v) for v in (props.get("address"), props.get("name")) if v)
+        if _label_tokens(label) & signal:
+            kept.append(f)
+    return {"features": kept} if kept else None
+
+
+def _rev_municipality(rev: Any) -> str | None:
+    """The municipality of a coordinates_to_address result's best candidate, or None."""
+    if isinstance(rev, dict) and "error" not in rev:
+        entries = rev.get("result")
+        if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+            m = entries[0].get("municipality")
+            if isinstance(m, str) and m.strip():
+                return m.strip()
+    return None
 
 
 # Nearest-category destination search: widening radius ladder (km) around the anchor
@@ -403,9 +455,10 @@ async def execute(
     route: resolve both endpoints, then route the requested modes concurrently (every mode goes
     to the local What-If `route` tool). The origin defaults to the user's GPS position when no
     text was given (reverse-geocoded once so respond can name it); a generic-category
-    destination resolves to the nearest service (see _nearest_service). Every call is
-    recorded in tool_results so respond can mine the widget data. "other" intent or
-    an unresolvable endpoint sets unsupported (respond asks for what's missing).
+    destination resolves to the nearest service (see _nearest_service); a place text without
+    a named city re-geocodes with the anchor's municipality appended (see _geocode, L49).
+    Every call is recorded in tool_results so respond can mine the widget data. "other"
+    intent or an unresolvable endpoint sets unsupported (respond asks for what's missing).
     """
     slots = state.get("slots") or {}
     user_gps = state.get("user_gps") or None
@@ -430,18 +483,46 @@ async def execute(
 
     _emit(on_stage, "geocode")
 
-    async def _geocode(search: str, anchor: dict[str, Any] | None = None) -> list[float] | None:
+    async def _geocode(
+        search: str,
+        anchor: dict[str, Any] | None = None,
+        anchor_city: Any = None,
+    ) -> tuple[list[float] | None, str | None]:
+        # Returns the picked ([lng, lat], city) — (None, None) when nothing resolves.
         # `anchor` disambiguates same-name streets across towns (with no named city and
         # no GPS, the server's first hit once put a Florence trip's "via Pisana" in
         # Lucca): the pool candidate nearest to it wins. The destination anchors on the
         # resolved origin (endpoints of one trip are usually neighbours), the origin on
         # the user's GPS; a city the user named still dominates either (the feature pool
         # was already narrowed upstream, mcp_tools._narrow_by_city).
+        # `anchor_city` (the anchor's municipality — a string, or an async provider
+        # awaited only on need) covers what `anchor` alone cannot: the geocoder ranks by
+        # text relevance only (every proximity parameter is a no-op, probed 2026-07-16)
+        # and truncates to top-N, so the anchor city's own candidates are often absent
+        # from the plain result entirely (L49). When the user named no city, re-ask with
+        # the city appended (riding the server's text index and the named-city ladder);
+        # the augmented pick must pass _signal_subset, else the plain result stands.
         args = {"search": search}
         result = await exec_tool(lc, "address_search_location", args)
-        coord = _pick_coord(result, search, gps=anchor)
+        feats = result.get("features") if isinstance(result, dict) else None
+        if anchor_city is not None and (not feats or _narrow_by_city(feats, search) is None):
+            city = await anchor_city() if callable(anchor_city) else anchor_city
+            if city:
+                aug_args = {"search": f"{search}, {city}"}
+                aug = await exec_tool(lc, "address_search_location", aug_args)
+                subset = _signal_subset(aug, search)
+                picked = _pick_feature(subset, aug_args["search"], gps=anchor) if subset else None
+                coord = _feature_coords(picked) if picked else None
+                if coord is not None:
+                    # Only the deciding call enters the audit (same rule as
+                    # _nearest_service): respond reads the geocode entry to say how it
+                    # read the place, and two entries for one endpoint would confuse it.
+                    results.append(_audit("address_search_location", aug_args, aug, extra=f" (picked {coord})"))
+                    return coord, (picked.get("properties") or {}).get("city")
+        picked = _pick_feature(result, search, gps=anchor)
+        coord = _feature_coords(picked) if picked else None
         results.append(_audit("address_search_location", args, result, extra=f" (picked {coord})"))
-        return coord
+        return coord, ((picked.get("properties") or {}).get("city") if picked and coord else None)
 
     async def _nearest_service(anchor: list[float], category: str) -> list[float] | None:
         # Nearest service of `category` around anchor [lng, lat], widening the radius per
@@ -473,22 +554,42 @@ async def execute(
         logger.debug("nearest %s: no service within %s km", category, NEAREST_SERVICE_RADII_KM[-1])
         return None
 
+    # Lazily-resolved GPS reverse geocode. The origin-default path needs it anyway
+    # (respond's "dalla tua posizione (vicino a ...)" label) and its municipality feeds
+    # the anchor-city augmentation; the origin-text path pays the call only when its
+    # augmentation actually fires — and never audits it, because a coordinates_to_address
+    # entry makes respond claim the trip starts from the user's GPS position.
+    rev_result: Any = None
+
+    async def _gps_reverse() -> Any:
+        nonlocal rev_result
+        if rev_result is None:
+            rev_result = await reverse_geocode(client, user_gps["lat"], user_gps["lng"])
+        return rev_result
+
+    async def _gps_city() -> str | None:
+        return _rev_municipality(await _gps_reverse()) if user_gps else None
+
     # --- origin: user text, else the GPS position itself (labelled via reverse geocode).
     if origin_text:
-        origin = await _geocode(origin_text, user_gps)
+        origin, origin_city = await _geocode(origin_text, user_gps, anchor_city=_gps_city)
     else:
         origin = [user_gps["lng"], user_gps["lat"]]
         rev_args = {"latitude": user_gps["lat"], "longitude": user_gps["lng"]}
-        rev = await reverse_geocode(client, user_gps["lat"], user_gps["lng"])
+        rev = await _gps_reverse()
         if isinstance(rev, dict) and "error" not in rev:
             # Only a successful lookup enters the audit: respond keys "dalla tua
             # posizione (vicino a ...)" off this entry, and a failure entry would
             # trigger its error rule for a trip that is actually fine.
             results.append(_audit("coordinates_to_address", rev_args, rev))
+        origin_city = _rev_municipality(rev)
 
     # --- destination: nearest-category service when asked, else plain text geocode.
-    # Its geocodes anchor on the resolved origin (see _geocode), falling back to GPS.
+    # Its geocodes anchor on the resolved origin (see _geocode), falling back to GPS;
+    # the anchor city is the origin's municipality (picked feature's city, or the GPS
+    # reverse geocode's) so a no-city destination resolves in the same town as the start.
     dest_anchor = {"lat": origin[1], "lng": origin[0]} if origin is not None else user_gps
+    dest_anchor_city = origin_city
     dest = None
     if dest_category:
         geocoded = None
@@ -497,7 +598,7 @@ async def execute(
         else:
             # No GPS: anchor on the geocoded destination text ("farmacia, Pisa" lands in
             # Pisa via the named-city ladder), then snap to the nearest real service.
-            geocoded = await _geocode(dest_text, dest_anchor)
+            geocoded, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
             anchor = geocoded
         if anchor is not None:
             dest = await _nearest_service(anchor, dest_category)
@@ -505,9 +606,12 @@ async def execute(
             # Category miss (bad category name / nothing within the widest rung):
             # degrade to the text geocode so the trip still resolves when possible.
             # Without GPS the text was already geocoded above (never re-call it).
-            dest = geocoded if not user_gps else (await _geocode(dest_text, dest_anchor) if dest_text else None)
+            if not user_gps:
+                dest = geocoded
+            elif dest_text:
+                dest, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
     else:
-        dest = await _geocode(dest_text, dest_anchor)
+        dest, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
 
     if origin is None or dest is None:
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
@@ -515,12 +619,11 @@ async def execute(
     mode_specified = bool(slots.get("mode"))
     # No mode given: route ALL THREE modes concurrently, so a plain "from A to B" answers with a
     # walking, a driving and a public-transport option (one line each on the map) and the reply
-    # compares them. The wall clock is the slowest coroutine, and until referente merges the
-    # pt-router-singleton patch that is the bus one: every vehicle=bus request rebuilds the PT
-    # graph server-side (~30-45s, probed 2026-07-13, vs sub-second for foot/car). That cost is
-    # accepted for the comparison (the chat box shows the stage + elapsed while it runs); it
-    # drops to nothing once the patch lands. An explicit mode runs that one only — asking for
-    # "a piedi" must not pay the bus latency.
+    # compares them. The wall clock is the slowest coroutine — the bus one: every vehicle=bus
+    # request rebuilds the PT graph server-side (~30-45s, probed 2026-07-13, vs sub-second for
+    # foot/car). That cost is accepted for the comparison (the chat box shows the stage +
+    # elapsed while it runs). An explicit mode runs that one only — asking for "a piedi" must
+    # not pay the bus latency.
     modes = [slots["mode"]] if mode_specified else ["foot", "car", "public_transport"]
     # A departure the user asked for ("alle 18"), else None = leave now. Only the public
     # transport leg can honour it (it is the only mode with a timetable).

@@ -53,12 +53,11 @@ HTTP_TIMEOUT_S = 40.0
 # stale-retry ladder (L3/L8). Same source the Gea-Night What-If dashboard draws from.
 # S4C_WHATIF_ROUTER_URL overrides the base. The default is the ONLINE instance: referente
 # loaded the Tuscany GTFS on it (2026-07-10) — set the env var to
-# "http://localhost:8080/whatif-router/route" only to test a locally-built router (e.g.
-# the perf patch in whatif-local/patches/). The online instance does NOT run the
-# pt-router-singleton perf patch yet, so every vehicle=bus request reloads the PT graph
-# (~30-40s measured); BUS_ROUTE_TIMEOUT_S covers that. foot/car never touch the PT graph
-# (probed 2026-07-13: 0.3-0.5s) and use the generic HTTP_TIMEOUT_S. Tighten the bus
-# timeout back once referente merges the patch.
+# "http://localhost:8080/whatif-router/route" only to test a locally-built router.
+# The online instance reloads the PT graph on every vehicle=bus request (~30-40s
+# measured) — an accepted latency (perf-patch delivery dropped 2026-07-16);
+# BUS_ROUTE_TIMEOUT_S covers it. foot/car never touch the PT graph (probed 2026-07-13:
+# 0.3-0.5s) and use the generic HTTP_TIMEOUT_S.
 WHATIF_ROUTER_URL = os.environ.get(
     "S4C_WHATIF_ROUTER_URL", "https://www.snap4city.org/whatif-router/route"
 )
