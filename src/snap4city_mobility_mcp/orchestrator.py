@@ -11,8 +11,10 @@ respond -> END.
   geolocation, threaded through run_advisor); a generic-category destination ("farmacia più
   vicina") resolves via the nearest-service search; text places geocode with GPS-nearest
   candidate picking. "other" falls through to an "unsupported" reply.
-- respond (LLM, no tools): phrases a multilingual answer from the results and
-  assembles the widget JSON (with the full route WKT and the updated messages).
+- respond (plain Python, no LLM): composes a deterministic Italian reply from the
+  results and assembles the widget JSON (full route WKT + updated messages). The reply
+  is fully derivable from execute's structured output, so the LLM (a second slow gateway
+  round-trip, doubling the 504 exposure) was removed — understand keeps its (L57).
 
 The model never picks tools itself: in agentic mode Llama4 tends to emit tool calls
 as pythonic text instead of structured tool_calls, which then leaks into the answer.
@@ -39,7 +41,6 @@ from snap4city_mobility_mcp.geo import haversine_km, wkt_points
 from snap4city_mobility_mcp.llm import (
     Llama4Client,
     Llama4Error,
-    assistant_message,
     tool_calls,
 )
 from snap4city_mobility_mcp.mcp_tools import (
@@ -91,58 +92,6 @@ LEAVE ("alle 18", "domani alle 9"); '' when they give none — NEVER invent one.
 "e in bus?" (follow-up to the piazza Duomo → piazza Dalmazia trip) → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze", mode=public_transport
 "da Santa Croce alla stazione in bus alle 18" → request_type=journey, origin_text="Santa Croce", destination_text="stazione", mode=public_transport, departure_time="18:00"
 </examples>"""
-
-RESPOND_SYSTEM = """\
-You are a friendly urban-mobility assistant. Reply in ITALIAN by default; switch to \
-another language ONLY when the user's message is clearly and unmistakably written in \
-it (not a foreign place name or a short ambiguous phrase) — when in doubt, use Italian. \
-Natural phrasing, lead \
-with the answer, keep it concise. A short greeting is fine ONLY on the FIRST turn \
-(the message says which); on a follow-up answer directly — no greeting, no sign-offs.
-Hard rules (never break these):
-- Every fact comes ONLY from the RESULTS given to you. Never invent or estimate \
-coordinates, distances, durations, ETAs, line/stop names, or route IDs — not from \
-coordinates, not from general knowledge, not "approximately". Do not call tools. If \
-the user asks about lines / routes / stops / times and RESULTS has no matching entry, \
-say plainly you don't have that information — never name a line or operator (e.g. \
-ATAF) yourself.
-- Never include raw coordinates in your answer.
-- For a route give ONLY each found mode's distance (km) and duration/ETA, and with \
-more than one mode say which is fastest. Do NOT narrate legs, list stops, or list \
-streets (RESULTS deliberately carries none; for a single-mode request a precise \
-step-by-step list is appended separately after your reply). Write times as plain \
-HH:MM (never seconds or dates). NO disclaimers about real-time information, traffic, \
-dates, data validity, or timetable accuracy. A route that carries a distance HAS \
-BEEN FOUND: present it directly, never ask the user to restate or clarify the \
-origin/destination. A bus duration is an approximate ride time (walking + in-vehicle, \
-excluding the wait at the stop). A route with no duration/ETA at all: give its \
-distance and note the schedule/time is not available — not a failure, invent nothing.
-- A RESULTS `departure_time` means the trip was planned for that departure: say so \
-plainly ("partendo alle 18:00"), using the field as written. Without it, never \
-mention a departure time.
-- A RESULTS item that could not be computed (an `error`, or a route/place not found): \
-say so plainly WITHOUT numbers and suggest a sensible alternative (another mode, a \
-more precise address); when geocoded addresses are present, mention how you read the \
-origin/destination so the user can spot a wrong match.
-- A routing item's `hint` decides the alternative you suggest: `pt_degraded_to_foot` \
-= the public-transport request returned a walking-only journey (no real transit) — \
-with other modes present do NOT list it as a public-transport option; as the only \
-result, say there is no direct public transport and give the walking distance/time. \
-With NO hint, never claim a ZTL/pedestrian zone yourself.
-- Status "missing_place": ask the user for the field(s) listed in `missing`; when \
-"origin" is missing you may also suggest sharing the position — do NOT say the \
-request is unsupported.
-- A `coordinates_to_address` entry means the trip starts from the user's current GPS \
-position: say so ("dalla tua posizione", optionally "vicino a <address>" using ONLY \
-that entry's address). No origin given and no such entry → "dalla tua posizione \
-attuale", naming no street.
-- A `service_search_near_gps_position` entry is how a category destination was resolved \
-— the nearest place of that kind: name the found place (the first listed service) \
-naturally in the answer.
-- Status "unsupported": explain in your own words that for now you answer \
-point-to-point trip questions (on foot, by car, or by public transport), including \
-trips to the nearest place of a kind ("la farmacia più vicina"), and invite the user \
-to rephrase."""
 
 # Not a real MCP tool: a function schema used only to force structured output
 # from the understand node.
@@ -707,7 +656,7 @@ async def execute(
         # degrade / route-not-found, NOT a slow call timing out.
         logger.debug("routing mode=%s took %.1fs", mode, time.perf_counter() - start)
         # Audited under the historical "routing" name (routetype = the slot mode) so
-        # _extract_data / _results_view render and narrate every mode uniformly.
+        # _extract_data renders and narrates every mode uniformly.
         return _audit("routing", {"routetype": mode, **args}, result)
 
     async def _parking() -> dict[str, Any]:
@@ -1049,11 +998,99 @@ def _extract_parking(
     return spots[:PARKING_MAX]
 
 
-def _template_answer(
-    data: dict[str, Any], *, unsupported: bool, missing: list[str] | None = None
+# km4city English service category -> Italian (singular, plural-with-article), for the
+# deterministic reply: the category-destination name ("la farmacia più vicina") and the
+# along-route services acknowledgement ("ho segnato le farmacie ..."). Covers the classes
+# the understand schema emits; an unknown one degrades to a spaced lowercase fallback.
+_CATEGORY_IT = {
+    "Pharmacy": ("farmacia", "le farmacie"),
+    "Hospital": ("ospedale", "gli ospedali"),
+    "Supermarket": ("supermercato", "i supermercati"),
+    "Museum": ("museo", "i musei"),
+    "Hotel": ("hotel", "gli hotel"),
+    "Restaurant": ("ristorante", "i ristoranti"),
+    "Car_park": ("parcheggio", "i parcheggi"),
+    "Fuel_station": ("distributore", "i distributori"),
+}
+
+# User-facing Italian label per travel mode (keyed by the slot's routetype, not the vehicle
+# family): the deterministic reply reads it directly.
+_MODE_LABEL = {"foot": "a piedi", "car": "in auto", "public_transport": "con i mezzi"}
+
+
+def _category_it(category: str, *, plural: bool = False) -> str:
+    """Italian label for a km4city category — the plural carries its article ('le farmacie')."""
+    pair = _CATEGORY_IT.get(category)
+    if pair:
+        return pair[1] if plural else pair[0]
+    return category.replace("_", " ").lower()
+
+
+def _audit_entry(results: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """First audit entry with the given tool name, or None."""
+    return next((e for e in results if e.get("name") == name), None)
+
+
+def _rev_address(entry: dict[str, Any]) -> str | None:
+    """The best candidate's street address from a coordinates_to_address entry, or None."""
+    rev = entry.get("result")
+    if isinstance(rev, dict) and "error" not in rev:
+        res = rev.get("result")
+        if isinstance(res, list) and res and isinstance(res[0], dict):
+            addr = res[0].get("address")
+            if isinstance(addr, str) and addr.strip():
+                return addr.strip()
+    return None
+
+
+def _route_bits(route: dict[str, Any]) -> list[str]:
+    """A route's user-facing figures: ['1.83 km', '0:23:18'] (either may be absent)."""
+    bits = []
+    if route.get("distance_km") is not None:
+        bits.append(f"{route['distance_km']} km")
+    if route.get("duration"):
+        bits.append(str(route["duration"]))
+    return bits
+
+
+def _route_sentences(routes: list[dict[str, Any]]) -> list[str]:
+    """The route comparison as Italian sentences: one 'A piedi: … ; in auto: …' line (first
+    label capitalized), plus a 'Più veloce: …' line when more than one mode is present."""
+    parts = []
+    for r in routes:
+        bits = _route_bits(r)
+        if bits:
+            label = _MODE_LABEL.get(r.get("mode") or "", "percorso")
+            parts.append(f"{label}: {' · '.join(bits)}")
+    if not parts:
+        return []
+    parts[0] = parts[0][:1].upper() + parts[0][1:]
+    out = ["; ".join(parts)]
+    if len(routes) > 1:
+        out.append(f"Più veloce: {_MODE_LABEL.get(routes[0].get('mode') or '', 'percorso')}")
+    return out
+
+
+def _compose_reply(
+    data: dict[str, Any],
+    results: list[dict[str, Any]],
+    *,
+    slots: dict[str, Any],
+    unsupported: bool,
+    missing: list[str] | None,
+    departure: str,
+    services_found: bool,
 ) -> str:
-    """Fallback answer in Italian (the advisor's default) when the respond LLM
-    is unavailable."""
+    """The deterministic Italian reply (no LLM, L57).
+
+    Everything it states is derived from execute's structured output: the routes
+    (fastest-first, from _extract_data), the requested departure, and a few audit entries
+    (the GPS reverse-geocode label, the category-destination place name). It reimplements
+    the cases the old respond prompt covered — missing endpoints, unsupported intent, a
+    route error, a single/multi-mode comparison, a public-transport degrade, and the
+    along-route-services acknowledgement — with no gateway round-trip and no fabrication
+    risk. Italian only (the dashboard's language); the reply lives in messages[-1].content.
+    """
     if missing:
         labels = {
             "origin": "il punto di partenza (o la tua posizione)",
@@ -1068,30 +1105,61 @@ def _template_answer(
             "tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla "
             "farmacia più vicina'."
         )
-    def bits_of(r: dict[str, Any]) -> list[str]:
-        bits = []
-        if r.get("distance_km") is not None:
-            bits.append(f"{r['distance_km']} km")
-        if r.get("duration"):
-            bits.append(f"~{r['duration']}")
-        return bits
-
     routes = data.get("routes") or []
-    if len(routes) > 1:
-        labels = {"foot": "a piedi", "car": "in auto", "bus": "con i mezzi"}
-        parts = []
-        for r in routes:
-            label = labels.get(_VEHICLE.get(r.get("mode") or "", ""), "percorso")
-            bits = bits_of(r)
-            if bits:
-                parts.append(f"{label}: {' · '.join(bits)}")
-        if parts:
-            return "; ".join(parts)
-    if data.get("distance_km") is not None:
-        return " · ".join(bits_of(data))
-    if data.get("route_error"):
-        return data["route_error"]
-    return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
+    if not routes:
+        # No drawable route (geocode miss / router failure): say so in Italian and suggest
+        # an alternative — never echo the raw English error string.
+        label = _MODE_LABEL.get((slots.get("mode") or "").strip())
+        suffix = f" {label}" if label else ""
+        return (
+            f"Non sono riuscito a calcolare il percorso{suffix}. "
+            "Prova un altro mezzo o un indirizzo più preciso."
+        )
+
+    sentences: list[str] = []
+    if departure:
+        sentences.append(f"Partenza alle {departure}")
+    # Trip from the user's own position: only when no origin text was given AND the GPS
+    # reverse-geocode was audited (a successful lookup — see execute's origin-default path).
+    if not (slots.get("origin_text") or "").strip():
+        rev = _audit_entry(results, "coordinates_to_address")
+        if rev is not None:
+            addr = _rev_address(rev)
+            sentences.append("Dalla tua posizione" + (f" (vicino a {addr})" if addr else ""))
+    # Category destination: name the nearest place the near-search resolved to.
+    if (slots.get("destination_category") or "").strip():
+        near = _audit_entry(results, "service_search_near_gps_position")
+        if near is not None:
+            spots = parse_service_features(near.get("result"))
+            if spots and spots[0].get("name"):
+                sentences.append(f"Destinazione più vicina: {spots[0]['name']}")
+    # A public-transport request that degraded to a walking-only journey (L39): _extract_data
+    # relabelled the single route 'foot', but the audit still flags the degrade — say there is
+    # no direct transit and give the walk. In a multi-mode run the real modes carry the answer
+    # and the degraded PT was dropped, so this only fires on an explicit bus request.
+    degraded = any(
+        _routing_hint(_routetype_of(e), e.get("result")) == "pt_degraded_to_foot"
+        for e in results if e.get("name") == "routing"
+    )
+    if (slots.get("mode") or "").strip() == "public_transport" and degraded:
+        line = "Non c'è un collegamento diretto con i mezzi pubblici"
+        bits = _route_bits(routes[0])
+        if bits:
+            line += f"; a piedi: {' · '.join(bits)}"
+        sentences.append(line)
+    else:
+        sentences.extend(_route_sentences(routes))
+    # Along-route services the user asked to SEE: the pins are the answer; the reply only
+    # confirms (or reports none found). The plural label carries its article.
+    services_category = (slots.get("services_category") or "").strip()
+    if services_category:
+        plural = _category_it(services_category, plural=True)
+        sentences.append(
+            f"Ho segnato {plural} lungo il percorso sulla mappa"
+            if services_found
+            else f"Non ho trovato {plural} lungo il percorso"
+        )
+    return ". ".join(s for s in sentences if s).strip() + "."
 
 
 def _routing_entry_for(
@@ -1229,75 +1297,11 @@ def _routing_hint(routetype: str | None, result: Any) -> str | None:
     return None
 
 
-def _results_view(
-    results: list[dict[str, Any]],
-    *,
-    unsupported: bool,
-    missing: list[str] | None = None,
-    departure: str = "",
-) -> dict[str, Any]:
-    """Compact, LLM-facing summary of what execute produced (no huge WKT).
-
-    `departure` is the HH:MM the user asked to leave at ('' = they asked for no time): it
-    rides at the root, not on a routing item, because it applies to the whole request.
-
-    Parking is NOT in this view: it is pins-only (data.parking → drawParkingPins), like
-    along-route services — the map pins ARE the answer, so the parking search entry is never
-    audited (execute) and the LLM says nothing about car parks."""
-    if missing:
-        return {"status": "missing_place", "missing": missing}
-    if unsupported:
-        return {
-            "status": "unsupported",
-            "supported": "point-to-point trips (foot, car, public transport), "
-            "including trips to the nearest place of a kind (e.g. nearest pharmacy)",
-        }
-    view = []
-    for e in results:
-        name = e.get("name")
-        # A category-destination near-search (e.g. "farmacia più vicina") is the only
-        # service_search entry audited: slimmed, it lets the LLM name the found place. Parking
-        # never reaches here (not audited — pins-only), so no Car_park special-case is needed.
-        item: dict[str, Any] = {"name": name}
-        if name == "routing":
-            # Keep only distance + duration in the LLM's view: it must never narrate legs
-            # or list stops/streets. The deterministic detail block (respond, single mode)
-            # owns that. With no leg/street rows in view the reply is concise BY
-            # CONSTRUCTION — the model cannot enumerate what it cannot see — not by it
-            # obeying a "be brief" instruction (which Llama4 follows unreliably). The two
-            # fields come straight from the raw journey (running the full slim view's
-            # leg/street build just to discard it wasted work on every bus entry); the
-            # audit still holds the full payload for the detail block to mine.
-            raw = e.get("result")
-            if isinstance(raw, dict) and isinstance(raw.get("journey"), dict):
-                first = (raw["journey"].get("routes") or [{}])[0]
-                item["result"] = {"journey": {"distance_km": first.get("distance"), "time": first.get("time")}}
-            else:
-                item["result"] = raw  # errors pass through unchanged (like slim)
-            # Surface which mode this attempt used: on failure the LLM can only
-            # suggest a sensible alternative ("in auto non si può, prova a piedi")
-            # when it knows which mode failed.
-            routetype = _routetype_of(e)
-            item["routetype"] = routetype
-            # The hint carries the ZTL-vs-service judgement so the prompt just
-            # follows it instead of pattern-matching the error string.
-            hint = _routing_hint(routetype, e.get("result"))
-            if hint:
-                item["hint"] = hint
-        else:
-            item["result"] = slim_result_for_llm(name, e.get("result"))
-        view.append(item)
-    out = {"status": "ok", "results": view}
-    if departure:
-        out["departure_time"] = departure
-    return out
-
-
 async def respond(
-    state: AdvisorState, *, llm: Llama4Client, on_stage: StageFn | None = None
+    state: AdvisorState, *, on_stage: StageFn | None = None
 ) -> dict[str, Any]:
-    """LLM phrases a multilingual answer from the results (no tools), then assembles
-    the widget JSON. Falls back to a template if the LLM errors."""
+    """Compose the deterministic Italian reply from the results and assemble the widget
+    JSON (no LLM, L57 — the reply is fully derivable from execute's structured output)."""
     _emit(on_stage, "respond")
     messages = list(state.get("messages") or [])
     intent = state.get("intent", "other")
@@ -1357,47 +1361,18 @@ async def respond(
         else None
     ) or None
 
-    user_query = next(
-        (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
-    )
-    # A prior assistant turn means this is a follow-up, so respond answers directly
-    # without re-greeting (RESPOND_SYSTEM keys the greeting off this marker). messages
-    # here is [history..., current user]; the assistant turn isn't appended yet.
-    is_followup = any(m.get("role") == "assistant" for m in messages)
-    view = _results_view(
+    # Along-route services (services_category slot) are pins-only (data.routes[].services, L53):
+    # the reply just acknowledges they are on the map (or reports none found). services_map is
+    # non-empty only when the user asked AND some were found.
+    answer = _compose_reply(
+        data,
         results,
+        slots=state.get("slots") or {},
         unsupported=unsupported,
         missing=missing,
         departure=state.get("departure") or "",
+        services_found=bool(services_map),
     )
-    answer: str | None = None
-    try:
-        t0 = time.perf_counter()
-        resp = await llm.achat(
-            messages=[
-                {"role": "system", "content": RESPOND_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"User asked: {user_query}\n\n"
-                    f"Conversation turn: {'follow-up' if is_followup else 'first'}\n\n"
-                    "RESULTS:\n" + json.dumps(view, ensure_ascii=False),
-                },
-            ],
-            tool_choice="none",
-            # Low temperature to stay grounded: at 0.7 Llama4 invented line numbers and
-            # operators (ATAF) when RESULTS lacked them, and sometimes drifted to
-            # English. Phrasing room matters less than never fabricating. (Slots use 0.)
-            temperature=0.2,
-        )
-        logger.debug("respond LLM took %.1fs", time.perf_counter() - t0)
-        content = assistant_message(resp).get("content")
-        if isinstance(content, str) and content.strip():
-            answer = content.strip()
-    except Llama4Error:
-        pass  # fall back to the deterministic template below
-    if answer is None:
-        answer = _template_answer(data, unsupported=unsupported, missing=missing)
-
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no
     # custom top-level `answer` field. status is the JSend-style outcome, request_type
@@ -1427,7 +1402,7 @@ def _build_graph(
     g.add_node("execute", partial(
         execute, client=client, local_client=local_client, on_stage=on_stage
     ))
-    g.add_node("respond", partial(respond, llm=llm, on_stage=on_stage))
+    g.add_node("respond", partial(respond, on_stage=on_stage))
     g.set_entry_point("understand")
     g.add_edge("understand", "execute")
     g.add_edge("execute", "respond")

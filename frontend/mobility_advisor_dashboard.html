@@ -155,8 +155,11 @@ var SERVICE_PIN = { color1: "#8e44ad", color2: "#8e44ad", pinattr: "square", dis
 var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
 // Italian chip labels for the route picker, keyed by the front-end vehicle family.
 var MODE_LABELS = { foot: "A piedi", car: "In auto", bus: "In autobus" };
-// Emoji for the detail header, same keying (What-If Instructions-style maneuver cue).
-var MODE_ICONS = { foot: "🚶", car: "🚗", bus: "🚌" };
+// Emoji for the detail header, same keying (What-If Instructions-style maneuver cue). Written
+// as \u surrogate-pair escapes, NOT raw emoji: CKEditor mangles astral-plane chars on paste
+// (splits the surrogate pair), which would break this string literal and kill the whole script
+// (L9). The escapes are plain ASCII, so paste survives; JS rebuilds the emoji at runtime.
+var MODE_ICONS = { foot: "\uD83D\uDEB6", car: "\uD83D\uDE97", bus: "\uD83D\uDE8C" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 var gpsDenied = false;  // remembered PERMISSION_DENIED: skip further prompts this session
@@ -221,7 +224,7 @@ var tot = [];
 if (route.distance_km != null) tot.push(route.distance_km + " km");
 if (route.duration) tot.push(fmtDur(route.duration));
 var $hd = $("<div>").addClass("dhd");
-$hd.append($("<span>").addClass("dico").text(MODE_ICONS[veh] || "📍"));
+$hd.append($("<span>").addClass("dico").text(MODE_ICONS[veh] || "\uD83D\uDCCD"));
 $hd.append($("<span>").addClass("dlbl").text(MODE_LABELS[veh] || "Percorso"));
 if (tot.length) $hd.append($("<span>").addClass("dtot").text(tot.join(" · ")));
 $m.append($hd);
@@ -234,7 +237,7 @@ if (mPart) { $m.append($("<div>").addClass("dpart").text("Partenza " + mPart[1])
 var mStop = line.match(/^\s{2,}(.+?)(?:\s{2,}(\d{1,2}:\d{2}))?$/);  // indented bus fermata
 if (mStop) { $m.append(stepRow(mStop[1], mStop[2] || "", "dstop")); return; }
 var mWalk = line.match(/^A piedi\s+(.+)$/);
-if (mWalk) { $m.append(stepRow("🚶 A piedi", mWalk[1], "")); return; }
+if (mWalk) { $m.append(stepRow("\uD83D\uDEB6 A piedi", mWalk[1], "")); return; }
 if (/^(Linea |In autobus)/.test(line)) {
 $m.append($("<div>").addClass("dbus").css("border-left-color", MODE_COLORS.bus).text(line));
 return;

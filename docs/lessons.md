@@ -6,6 +6,10 @@
 
 ---
 
+L57 **respond 阶段 LLM 可整段移除: 其输出全部可由 execute 的确定性数据推导, 保留只是给网关多挨一次 504** —— 真机 debug.log (2026-07-17, "da via Vittorio locchi 37 a via santa marta 3", 单轮 431.5s): understand LLM 504×2 才第 3 次成功 (174s), respond LLM 504×3 全挂落 `_template_answer` 兜底 —— outputs.txt 回复精确等于模板拼法 (且缺 `respond LLM took` 日志行佐证), 即**结果本就正确, 431.5s 全烧在两次 LLM 的 504 + 重试风暴** (understand ~174s + respond ~222s 白等)。根因: respond 只把 execute 已算好的距离/时长/地名/pins 包装成人话, 是唯一**非承重**的 LLM 调用 (understand 的 NL→slot 抽取不可去), 却让每轮网关往返翻倍、504 敞口翻倍。修 ([orchestrator.py](../src/snap4city_mobility_mcp/orchestrator.py)): 删 `RESPOND_SYSTEM` + `_results_view` (仅喂 respond prompt 的死代码), `respond()` 去 `llm` 参数, `_template_answer` 原地扩成完整确定性 responder `_compose_reply` (纯意语, 覆盖 missing/unsupported/单+多模式含最快/departure/GPS 起点/类别目的地命名/沿途服务确认/pt_degrade), 新增 `_CATEGORY_IT` 英文类别→意语表; understand 保留其 LLM。收益: 每轮 LLM 调用 2→1, 坏网关最坏省 ~222s, 顺带消语言漂移 (英文泄漏) + 编造 (自造 ATAF 线路名) 风险。教训: (a) 确定性数据的"措辞层"别默认塞 LLM —— 每次 LLM 往返都是一次网关 504 敞口, 能 Python 出词就别调; (b) 网关慢是 referente 基建问题, 本项目唯一杠杆是砍掉非必需调用而非加重试; (c) widget JSON 对外形状 (status/request_type/data/messages) 不变 → 前端 + api.py 零改动, 去 LLM 是纯内部替换。
+
+---
+
 L56 **固定半径 near-search 空手 = 无报错静默无 pin: 依赖类 UI 特性的搜索一律半径阶梯化, 上限按特性语义定** —— 真机 (2026-07-16, "via delle tre pietre 7 a firenze in auto"): car 轮次一切正常 (路由/沿途服务/回复全对) 唯独 parking pins 不见。不是没触发 (`do_parking = "car" in modes` 照跑), 是 `Car_park` 近搜在固定 `PARKING_RADIUS_KM=0.5` 内**真的没有停车场** (近郊目的地常态), 返回空 FeatureCollection: 无 error、无日志异常, 唯一证据是 debug.log 的 near-search 条目 `-> {"result": [[], ...]}`。类别目的地搜索早有阶梯 (`NEAREST_SERVICE_RADII_KM` 0.5→2→10), parking 当时没跟上。修 ([orchestrator.py](../src/snap4city_mobility_mcp/orchestrator.py) `_parking` + [mcp_tools.py](../src/snap4city_mobility_mcp/mcp_tools.py)): `PARKING_RADII_KM=(0.5, 1.0)` 空 rung 扩半径重搜, 复用 `_nearest_service` 的"只有 deciding call 进 audit"约定; 上限 1km 由**特性语义**定 (停车场离目的地再远, 步行就没意义), 不照抄目的地解析的 10km。测试: FakeClient 队列排"空响应+命中响应", 断言两次 maxdistance 依次 0.5/1.0 且只审计命中那次。教训: (a) 近搜半径写死 = 数据稀疏区静默丢整个特性; (b) 阶梯上限不是全局常量, 每个特性按自己的语义定; (c) "为什么没 pin"先看 debug.log 的 near-search 返回 — 搜索跑没跑、返没返数据, 一行定位。
 
 ---

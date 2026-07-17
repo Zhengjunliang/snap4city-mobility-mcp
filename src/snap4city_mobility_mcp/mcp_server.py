@@ -171,7 +171,7 @@ def _journey_duration_ms(first: dict[str, Any]) -> int:
 
 
 def _fmt_hms(ms: int) -> str:
-    """Milliseconds -> 'H:MM:SS' (the duration shape _route_minutes / _template_answer expect)."""
+    """Milliseconds -> 'H:MM:SS' (the duration shape _route_minutes / _compose_reply expect)."""
     secs = max(0, ms // 1000)
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)

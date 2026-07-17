@@ -8,7 +8,6 @@ from datetime import datetime
 
 from snap4city_mobility_mcp import mcp_tools
 from snap4city_mobility_mcp.geo import fmt_linestring
-from snap4city_mobility_mcp.llm import Llama4Error
 from snap4city_mobility_mcp.orchestrator import (
     _EXTRACT_SLOTS_SCHEMA,
     ROME,
@@ -21,7 +20,6 @@ from snap4city_mobility_mcp.orchestrator import (
     _parse_departure,
     _pick_coord,
     _request_to_intent,
-    _results_view,
     _routing_hint,
     _sample_polyline,
     _service_anchors,
@@ -74,11 +72,6 @@ def _slots_response(arguments: str) -> dict:
     }
 
 
-def _text_response(text: str) -> dict:
-    """A canned OpenAI response whose assistant turn is a plain text answer."""
-    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
-
-
 def _feature_collection(lng: float, lat: float) -> dict:
     """Minimal GeoJSON FeatureCollection (server `address_search_location` shape)."""
     return {
@@ -104,13 +97,6 @@ def _journey(distance=1.83, routes=None) -> dict:
     if routes is None:
         routes = [{"wkt": "LINESTRING(1 2,3 4)", "distance": distance, "time": "00:23:18"}]
     return {"journey": {"routes": routes}}
-
-
-class _RaisingLLM:
-    """LLM double whose achat always raises — exercises respond's template fallback."""
-
-    async def achat(self, *args, **kwargs):
-        raise Llama4Error("boom")
 
 
 # --- understand --------------------------------------------------------------
@@ -897,11 +883,10 @@ async def test_execute_services_searched_along_route(make_client, make_result):
     assert not any(e["name"] == "service_search_near_gps_position" for e in out["tool_results"])
 
 
-async def test_respond_attaches_services_per_route_keeps_llm_view_clean(make_llm):
-    """Each drawable route gets ITS mode's list as routes[i].services (the map pins), but
-    the LLM view carries NOTHING about them — no along_route_services item, no raw anchor
-    calls: the pins are the answer, the old summary sentence was dropped as noise."""
-    llm = make_llm([_text_response("A piedi 2 km.")])
+async def test_respond_attaches_services_per_route_flags_not_names():
+    """Each drawable route gets ITS mode's list as routes[i].services (the map pins). The user
+    asked to see them, so the deterministic reply ACKNOWLEDGES them on the map — but the service
+    names/coords ride ONLY in routes[i].services (the pins are the answer), never in the reply."""
     svc_foot = [{"name": "FarmaciaA", "lat": 43.768, "lng": 11.245, "uri": "http://a", "distance_km": 0.05}]
     svc_car = [{"name": "FarmaciaB", "lat": 43.761, "lng": 11.259, "uri": "http://b", "distance_km": 0.1}]
     state = {
@@ -915,12 +900,13 @@ async def test_respond_attaches_services_per_route_keeps_llm_view_clean(make_llm
         ],
         "services": {"foot": svc_foot, "car": svc_car},
     }
-    out = (await respond(state, llm=llm))["response"]
+    out = (await respond(state))["response"]
     by_mode = {r["mode"]: r for r in out["data"]["routes"]}
     assert by_mode["foot"]["services"] == svc_foot
     assert by_mode["car"]["services"] == svc_car
-    sent = llm.calls[0]["messages"][1]["content"]
-    assert "along_route_services" not in sent and "Farmacia" not in sent
+    reply = out["messages"][-1]["content"]
+    assert "segnato le farmacie" in reply  # the deterministic reply acknowledges the pins
+    assert "FarmaciaA" not in reply and "FarmaciaB" not in reply  # names ride only in the pins
 
 
 def test_extract_data_drops_foot_only_pt_when_real_foot_present():
@@ -965,27 +951,28 @@ def test_routing_hint_flags_foot_only_pt():
 
 # --- respond -----------------------------------------------------------------
 
-async def test_respond_uses_llm_answer(make_llm):
-    llm = make_llm([_text_response("The walking distance is about 1.83 km, ETA 15:59:09.")])
+async def test_respond_composes_route_answer():
+    """respond composes the Italian reply from the route (no LLM): the mode's distance and
+    duration land in messages[-1].content; there is no custom top-level `answer` field."""
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "from Duomo to Santa Croce on foot"}],
-        "tool_results": [{"name": "routing", "result": {"journey": _journey()["journey"]}}],
+        "tool_results": [_routing_entry("foot", route=_journey()["journey"]["routes"][0])],
         "unsupported": False,
+        "slots": {"intent": "route", "mode": "foot"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     response = out["response"]
     assert response["status"] == "success"
     assert "answer" not in response  # reply lives in messages[-1], not a custom field
     reply = response["messages"][-1]
     assert reply["role"] == "assistant"
-    assert "1.83 km" in reply["content"]
+    assert "1.83 km" in reply["content"] and "00:23:18" in reply["content"]
     assert response["data"]["distance_km"] == 1.83
 
 
-async def test_respond_injects_parking_into_data(make_llm):
+async def test_respond_injects_parking_into_data():
     """A car route with parking (built in execute, carried on state) → data.parking present."""
-    llm = make_llm([_text_response("In auto 3.5 km. Parcheggio P1 (20 liberi) a 80 m.")])
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "in auto da A a B"}],
@@ -996,16 +983,32 @@ async def test_respond_injects_parking_into_data(make_llm):
         "parking": [{"name": "P1", "lat": 43.76, "lng": 11.26, "uri": "http://p1",
                      "distance_km": 0.08, "free_spaces": 20, "total_spaces": 100}],
         "unsupported": False,
+        "slots": {"intent": "route", "mode": "car"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     parking = out["response"]["data"]["parking"]
     assert parking[0]["name"] == "P1" and parking[0]["free_spaces"] == 20
 
 
-async def test_respond_route_surfaces_mode_for_widget(make_llm):
+async def test_respond_along_route_services_flag_false_when_none_found():
+    """The user asked for a category along the route but execute found none → the reply says
+    none were found rather than pretending they are on the map."""
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B in auto con i ristoranti"}],
+        "tool_results": [_routing_entry("car", route=_journey()["journey"]["routes"][0])],
+        "services": {},
+        "slots": {"intent": "route", "mode": "car", "services_category": "Restaurant"},
+        "unsupported": False,
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert "Non ho trovato i ristoranti lungo il percorso" in reply
+
+
+async def test_respond_route_surfaces_mode_for_widget():
     """A drawable route (wkt present) carries data.mode so the dashboard widget knows
     the vehicle to render; the value is the routetype the route was computed with."""
-    llm = make_llm([_text_response("Percorso in auto, 1.83 km.")])
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da Duomo a Santa Croce in auto"}],
@@ -1015,13 +1018,13 @@ async def test_respond_route_surfaces_mode_for_widget(make_llm):
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     assert out["response"]["data"]["mode"] == "car"
 
 
-async def test_respond_no_mode_on_route_error(make_llm):
-    """A route that failed (route_error, no wkt) is not drawable → no mode field added."""
-    llm = make_llm([_text_response("Non sono riuscito a calcolare il percorso in auto.")])
+async def test_respond_no_mode_on_route_error():
+    """A route that failed (route_error, no wkt) is not drawable → no mode field added, and the
+    reply is the deterministic Italian error sentence (never the raw router string)."""
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da A a B in auto"}],
@@ -1029,9 +1032,12 @@ async def test_respond_no_mode_on_route_error(make_llm):
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     data = out["response"]["data"]
     assert "route_error" in data and "mode" not in data
+    reply = out["response"]["messages"][-1]["content"]
+    assert "Non sono riuscito a calcolare il percorso in auto" in reply
+    assert "empty routes list" not in reply  # the raw router error never reaches the user
 
 
 async def test_respond_no_mode_outside_route():
@@ -1042,7 +1048,7 @@ async def test_respond_no_mode_outside_route():
         "tool_results": [],
         "unsupported": True,
     }
-    out = await respond(state, llm=_RaisingLLM())
+    out = await respond(state)
     assert "mode" not in out["response"]["data"]
 
 
@@ -1055,7 +1061,7 @@ async def test_respond_missing_place_asks_instead_of_unsupported():
         "unsupported": True,
         "slots": {"intent": "route", "origin_text": "", "destination_text": ""},
     }
-    out = await respond(state, llm=_RaisingLLM())
+    out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
     assert "partenza" in reply and "destinazione" in reply
     assert "punto-punto" not in reply
@@ -1072,46 +1078,10 @@ async def test_respond_gps_covers_origin_asks_destination_only():
         "slots": {"intent": "route", "origin_text": "", "destination_text": ""},
         "user_gps": {"lat": 43.7731, "lng": 11.2558},
     }
-    out = await respond(state, llm=_RaisingLLM())
+    out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
     assert "destinazione" in reply
     assert "partenza" not in reply
-
-
-def test_results_view_plain_errors_carry_no_hint():
-    """The km4city-era ZTL/service-side hint taxonomy retired with the remote routing
-    tool (L46): a What-If router failure is a plain error — respond's generic error rule
-    phrases it, no hint key. The routetype still surfaces so respond can suggest another
-    mode."""
-    view = _results_view(
-        [_routing_entry("car", error="whatif-router returned no car path")],
-        unsupported=False,
-    )
-    assert "hint" not in view["results"][0]
-    assert view["results"][0]["routetype"] == "car"
-
-
-def test_results_view_carries_the_requested_departure():
-    """The departure rides at the ROOT of the view, not on a routing item: it applies to the
-    whole request. Absent when the user asked for no time, so the reply announces nothing."""
-    entry = [_routing_entry("public_transport", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0})]
-    assert _results_view(entry, unsupported=False, departure="18:00")["departure_time"] == "18:00"
-    assert "departure_time" not in _results_view(entry, unsupported=False)
-
-
-def test_results_view_routing_item_carries_only_distance_and_time():
-    """The LLM's routing view is stripped to distance + duration — no legs, no streets. With
-    nothing to enumerate, the reply is concise by construction (the Python detail block owns
-    stops/streets); the model cannot narrate what it cannot see."""
-    entry = [_routing_entry("public_transport", route={
-        "wkt": "LINESTRING(0 0,3 3)", "distance": 4.38, "time": "0:47:03",
-        "arc": [{"transport": "foot", "desc": "Via X", "distance": 0.4},
-                {"transport": "bus", "transport_provider": "at", "line": "57",
-                 "desc": "linea 57", "stops": [{"name": "S1", "time": "2026-01-01T08:00:00+01:00"}]}],
-    })]
-    item = _results_view(entry, unsupported=False)["results"][0]
-    assert item["result"] == {"journey": {"distance_km": 4.38, "time": "0:47:03"}}
-    assert item["routetype"] == "public_transport"
 
 
 # --- _format_detail (deterministic single-mode step block, Python not LLM) ----
@@ -1181,11 +1151,10 @@ def test_format_detail_missing_arc_yields_totals_only():
     assert _format_detail(results, route) == "Totale: 1.83 km · 00:23:18"
 
 
-async def test_respond_single_mode_detail_on_route_not_reply(make_llm):
+async def test_respond_single_mode_detail_on_route_not_reply():
     """A single-mode request → the deterministic step block rides routes[0].detail (the
-    front-end renders it as a structured bubble), NOT the reply text: the concise LLM reply
-    stays clean so the block never leaks into the next turn's history."""
-    llm = make_llm([_text_response("In autobus, circa 42.6 km.")])
+    front-end renders it as a structured bubble), NOT the concise reply text, so the block
+    never leaks into the next turn's history."""
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da A a B in autobus"}],
@@ -1195,18 +1164,17 @@ async def test_respond_single_mode_detail_on_route_not_reply(make_llm):
         "unsupported": False,
         "slots": {"intent": "route", "mode": "public_transport"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
-    assert reply == "In autobus, circa 42.6 km."  # reply is the LLM lead only, no block
-    assert "Linea 56" not in reply and "Totale:" not in reply
+    assert "42.6 km" in reply  # the concise reply carries the totals only
+    assert "Linea 56" not in reply and "Totale:" not in reply  # the step block never leaks in
     detail = out["response"]["data"]["routes"][0].get("detail")
     assert detail and "Linea 56" in detail and "PONTE MOSSE" in detail and "17:45" in detail
 
 
-async def test_respond_no_detail_block_for_multi_mode(make_llm):
-    """The default multi-mode (no mode specified) reply is the LLM's concise comparison
-    only — no step block appended."""
-    llm = make_llm([_text_response("A piedi 2 km, in auto 3.5 km. Più veloce: in auto.")])
+async def test_respond_no_detail_block_for_multi_mode():
+    """The default multi-mode (no mode specified) reply is the concise comparison only —
+    no step block (Totale/Partenza lines) appended to the text."""
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da A a B"}],
@@ -1217,18 +1185,17 @@ async def test_respond_no_detail_block_for_multi_mode(make_llm):
         "unsupported": False,
         "slots": {"intent": "route", "mode": ""},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
-    assert reply == "A piedi 2 km, in auto 3.5 km. Più veloce: in auto."
+    assert "Più veloce" in reply  # the multi-mode comparison names the fastest
     assert "Totale:" not in reply and "Partenza:" not in reply
 
 
-async def test_respond_attaches_detail_to_every_route_multi_mode(make_llm):
+async def test_respond_attaches_detail_to_every_route_multi_mode():
     """Multi-mode: every route in data.routes carries its pre-rendered `detail` block for
-    the dashboard's local mode picker (no new turn on selection), while the reply text
-    stays the LLM's concise comparison. A route whose audit has no arc degrades to the
-    totals line (plus the departure line when set)."""
-    llm = make_llm([_text_response("Tre opzioni trovate.")])
+    the dashboard's local mode picker (no new turn on selection), while the concise reply
+    text carries no block. A route whose audit has no arc degrades to the totals line (plus
+    the departure line when set)."""
     foot_arc = [
         {"transport": "foot", "transport_provider": None, "desc": "Via Ricasoli", "distance": 2.0},
     ]
@@ -1244,9 +1211,9 @@ async def test_respond_attaches_detail_to_every_route_multi_mode(make_llm):
         "slots": {"intent": "route", "mode": ""},
         "departure": "18:00",
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
-    assert reply == "Tre opzioni trovate."  # no block leaks into the text
+    assert "Linea 56" not in reply and "Totale:" not in reply  # no step block leaks into the text
     routes = out["response"]["data"]["routes"]
     by_mode = {r["mode"]: r for r in routes}
     assert set(by_mode) == {"foot", "car", "public_transport"}
@@ -1258,10 +1225,9 @@ async def test_respond_attaches_detail_to_every_route_multi_mode(make_llm):
     assert by_mode["car"]["detail"] == "Partenza: 18:00\nTotale: 3.5 km · 00:08:00"
 
 
-async def test_respond_no_detail_on_route_error(make_llm):
+async def test_respond_no_detail_on_route_error():
     """All routing failed → data carries route_error and no routes; respond neither
     raises nor invents a detail field anywhere."""
-    llm = make_llm([_text_response("Nessun percorso trovato.")])
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da A a B"}],
@@ -1269,7 +1235,7 @@ async def test_respond_no_detail_on_route_error(make_llm):
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
     }
-    out = await respond(state, llm=llm)
+    out = await respond(state)
     data = out["response"]["data"]
     assert data.get("route_error") and "routes" not in data
     assert "detail" not in json.dumps(data)
