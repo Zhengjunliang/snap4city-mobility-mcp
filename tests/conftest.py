@@ -9,16 +9,14 @@ from snap4city_mobility_mcp.mcp_tools import geocode_cache_clear
 
 @pytest.fixture(autouse=True)
 def _clean_geocode_cache():
-    """Empty the process-wide caches (geocode + tpl shapes) around every test.
+    """Empty the process-wide caches (geocode + tpl shapes) before every test.
 
     Mandatory, not hygiene: the caches outlive a test, while the fakes are single FIFO
     queues of responses. A cached search would consume no queued response, so every later
     pop in that test would shift by one — a silent, confusing failure (a routing call would
     receive a FeatureCollection). Several tests already geocode the same place text
-    ("Duomo, Firenze" appears in five); the gtfs_shapes lines index has the same trap."""
-    geocode_cache_clear()
-    gtfs_shapes_reset()
-    yield
+    ("Duomo, Firenze" appears in five); the gtfs_shapes lines index has the same trap.
+    Before-only: the next test's own clear covers whatever this one leaves behind."""
     geocode_cache_clear()
     gtfs_shapes_reset()
 

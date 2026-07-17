@@ -535,6 +535,27 @@ async def test_execute_car_error_drops_parking(make_client, make_result):
     assert not any(n == "service_info_dev" for n, _ in client.calls)
 
 
+async def test_execute_parking_ladder_widens_on_empty(make_client, make_result):
+    """An empty first parking rung re-searches wider (0.5 then 1 km — suburban destinations
+    often have no car park nearby); only the deciding (hit) call enters the audit, and the
+    pins still come out. A first-rung hit keeps costing a single call (other tests)."""
+    client = make_client([
+        make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
+        make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
+        make_result(structured=_journey()),                          # route (car)
+        make_result(structured=_parking_search()),                   # parking rung 0.5 km: empty
+        make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # rung 1.0 km: hit
+        make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
+    ])
+    slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    near = [a for n, a in client.calls if n == "service_search_near_gps_position"]
+    assert [a["maxdistance"] for a in near] == [0.5, 1.0]
+    assert out["parking"][0]["free_spaces"] == 5
+    audited = [e for e in out["tool_results"] if e["name"] == "service_search_near_gps_position"]
+    assert len(audited) == 1 and json.loads(audited[0]["args"])["maxdistance"] == 1.0
+
+
 # --- _extract_data -----------------------------------------------------------
 
 def test_extract_data_preserves_full_wkt():
@@ -912,10 +933,11 @@ async def test_execute_services_searched_along_route(make_client, make_result):
     assert not any(e["name"] == "service_search_near_gps_position" for e in out["tool_results"])
 
 
-async def test_respond_attaches_services_per_route_and_summarizes(make_llm):
-    """Each drawable route gets ITS mode's list as routes[i].services; the LLM view carries
-    the distinct along_route_services item (deduped count), never the raw anchor calls."""
-    llm = make_llm([_text_response("A piedi 2 km. Lungo il percorso trovi 2 farmacie.")])
+async def test_respond_attaches_services_per_route_keeps_llm_view_clean(make_llm):
+    """Each drawable route gets ITS mode's list as routes[i].services (the map pins), but
+    the LLM view carries NOTHING about them — no along_route_services item, no raw anchor
+    calls: the pins are the answer, the old summary sentence was dropped as noise."""
+    llm = make_llm([_text_response("A piedi 2 km.")])
     svc_foot = [{"name": "FarmaciaA", "lat": 43.768, "lng": 11.245, "uri": "http://a", "distance_km": 0.05}]
     svc_car = [{"name": "FarmaciaB", "lat": 43.761, "lng": 11.259, "uri": "http://b", "distance_km": 0.1}]
     state = {
@@ -934,14 +956,7 @@ async def test_respond_attaches_services_per_route_and_summarizes(make_llm):
     assert by_mode["foot"]["services"] == svc_foot
     assert by_mode["car"]["services"] == svc_car
     sent = llm.calls[0]["messages"][1]["content"]
-    assert '"along_route_services"' in sent and '"count": 2' in sent
-
-
-def test_results_view_services_summary_counts_zero_honestly():
-    view = _results_view([], unsupported=False, services={}, services_category="Pharmacy")
-    item = view["results"][-1]
-    assert item["name"] == "along_route_services" and item["categories"] == "Pharmacy"
-    assert item["result"] == {"count": 0, "services": []}
+    assert "along_route_services" not in sent and "Farmacia" not in sent
 
 
 def test_extract_data_drops_foot_only_pt_when_real_foot_present():
@@ -1012,8 +1027,7 @@ async def test_respond_injects_parking_into_data(make_llm):
         "messages": [{"role": "user", "content": "in auto da A a B"}],
         "endpoints": {"origin": {"lat": 43.77, "lng": 11.24}, "destination": {"lat": 43.76, "lng": 11.26}},
         "tool_results": [
-            {"name": "routing", "args": json.dumps({"routetype": "car"}),
-             "result": {"journey": _journey()["journey"]}},
+            _routing_entry("car", route=_journey()["journey"]["routes"][0]),
         ],
         "parking": [{"name": "P1", "lat": 43.76, "lng": 11.26, "uri": "http://p1",
                      "distance_km": 0.08, "free_spaces": 20, "total_spaces": 100}],
@@ -1032,8 +1046,7 @@ async def test_respond_route_surfaces_mode_for_widget(make_llm):
         "intent": "route",
         "messages": [{"role": "user", "content": "da Duomo a Santa Croce in auto"}],
         "tool_results": [
-            {"name": "routing", "args": json.dumps({"routetype": "car"}),
-             "result": {"journey": _journey()["journey"]}}
+            _routing_entry("car", route=_journey()["journey"]["routes"][0])
         ],
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
@@ -1048,8 +1061,7 @@ async def test_respond_no_mode_on_route_error(make_llm):
     state = {
         "intent": "route",
         "messages": [{"role": "user", "content": "da A a B in auto"}],
-        "tool_results": [{"name": "routing", "args": json.dumps({"routetype": "car"}),
-                          "result": {"error": "empty routes list"}}],
+        "tool_results": [_routing_entry("car", error="empty routes list")],
         "unsupported": False,
         "slots": {"intent": "route", "mode": "car"},
     }
@@ -1108,8 +1120,7 @@ def test_results_view_plain_errors_carry_no_hint():
     phrases it, no hint key. The routetype still surfaces so respond can suggest another
     mode."""
     view = _results_view(
-        [{"name": "routing", "args": json.dumps({"routetype": "car"}),
-          "result": {"error": "whatif-router returned no car path"}}],
+        [_routing_entry("car", error="whatif-router returned no car path")],
         unsupported=False,
     )
     assert "hint" not in view["results"][0]
@@ -1119,8 +1130,7 @@ def test_results_view_plain_errors_carry_no_hint():
 def test_results_view_carries_the_requested_departure():
     """The departure rides at the ROOT of the view, not on a routing item: it applies to the
     whole request. Absent when the user asked for no time, so the reply announces nothing."""
-    entry = [{"name": "routing", "args": json.dumps({"routetype": "public_transport"}),
-              "result": {"journey": {"routes": [{"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0}]}}}]
+    entry = [_routing_entry("public_transport", route={"wkt": "LINESTRING(0 0,1 1)", "distance": 2.0})]
     assert _results_view(entry, unsupported=False, departure="18:00")["departure_time"] == "18:00"
     assert "departure_time" not in _results_view(entry, unsupported=False)
 

@@ -41,6 +41,11 @@ def wkt_points(wkt: str) -> list[tuple[float, float]] | None:
     return pts or None
 
 
+def polyline_km(pts: list[tuple[float, float]]) -> float:
+    """Geodesic length (km) of a (lng, lat) vertex list: sum of segment haversines."""
+    return sum(haversine_km(a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:]))
+
+
 def wkt_length_km(wkt: str) -> float | None:
     """Total geodesic length (km) of a 'LINESTRING (lng lat, lng lat, ...)'.
 
@@ -52,10 +57,7 @@ def wkt_length_km(wkt: str) -> float | None:
     pts = wkt_points(wkt)
     if pts is None or len(pts) < 2:
         return None
-    total = sum(
-        haversine_km(a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:])
-    )
-    return round(total, 3)
+    return round(polyline_km(pts), 3)
 
 
 def fmt_linestring(pts: list[tuple[float, float]]) -> str:

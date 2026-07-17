@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 
-from snap4city_mobility_mcp.geo import fmt_linestring, haversine_km, wkt_points
+from snap4city_mobility_mcp.geo import fmt_linestring, polyline_km, wkt_points
 
 logger = logging.getLogger(__name__)
 
@@ -171,10 +171,6 @@ def _mean_stop_distance_km(
     return total / len(stop_pts)
 
 
-def _len_km(pts: list[tuple[float, float]]) -> float:
-    return sum(haversine_km(a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:]))
-
-
 def _slice_between(
     shape: list[tuple[float, float]],
     flat_shape: list[tuple[float, float]],
@@ -295,8 +291,8 @@ async def _enhance(legs: list[dict[str, Any]], instructions: list[Any], n_path_p
         # Sanity: the cut must look like the same ride — between ~the chord length (a
         # shape can only be longer than straight hops, minus corner-cut noise at the
         # projected ends) and a loop-sized multiple of it.
-        chord_km = _len_km(stop_pts)
-        cut_km = _len_km(best[1])
+        chord_km = polyline_km(stop_pts)
+        cut_km = polyline_km(best[1])
         if chord_km > 0 and not (0.8 * chord_km <= cut_km <= 3.0 * chord_km):
             logger.debug("shape cut for line %r rejected: %.2f km vs chord %.2f km", line, cut_km, chord_km)
             continue

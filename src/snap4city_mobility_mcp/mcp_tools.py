@@ -62,7 +62,12 @@ LOCAL_ONLY_TOOLS = frozenset({"route"})
 #   (newest first) carry freeParkingLots/capacity as string values (read_parking_realtime).
 #   Plain POI car parks have no realtime → free stays None (the agreed degraded display).
 PARKING_CATEGORY = "Car_park"  # probe-confirmed (2026-06-26)
-PARKING_RADIUS_KM = 0.5
+# Widening radius ladder (km) around the destination, like the nearest-category search: an
+# empty rung means "no car park within <radius>", so the next rung re-searches wider (a
+# suburban destination often has none within the first rung, L56). Capped at 1 km — a car
+# park farther than a ~12-minute walk from the destination is not an answer to "where do
+# I park".
+PARKING_RADII_KM = (0.5, 1.0)
 PARKING_MAX = 5
 PARKING_REALTIME_FROMTIME = "1-hour"  # service_info_dev window; bindings[0] is the latest reading
 

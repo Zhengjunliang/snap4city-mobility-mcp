@@ -6,6 +6,10 @@
 
 ---
 
+L56 **固定半径 near-search 空手 = 无报错静默无 pin: 依赖类 UI 特性的搜索一律半径阶梯化, 上限按特性语义定** —— 真机 (2026-07-16, "via delle tre pietre 7 a firenze in auto"): car 轮次一切正常 (路由/沿途服务/回复全对) 唯独 parking pins 不见。不是没触发 (`do_parking = "car" in modes` 照跑), 是 `Car_park` 近搜在固定 `PARKING_RADIUS_KM=0.5` 内**真的没有停车场** (近郊目的地常态), 返回空 FeatureCollection: 无 error、无日志异常, 唯一证据是 debug.log 的 near-search 条目 `-> {"result": [[], ...]}`。类别目的地搜索早有阶梯 (`NEAREST_SERVICE_RADII_KM` 0.5→2→10), parking 当时没跟上。修 ([orchestrator.py](../src/snap4city_mobility_mcp/orchestrator.py) `_parking` + [mcp_tools.py](../src/snap4city_mobility_mcp/mcp_tools.py)): `PARKING_RADII_KM=(0.5, 1.0)` 空 rung 扩半径重搜, 复用 `_nearest_service` 的"只有 deciding call 进 audit"约定; 上限 1km 由**特性语义**定 (停车场离目的地再远, 步行就没意义), 不照抄目的地解析的 10km。测试: FakeClient 队列排"空响应+命中响应", 断言两次 maxdistance 依次 0.5/1.0 且只审计命中那次。教训: (a) 近搜半径写死 = 数据稀疏区静默丢整个特性; (b) 阶梯上限不是全局常量, 每个特性按自己的语义定; (c) "为什么没 pin"先看 debug.log 的 near-search 返回 — 搜索跑没跑、返没返数据, 一行定位。
+
+---
+
 L55 **km4city civic 坐标锚在地块角、同侧多号成簇堆点: civic 阶梯选号正确 ≠ 落点精确, 剩余偏差是数据级、生态内无解** —— 真机 (2026-07-16): "via santa marta 3" civic 阶梯精确命中 `civic='3'`, pin 却离工程学院入口 ~165m。probe 公开 geocoder (`servicemap.disit.org /location/`) 实锤数据本身: VIA DI SANTA MARTA 奇数号 **1/3/5 三个 civic 同一坐标** [11.2552, 43.7988] (地块角; 7/9、17/19/21、23/25、27/29 也各自成簇), OSM 真值 3 号在 [11.2539, 43.7977]; 偶数侧 (civic 2) 反而是准的。备选源也查了: SSM (`snap4city.org/superservicemap`) 同查询**连 civic 条目都没有** → 生态内没有更好的门牌数据。结论: **不改代码** (`_pick_coord`/civic 阶梯行为正确, L52 逻辑不动; Nominatim/OSM 校正被否 — 生态外新依赖不值), 偏差落在同一条街上, 路线首段 (0.167km) 就是它, 3.5km 行程可忽略。demo 缓解: 知名建筑说 **POI 名** ("dalla facoltà di ingegneria santa marta") 走 POI pass, 落真实建筑坐标。教训: 排查端点漂移分两层 — 先证代码选对了候选 (log `civic=`), 再 probe 数据源看候选本身准不准; 多个相邻 civic 坐标完全相同 = 数据占位符的指纹。
 
 ---

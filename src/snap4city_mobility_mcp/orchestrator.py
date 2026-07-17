@@ -45,7 +45,7 @@ from snap4city_mobility_mcp.llm import (
 from snap4city_mobility_mcp.mcp_tools import (
     PARKING_CATEGORY,
     PARKING_MAX,
-    PARKING_RADIUS_KM,
+    PARKING_RADII_KM,
     PARKING_REALTIME_FROMTIME,
     _build_config,
     _label_tokens,
@@ -71,27 +71,22 @@ ROME = ZoneInfo("Europe/Rome")
 UNDERSTAND_SYSTEM = """\
 You are the intent-extraction stage of an urban-mobility advisor. Read the \
 conversation and the user's LATEST message, then call `extract_slots` exactly once. \
-Classify request_type and mode per each field's own description in the schema.
+Classify request_type and mode per each field's schema description.
 Rules:
-- Always fill EVERY field of `extract_slots` (use '' for a slot the user truly did \
-not give). Never drop the destination when the user named one.
-- Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"). NEVER output \
-coordinates — a separate tool geocodes places. Keep a city/town the user names \
-attached to its place text, but NEVER add a city — or any place — the user did not say.
-- When the user gives NO origin ("portami al Duomo", "come arrivo in stazione?", \
-"da qui") leave origin_text '' — the system defaults to the user's own position. \
-Never invent an origin.
-- Ignore greetings and pleasantries ("ciao", "hello", "per favore") — they never \
-change the slots.
-- For a follow-up that omits a place (e.g. "what about by bus?", "那坐公交呢?"), \
-reuse the origin/destination from earlier in the conversation and change only what \
-the user changed (here mode → public_transport). An origin the user never stated \
-stays '' on follow-ups too.
-- Today is {today} (Europe/Rome). A departure time the user gives ("alle 18", "domani \
-alle 9") goes in departure_time; leave it '' when they give none. NEVER invent one.
+- Fill EVERY field ('' for a slot the user did not give); never drop a destination \
+the user named.
+- Extract PLACE TEXT only (e.g. "Piazza del Duomo, Firenze"), NEVER coordinates — a \
+separate tool geocodes places. Keep a city the user names attached to its place text; \
+NEVER add a city — or any place — they did not say.
+- No origin given ("portami al Duomo", "da qui") → origin_text '' (the system \
+defaults to the user's own position). Never invent one.
+- Greetings and pleasantries ("ciao", "per favore") never change the slots.
+- A follow-up that omits a place ("what about by bus?", "那坐公交呢?") reuses the \
+origin/destination from earlier in the conversation and changes only what the user \
+changed (here mode → public_transport); an origin the user never stated stays ''.
+- Today is {today} (Europe/Rome). departure_time only when the user says when to \
+LEAVE ("alle 18", "domani alle 9"); '' when they give none — NEVER invent one.
 <examples>
-"ciao, voglio andare da stazione di Rifredi a piazza Dalmazia a piedi" → request_type=journey, origin_text="stazione di Rifredi", destination_text="piazza Dalmazia", mode=foot (all other slots '')
-"da piazza Duomo a piazza Dalmazia in Firenze" → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze"
 "portami al Duomo" → request_type=journey, origin_text='', destination_text="Duomo"
 "dov'è la farmacia più vicina?" → request_type=journey, origin_text='', destination_text="farmacia", destination_category="Pharmacy"
 "portami al Duomo e mostrami i ristoranti lungo il percorso" → request_type=journey, origin_text='', destination_text="Duomo", services_category="Restaurant"
@@ -100,71 +95,59 @@ alle 9") goes in departure_time; leave it '' when they give none. NEVER invent o
 </examples>"""
 
 RESPOND_SYSTEM = """\
-You are a friendly urban-mobility assistant. ALWAYS reply in the \
-user's own language — if the user wrote Italian, reply in Italian; if \
-the language is unclear (e.g. a bare greeting), default to ITALIAN. Phrasing is yours: \
-natural and helpful, not robotic, \
-but lead with the answer and keep it concise. A short greeting is fine ONLY on the \
-FIRST turn (the message says which); on a follow-up answer directly — no greeting and \
-no repeated sign-offs ("happy to help", "let me know if you need more").
+You are a friendly urban-mobility assistant. ALWAYS reply in the user's own language; \
+if it is unclear (e.g. a bare greeting), default to ITALIAN. Natural phrasing, lead \
+with the answer, keep it concise. A short greeting is fine ONLY on the FIRST turn \
+(the message says which); on a follow-up answer directly — no greeting, no sign-offs.
 Hard rules (never break these):
-- Every fact must come ONLY from the RESULTS given to you. Never invent or estimate \
-coordinates, distances, durations, ETAs, line names, stop names, or route IDs — not \
-from coordinates, not from general knowledge, not "approximately". Do not call tools.
-- If the user asks about lines / routes / stops / times but RESULTS has no matching \
-entries, say plainly you don't have that information — NEVER list line numbers or name \
-an operator (e.g. ATAF) from your own knowledge. Not one fabricated entry.
+- Every fact comes ONLY from the RESULTS given to you. Never invent or estimate \
+coordinates, distances, durations, ETAs, line/stop names, or route IDs — not from \
+coordinates, not from general knowledge, not "approximately". Do not call tools. If \
+the user asks about lines / routes / stops / times and RESULTS has no matching entry, \
+say plainly you don't have that information — never name a line or operator (e.g. \
+ATAF) yourself.
 - Never include raw coordinates in your answer.
-- For a route, give ONLY each found mode's distance (in km) and duration/ETA, and when \
-more than one mode is present say which is fastest — using ONLY the RESULTS fields. Keep \
-it short: do NOT narrate legs, list stops, or list streets (RESULTS deliberately carries \
-none; for a single-mode request a precise step-by-step list is appended separately after \
-your reply, so do not attempt one yourself). Write any time as plain HH:MM (never seconds \
-or dates). NO disclaimers — never comment on real-time information, traffic, dates, data \
-validity, or timetable accuracy. A route that carries a distance HAS BEEN FOUND: present \
-it directly and NEVER ask the user to restate, clarify, or give a nearby landmark for the \
-origin/destination — they were already located. A bus duration is an approximate ride \
-time (walking + in-vehicle, excluding the wait at the stop), not a precise arrival. If a \
-route has no duration/ETA at all (e.g. a bus route with no timetable), give its distance \
-and simply note the schedule/time is not available — do not invent one and do not treat \
-it as a failure.
-- When RESULTS carries a `departure_time`, the trip was planned for that departure: say so \
-plainly (e.g. "partendo alle 18:00"), using that field as written. With no such field, \
-never mention a departure time.
-- If a RESULTS item could not be computed (an `error`, or a route/place not found), \
-say so plainly WITHOUT any numbers and suggest a sensible alternative (another mode, a \
+- For a route give ONLY each found mode's distance (km) and duration/ETA, and with \
+more than one mode say which is fastest. Do NOT narrate legs, list stops, or list \
+streets (RESULTS deliberately carries none; for a single-mode request a precise \
+step-by-step list is appended separately after your reply). Write times as plain \
+HH:MM (never seconds or dates). NO disclaimers about real-time information, traffic, \
+dates, data validity, or timetable accuracy. A route that carries a distance HAS \
+BEEN FOUND: present it directly, never ask the user to restate or clarify the \
+origin/destination. A bus duration is an approximate ride time (walking + in-vehicle, \
+excluding the wait at the stop). A route with no duration/ETA at all: give its \
+distance and note the schedule/time is not available — not a failure, invent nothing.
+- A RESULTS `departure_time` means the trip was planned for that departure: say so \
+plainly ("partendo alle 18:00"), using the field as written. Without it, never \
+mention a departure time.
+- A RESULTS item that could not be computed (an `error`, or a route/place not found): \
+say so plainly WITHOUT numbers and suggest a sensible alternative (another mode, a \
 more precise address); when geocoded addresses are present, mention how you read the \
 origin/destination so the user can spot a wrong match.
-- If a routing RESULTS item carries a `hint`, follow it for the alternative you \
-suggest — it already decided the right one: `pt_degraded_to_foot` = the \
-public-transport request returned a walking-only journey (no real transit), so if \
-other modes are present do NOT list it as a public-transport option, and if it is the \
-only result say there is no direct public transport for this trip and give the walking \
-distance/time instead. With NO `hint`, never claim a ZTL/pedestrian zone yourself.
-- If RESULTS has status "missing_place", ask the user for the field(s) listed in \
-`missing` (the origin/destination of a trip); when "origin" is missing you may also \
-suggest sharing the position — do NOT say the request is unsupported.
-- When RESULTS includes a `coordinates_to_address` entry, the trip starts from the \
-user's current GPS position: say so ("dalla tua posizione", optionally "vicino a \
-<address>" using ONLY that entry's address). If the user gave no origin and there is \
-no such entry, say "dalla tua posizione attuale" without naming any street.
+- A routing item's `hint` decides the alternative you suggest: `pt_degraded_to_foot` \
+= the public-transport request returned a walking-only journey (no real transit) — \
+with other modes present do NOT list it as a public-transport option; as the only \
+result, say there is no direct public transport and give the walking distance/time. \
+With NO hint, never claim a ZTL/pedestrian zone yourself.
+- Status "missing_place": ask the user for the field(s) listed in `missing`; when \
+"origin" is missing you may also suggest sharing the position — do NOT say the \
+request is unsupported.
+- A `coordinates_to_address` entry means the trip starts from the user's current GPS \
+position: say so ("dalla tua posizione", optionally "vicino a <address>" using ONLY \
+that entry's address). No origin given and no such entry → "dalla tua posizione \
+attuale", naming no street.
 - A `service_search_near_gps_position` entry whose `categories` is `Car_park` is \
-parking near the destination: add ONE short closing sentence — how many car parks are \
-nearby and, if any `free_spaces` is a number > 0, that there are free spots (else that \
-live availability is not known right now). Do NOT list the car-park names, addresses, \
-or coordinates: the map already shows their pins. Keep it to that single sentence.
-- A `service_search_near_gps_position` entry with any OTHER `categories` is how the \
-destination was resolved — the nearest place of that kind: name the found place (the \
-first listed service) naturally in the answer.
-- An `along_route_services` entry lists services of a kind the user asked to SEE along \
-the route: add ONE short sentence — how many were found along the way, naming at most \
-the nearest one; if its count is 0, say plainly none of that kind were found along the \
-route. Do NOT list the other names, addresses, or coordinates: the map already shows \
-their pins. Keep it to that single sentence.
-- If RESULTS has status "unsupported", explain in your own words that for now you \
-answer point-to-point trip questions (on foot, by car, or by public transport), \
-including trips to the nearest place of a kind ("la farmacia più vicina"), and invite \
-the user to rephrase."""
+parking near the destination: ONE short closing sentence — how many car parks are \
+nearby and, if any `free_spaces` > 0, that there are free spots (else that live \
+availability is not known right now). Never list their names, addresses, or \
+coordinates: the map already shows the pins.
+- The same entry with any OTHER `categories` is how the destination was resolved — \
+the nearest place of that kind: name the found place (the first listed service) \
+naturally in the answer.
+- Status "unsupported": explain in your own words that for now you answer \
+point-to-point trip questions (on foot, by car, or by public transport), including \
+trips to the nearest place of a kind ("la farmacia più vicina"), and invite the user \
+to rephrase."""
 
 # Not a real MCP tool: a function schema used only to force structured output
 # from the understand node.
@@ -355,12 +338,15 @@ def _pick_feature(
     features = geocode.get("features")
     if not (isinstance(features, list) and features):
         return None
+    # Tokenized once per feature (unicodedata normalization inside): both the matching
+    # loop and the civic street filter below read from this map.
+    toks_of = {id(f): _label_tokens(_feature_label(f)) for f in features}
     want = _label_tokens(search)
     pool = features
     if want:
         matching = []
         for f in features:
-            toks = _label_tokens(_feature_label(f))
+            toks = toks_of[id(f)]
             # Skip a label that is just the municipality ("FIRENZE"): it matches any
             # search ending in ", Firenze" but is never a useful pick.
             props = f.get("properties") or {}
@@ -382,7 +368,7 @@ def _pick_feature(
             # Address-shaped query with no civic hit in the pool (none returned, or a
             # compound civic like "11/A" missing the exact match): street features
             # (label carries a road-type word) beat name-only POIs (the 'LAURA' bug).
-            streets = [f for f in pool if _label_tokens(_feature_label(f)) & _ROAD_WORDS]
+            streets = [f for f in pool if toks_of[id(f)] & _ROAD_WORDS]
             if streets:
                 pool = streets
     best = None
@@ -732,17 +718,26 @@ async def execute(
     async def _parking() -> dict[str, Any]:
         # Find car parks near the destination (called only when a car route is in play — the
         # feature is car-specific). Runs concurrently with routing (one flat gather below) so
-        # it adds no wall-clock when routing is the long pole. The search has no free-spaces;
-        # the live count is fetched per-spot afterwards (_enrich_parking). Returns the entry.
-        p_args = {
-            "latitude": dest[1],
-            "longitude": dest[0],
-            "categories": PARKING_CATEGORY,
-            "maxdistance": PARKING_RADIUS_KM,
-            "maxresults": PARKING_MAX * 3,
-        }
-        result = await exec_tool(client, "service_search_near_gps_position", p_args)
-        return _audit("service_search_near_gps_position", p_args, result)
+        # it adds no wall-clock when routing is the long pole. Widening radius ladder like
+        # _nearest_service: an empty rung re-searches wider (a suburban destination often has
+        # no car park within the first rung — silently pinless before the ladder, L56), and
+        # only the deciding call becomes the entry: the winning rung, or the last empty one
+        # (so respond can still explain a miss). The search has no free-spaces; the live
+        # count is fetched per-spot afterwards (_enrich_parking). Returns the entry.
+        entry: dict[str, Any] = {}
+        for radius in PARKING_RADII_KM:
+            p_args = {
+                "latitude": dest[1],
+                "longitude": dest[0],
+                "categories": PARKING_CATEGORY,
+                "maxdistance": radius,
+                "maxresults": PARKING_MAX * 3,
+            }
+            result = await exec_tool(client, "service_search_near_gps_position", p_args)
+            entry = _audit("service_search_near_gps_position", p_args, result)
+            if parse_service_features(result):
+                break
+        return entry
 
     # The modes are independent, so route them concurrently (wall-clock = the slowest one,
     # not the sum); parking (car only) runs alongside in the SAME flat gather, placed last so
@@ -898,8 +893,9 @@ async def _along_route_services(
 
     One near-search per anchor (anchors per _service_anchors), concurrent within a mode.
     The calls are NOT audited — internal like _enrich_parking, and an audited non-Car_park
-    near-search entry would trip respond's "how the destination was resolved" rule; the
-    LLM view gets its own along_route_services item instead (_results_view). Spots are
+    near-search entry would trip respond's "how the destination was resolved" rule. The
+    LLM view carries nothing about them either: the map pins ARE the answer (the old
+    one-sentence summary was dropped as noise, 2026-07-16). Spots are
     deduped across anchors by uri (keeping the smallest anchor distance), sorted by that
     distance and capped to SERVICES_MAX per mode. Item shape mirrors data.parking minus
     the occupancy fields: {name, lat, lng, uri, distance_km}. Modes whose routing failed
@@ -961,11 +957,10 @@ _VEHICLE = {"foot": "foot", "car": "car", "public_transport": "bus"}
 
 
 def _route_minutes(route: dict[str, Any]) -> float:
-    """A route's travel time in minutes, for ordering routes fastest-first. The server
-    gives `duration` as "HH:MM:SS"; an unparseable one sorts last (inf)."""
+    """A route's travel time in minutes, for ordering routes fastest-first. `duration`
+    is always the route tool's _fmt_hms "H:MM:SS" string (the only producer); an
+    unparseable or missing one sorts last (inf)."""
     dur = route.get("duration")
-    if isinstance(dur, (int, float)):
-        return float(dur)
     if isinstance(dur, str):
         parts = dur.split(":")
         if len(parts) == 3:
@@ -986,8 +981,14 @@ def _pt_is_foot_only(result: Any) -> bool:
     if not isinstance(result, dict) or not isinstance(result.get("journey"), dict):
         return False
     first = (result["journey"].get("routes") or [{}])[0]
-    legs = group_arc_legs(first.get("arc") or [])
-    return not any((leg.get("transport") or "foot") != "foot" for leg in legs)
+    # A direct arc scan: every leg's transport comes verbatim from its arcs' transport
+    # (group_arc_legs), so building the full leg list (stops copies included) just to
+    # ask "any non-foot?" was wasted work.
+    return not any(
+        (arc.get("transport") or "foot") != "foot"
+        for arc in first.get("arc") or []
+        if isinstance(arc, dict)
+    )
 
 
 def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1103,26 +1104,27 @@ def _template_answer(
             "tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla "
             "farmacia più vicina'."
         )
+    def bits_of(r: dict[str, Any]) -> list[str]:
+        bits = []
+        if r.get("distance_km") is not None:
+            bits.append(f"{r['distance_km']} km")
+        if r.get("duration"):
+            bits.append(f"~{r['duration']}")
+        return bits
+
     routes = data.get("routes") or []
     if len(routes) > 1:
         labels = {"foot": "a piedi", "car": "in auto", "bus": "con i mezzi"}
         parts = []
         for r in routes:
             label = labels.get(_VEHICLE.get(r.get("mode") or "", ""), "percorso")
-            bits = []
-            if r.get("distance_km") is not None:
-                bits.append(f"{r['distance_km']} km")
-            if r.get("duration"):
-                bits.append(f"~{r['duration']}")
+            bits = bits_of(r)
             if bits:
                 parts.append(f"{label}: {' · '.join(bits)}")
         if parts:
             return "; ".join(parts)
     if data.get("distance_km") is not None:
-        bits = [f"{data['distance_km']} km"]
-        if data.get("duration"):
-            bits.append(f"~{data['duration']}")
-        return " · ".join(bits)
+        return " · ".join(bits_of(data))
     if data.get("route_error"):
         return data["route_error"]
     return "Mi dispiace, non sono riuscito a trovare un percorso per questa richiesta."
@@ -1270,8 +1272,6 @@ def _results_view(
     missing: list[str] | None = None,
     departure: str = "",
     parking: list[dict[str, Any]] | None = None,
-    services: dict[str, list[dict[str, Any]]] | None = None,
-    services_category: str = "",
 ) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (no huge WKT).
 
@@ -1297,18 +1297,22 @@ def _results_view(
         # free_spaces): the parking one feeds the availability sentence, a category-
         # destination one names the found place. The map still plots parking pins
         # (data.parking); the reply no longer lists spot names.
-        item = {"name": name, "result": slim_result_for_llm(name, e.get("result"))}
+        item: dict[str, Any] = {"name": name}
         if name == "routing":
             # Keep only distance + duration in the LLM's view: it must never narrate legs
             # or list stops/streets. The deterministic detail block (respond, single mode)
             # owns that. With no leg/street rows in view the reply is concise BY
             # CONSTRUCTION — the model cannot enumerate what it cannot see — not by it
-            # obeying a "be brief" instruction (which Llama4 follows unreliably). The full
-            # slim view (legs/streets) still lives in the audit for the block to mine.
-            slim = item["result"]
-            if isinstance(slim, dict) and isinstance(slim.get("journey"), dict):
-                j = slim["journey"]
-                item["result"] = {"journey": {"distance_km": j.get("distance_km"), "time": j.get("time")}}
+            # obeying a "be brief" instruction (which Llama4 follows unreliably). The two
+            # fields come straight from the raw journey (running the full slim view's
+            # leg/street build just to discard it wasted work on every bus entry); the
+            # audit still holds the full payload for the detail block to mine.
+            raw = e.get("result")
+            if isinstance(raw, dict) and isinstance(raw.get("journey"), dict):
+                first = (raw["journey"].get("routes") or [{}])[0]
+                item["result"] = {"journey": {"distance_km": first.get("distance"), "time": first.get("time")}}
+            else:
+                item["result"] = raw  # errors pass through unchanged (like slim)
             # Surface which mode this attempt used: on failure the LLM can only
             # suggest a sensible alternative ("in auto non si può, prova a piedi")
             # when it knows which mode failed.
@@ -1328,7 +1332,8 @@ def _results_view(
                 pass
             if item.get("categories") == PARKING_CATEGORY and parking:
                 # The car-park item speaks for the ENRICHED list (live free-spaces per spot),
-                # not the raw search: the search itself never carries occupancy (L33).
+                # not the raw search: the search itself never carries occupancy (L33), so
+                # slimming the raw payload would only be overwritten here.
                 item["result"] = {
                     "count": len(parking),
                     "services": [
@@ -1336,27 +1341,11 @@ def _results_view(
                         for p in parking[:PARKING_MAX]
                     ],
                 }
+            else:
+                item["result"] = slim_result_for_llm(name, e.get("result"))
+        else:
+            item["result"] = slim_result_for_llm(name, e.get("result"))
         view.append(item)
-    if services_category:
-        # The anchor searches are not audited (see _along_route_services), so the LLM's
-        # along-route summary is built here from the deduped per-mode lists — distinct
-        # label on purpose: a service_search item with a non-Car_park category means
-        # "how the destination was resolved" to the prompt. count 0 lets the reply say
-        # honestly that nothing of that kind was found along the way.
-        uris: set[str] = set()
-        names: list[dict[str, Any]] = []
-        for spots in (services or {}).values():
-            for s in spots:
-                if s["uri"] in uris:
-                    continue
-                uris.add(s["uri"])
-                if len(names) < PARKING_MAX:
-                    names.append({"name": s.get("name")})
-        view.append({
-            "name": "along_route_services",
-            "categories": services_category,
-            "result": {"count": len(uris), "services": names},
-        })
     out = {"status": "ok", "results": view}
     if departure:
         out["departure_time"] = departure
@@ -1399,7 +1388,6 @@ async def respond(
     # A PT journey degraded to foot (mode relabelled by _extract_data) misses its key and
     # simply ships none — its anchors were bus-stop-based and no longer match the walk.
     services_map = state.get("services") or {}
-    services_category = ((state.get("slots") or {}).get("services_category") or "").strip()
     if intent == "route" and services_map:
         for r in data.get("routes") or []:
             svc = services_map.get(r.get("mode") or "")
@@ -1451,10 +1439,6 @@ async def respond(
         missing=missing,
         departure=state.get("departure") or "",
         parking=parking,
-        services=services_map,
-        # The summary item appears only for a route turn that actually asked for it —
-        # count 0 on a failed/short route still gets an honest "none found" sentence.
-        services_category=services_category if intent == "route" else "",
     )
     answer: str | None = None
     try:

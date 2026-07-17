@@ -321,7 +321,7 @@ legStarted = true;
 });
 if (destination) push(destination, legColor(legs[legs.length - 1].type), ICONS.finish);
 if (points.length < 2) throw new Error("route geometry has < 2 points");
-return { id: TRAJ_IDS[vehicle] || ("advisorRoute_" + vehicle), eventType: "Trajectory", points: points };
+return { id: TRAJ_IDS[vehicle], eventType: "Trajectory", points: points };
 }
 // Draw every route from the backend, one vivid line per mode (foot green / car blue; bus =
 // walking legs green, ride leg orange, ServiceMap bus-stop pins at the board/alight
@@ -340,66 +340,44 @@ trigger({ type: "addCustomTrajectory", target: MAP_WIDGET_ID, passedData: trajs 
 // ---- Parking near the destination (car routes) --------------------------
 // Map pins via addSelectorPin (one event per car park, by serviceUri - Snap4City's own widget
 // loops one event per pin, so we do too). Removal is the verified 'removeSelectorPin' event
-// keyed by desc (see the config note above): lastParkingPins remembers each added pin's
-// {desc, query} so the clear resends exactly those. try/catch keeps any widget balk away
-// from the chat (the reply text still states the availability).
-var lastParkingPins = [];
+// keyed by desc (see the config note above): each set's pins list remembers every added
+// pin's {desc, query} so the clear resends exactly those. try/catch keeps any widget balk
+// away from the chat (the reply text still states the availability).
 function serviceQuery(uri) { return SERVICEMAP_BASE + "?serviceUri=" + encodeURIComponent(uri); }
-function clearParkingPins() {
+// One shared clear/draw pipeline for both pin sets; parking and along-route services
+// (user-asked category, L53) differ only in pin config, default label and bookkeeping.
+// Separate sets so they clear independently (a chip tap swaps the service set but only
+// toggles parking). Same-name items collide on the widget's desc key - rare, accepted.
+var parkingPins = { cfg: PARK_PIN, label: "Parcheggio", pins: [] };
+var servicePins = { cfg: SERVICE_PIN, label: "Servizio", pins: [] };
+function clearPins(set) {
 try {
-lastParkingPins.forEach(function (pin) {
-trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { desc: pin.desc, query: pin.query, display: PARK_PIN.display } });
+set.pins.forEach(function (pin) {
+trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { desc: pin.desc, query: pin.query, display: set.cfg.display } });
 });
 } catch (e) { /* widget balked; never break the chat */ }
-lastParkingPins = [];
+set.pins = [];
 }
-function drawParkingPins(parking) {
-clearParkingPins();
-if (!parking || !parking.length) return;
+function drawPins(set, items) {
+clearPins(set);
+if (!items || !items.length) return;
 try {
-parking.forEach(function (p) {
+items.forEach(function (p) {
 if (!p.uri) return;
-var desc = p.name || "Parcheggio";
+var desc = p.name || set.label;
 var query = serviceQuery(p.uri);
 trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
-query: query, queryType: PARK_PIN.queryType, display: PARK_PIN.display,
-desc: desc, color1: PARK_PIN.color1, color2: PARK_PIN.color2,
-pinattr: PARK_PIN.pinattr
+query: query, queryType: set.cfg.queryType, display: set.cfg.display,
+desc: desc, color1: set.cfg.color1, color2: set.cfg.color2,
+pinattr: set.cfg.pinattr
 } });
-lastParkingPins.push({ desc: desc, query: query });
+set.pins.push({ desc: desc, query: query });
 });
-} catch (e) { /* widget balked; the reply text still states availability */ }
+} catch (e) { /* widget balked; the reply text still stands on its own */ }
 }
-// ---- Along-route services (user-asked category, L53) ----------------------
-// Same pin pipeline as parking, separate bookkeeping so the two sets clear independently
-// (a chip tap swaps the service set but only toggles parking). Same-name services collide
-// on the widget's desc key like same-name car parks - rare, accepted.
-var lastServicePins = [];
-function clearServicePins() {
-try {
-lastServicePins.forEach(function (pin) {
-trigger({ type: "removeSelectorPin", target: MAP_WIDGET_ID, passedData: { desc: pin.desc, query: pin.query, display: SERVICE_PIN.display } });
-});
-} catch (e) { /* widget balked; never break the chat */ }
-lastServicePins = [];
-}
-function drawServicePins(services) {
-clearServicePins();
-if (!services || !services.length) return;
-try {
-services.forEach(function (s) {
-if (!s.uri) return;
-var desc = s.name || "Servizio";
-var query = serviceQuery(s.uri);
-trigger({ type: "addSelectorPin", target: MAP_WIDGET_ID, passedData: {
-query: query, queryType: SERVICE_PIN.queryType, display: SERVICE_PIN.display,
-desc: desc, color1: SERVICE_PIN.color1, color2: SERVICE_PIN.color2,
-pinattr: SERVICE_PIN.pinattr
-} });
-lastServicePins.push({ desc: desc, query: query });
-});
-} catch (e) { /* widget balked; the reply text still sums the services up */ }
-}
+function clearParkingPins() { clearPins(parkingPins); }
+function drawParkingPins(parking) { drawPins(parkingPins, parking); }
+function drawServicePins(services) { drawPins(servicePins, services); }
 // Union of every route's services, deduped by uri (routes share stretches, so the same
 // service can ride on more than one route's list).
 function allServices(routes) {

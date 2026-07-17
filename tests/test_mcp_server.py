@@ -7,7 +7,7 @@ request/response assembly, leg slicing, arc synthesis).
 import httpx
 
 from snap4city_mobility_mcp import mcp_server
-from snap4city_mobility_mcp.geo import wkt_length_km, wkt_points
+from snap4city_mobility_mcp.geo import fmt_linestring, wkt_length_km, wkt_points
 from snap4city_mobility_mcp.mcp_server import (
     _bus_arcs,
     _fmt_hms,
@@ -288,21 +288,32 @@ async def test_route_foot_uses_path_totals(monkeypatch):
     assert found["arc"][0]["desc"] == "Via dei Benci" and found["arc"][0]["transport"] == "foot"
 
 
+def _bus_body(wkt, *, route_name=None, time=None):
+    """A What-If bus response body (walk → ride → walk instructions) for the route tests;
+    the three bus tests differ only in the leg's route_name and the path-level time."""
+    leg_map = {"type": "pt", "travelTime": 120000}
+    if route_name is not None:
+        leg_map["route_name"] = route_name
+    path = {
+        "wkt": wkt, "distance": 160.0,
+        "instructions": [
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
+            {"text": "Pt_start_trip", "interval": [1, 2], "leg": {"map": leg_map}},
+            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
+        ],
+    }
+    if time is not None:
+        path["time"] = time
+    return {"paths": [path]}
+
+
 async def test_route_bus_forwards_datetime_and_slices_legs(monkeypatch):
     # bus keeps the PT semantics: GTFS startDatetime forwarded, the dedicated long timeout
     # (graph reload until the singleton patch lands), distance measured on the geometry
     # (paths[0].distance counts only walking access), duration summed from instructions,
     # and the walk/ride leg slices attached for the dashboard split (L44).
     wkt = "LINESTRING (11.0 43.0, 11.001 43.0, 11.002 43.0, 11.003 43.0)"
-    body = {"paths": [{
-        "wkt": wkt, "distance": 160.0, "time": 999999,
-        "instructions": [
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
-            {"text": "Pt_start_trip", "interval": [1, 2], "leg": {"map": {"type": "pt", "travelTime": 120000}}},
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
-        ],
-    }]}
-    captured = _install_fake_httpx(monkeypatch, body=body)
+    captured = _install_fake_httpx(monkeypatch, body=_bus_body(wkt, time=999999))
     out = await mcp_server.route.fn(43.0, 11.0, 43.0, 11.003, vehicle="bus", startdatetime="2026-07-13T10:00")
     assert captured["params"]["vehicle"] == "bus"
     assert captured["params"]["startDatetime"] == "2026-07-13T10:00"
@@ -319,18 +330,8 @@ async def test_route_bus_swaps_ride_chords_for_gtfs_shape(monkeypatch):
     # the mirror matches what the dashboard draws. Walking legs stay router geometry.
     from tests.test_gtfs_shapes import PATH_PTS, S1, S2, SHAPE_FWD, _install_fake_tpl
 
-    from snap4city_mobility_mcp.geo import fmt_linestring
     wkt = fmt_linestring(PATH_PTS)
-    body = {"paths": [{
-        "wkt": wkt, "distance": 160.0,
-        "instructions": [
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
-            {"text": "Pt_start_trip", "interval": [1, 2],
-             "leg": {"map": {"type": "pt", "travelTime": 120000, "route_name": "57"}}},
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
-        ],
-    }]}
-    _install_fake_httpx(monkeypatch, body=body)
+    _install_fake_httpx(monkeypatch, body=_bus_body(wkt, route_name="57"))
     _install_fake_tpl(
         monkeypatch, agencies=["ag1"], lines={"ag1": ["57"]},
         routes={("ag1", "57"): [SHAPE_FWD]},
@@ -350,18 +351,8 @@ async def test_route_bus_keeps_chords_when_tpl_is_down(monkeypatch):
     # tpl unreachable: the output is byte-identical to the pre-enhancement behavior.
     from tests.test_gtfs_shapes import PATH_PTS, S1, S2, _install_fake_tpl
 
-    from snap4city_mobility_mcp.geo import fmt_linestring
     wkt = fmt_linestring(PATH_PTS)
-    body = {"paths": [{
-        "wkt": wkt, "distance": 160.0,
-        "instructions": [
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [0, 1]},
-            {"text": "Pt_start_trip", "interval": [1, 2],
-             "leg": {"map": {"type": "pt", "travelTime": 120000, "route_name": "57"}}},
-            {"text": "Continue", "street_name": "", "distance": 80.0, "time": 57600, "leg": None, "interval": [2, 3]},
-        ],
-    }]}
-    _install_fake_httpx(monkeypatch, body=body)
+    _install_fake_httpx(monkeypatch, body=_bus_body(wkt, route_name="57"))
     _install_fake_tpl(monkeypatch, raise_exc=RuntimeError("tpl down"))
     out = await mcp_server.route.fn(43.0, 10.9995, 43.0, 11.0045, vehicle="bus")
     found = out["journey"]["routes"][0]
