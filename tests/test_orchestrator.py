@@ -274,6 +274,21 @@ async def test_execute_route_success(make_client, make_result):
     assert client.calls[-1][0] == "route"
 
 
+async def test_execute_surfaces_resolved_endpoint_labels(make_client, make_result):
+    """execute exposes the resolved endpoint labels (title-cased address + civic + city) so
+    the reply can echo 'Da ORIGIN a DESTINATION'."""
+    client = make_client([
+        make_result(structured=_fc_with_addresses((11.275, 43.774, "VIA CIRO MENOTTI", "19"))),  # origin
+        make_result(structured=_fc_with_addresses((11.264, 43.786, "VIA FAENTINA", "16"))),       # dest
+        make_result(structured=_journey()),                                                        # routing
+    ])
+    slots = {"intent": "route", "origin_text": "via ciro menotti 19, Firenze",
+             "destination_text": "via faentina 16, Firenze", "mode": "car"}
+    out = await execute({"slots": slots}, client=client)
+    assert out["labels"]["origin"] == "Via Ciro Menotti 19, Firenze"
+    assert out["labels"]["destination"] == "Via Faentina 16, Firenze"
+
+
 async def test_execute_unsupported_intent(make_client):
     client = make_client([])  # must never reach the client
     out = await execute({"slots": {"intent": "other"}}, client=client)
@@ -967,7 +982,9 @@ async def test_respond_composes_route_answer():
     assert "answer" not in response  # reply lives in messages[-1], not a custom field
     reply = response["messages"][-1]
     assert reply["role"] == "assistant"
-    assert "1.83 km" in reply["content"] and "00:23:18" in reply["content"]
+    # natural phrasing: km to 1 decimal, duration rounded to the minute (exact figures stay
+    # in the detail block); data keeps the precise distance.
+    assert "1.8 km" in reply["content"] and "circa 23 minuti" in reply["content"]
     assert response["data"]["distance_km"] == 1.83
 
 
@@ -1084,6 +1101,90 @@ async def test_respond_gps_covers_origin_asks_destination_only():
     assert "partenza" not in reply
 
 
+async def test_respond_bare_greeting_welcomes():
+    """A message that is only a greeting ('ciao') → a warm welcome + onboarding, NOT the dry
+    'unsupported' pitch (understand classes a bare greeting as 'other')."""
+    state = {
+        "intent": "other",
+        "messages": [{"role": "user", "content": "ciao"}],
+        "tool_results": [],
+        "unsupported": True,
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert reply.startswith("Ciao!")
+    assert "mobilità" in reply and "punto-punto" not in reply  # welcome, not the pitch
+
+
+async def test_respond_greets_on_first_turn_only():
+    """A short 'Ciao!' leads the FIRST-turn answer; a follow-up (a prior assistant turn in
+    history) answers directly with no greeting."""
+    route = _routing_entry("car", route=_journey()["journey"]["routes"][0])
+    slots = {"intent": "route", "mode": "car"}
+    first = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da A a B in auto"}],
+        "tool_results": [route],
+        "unsupported": False,
+        "slots": slots,
+    }
+    out = await respond(first)
+    assert out["response"]["messages"][-1]["content"].startswith("Ciao!")
+
+    followup = {
+        "intent": "route",
+        "messages": [
+            {"role": "user", "content": "da A a B in auto"},
+            {"role": "assistant", "content": "In auto 1.8 km, circa 23 minuti."},
+            {"role": "user", "content": "e a piedi?"},
+        ],
+        "tool_results": [route],
+        "unsupported": False,
+        "slots": slots,
+    }
+    out2 = await respond(followup)
+    assert not out2["response"]["messages"][-1]["content"].startswith("Ciao!")
+
+
+async def test_respond_leads_with_resolved_endpoints():
+    """The reply opens with 'Da ORIGIN a DESTINATION:' from the resolved endpoint labels (so
+    the user can spot a wrong geocode), then lists each mode on its own line."""
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "da via ciro menotti 19 a via faentina 16"}],
+        "tool_results": [
+            _routing_entry("car", route={"wkt": "L", "distance": 2.609, "time": "0:04:53"}),
+            _routing_entry("foot", route={"wkt": "L", "distance": 1.841, "time": "0:22:05"}),
+        ],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": ""},
+        "labels": {"origin": "Via Ciro Menotti 19, Firenze", "destination": "Via Faentina 16, Firenze"},
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert reply.startswith("Ciao! Da Via Ciro Menotti 19, Firenze a Via Faentina 16, Firenze:")
+    assert "\nIn auto: 2.6 km, circa 5 minuti" in reply  # one mode per line (newline-separated)
+    assert "\nA piedi: 1.8 km, circa 22 minuti" in reply
+    assert "L'opzione più veloce è in auto." in reply
+
+
+async def test_respond_lead_contracts_da_for_gps_origin():
+    """A GPS-default origin reads 'Dalla tua posizione ...' (da + la article contraction),
+    never the ungrammatical 'Da la tua posizione'."""
+    state = {
+        "intent": "route",
+        "messages": [{"role": "user", "content": "portami a via faentina 16"}],
+        "tool_results": [_routing_entry("foot", route={"wkt": "L", "distance": 1.0, "time": "0:12:00"})],
+        "unsupported": False,
+        "slots": {"intent": "route", "mode": "foot", "origin_text": ""},
+        "labels": {"origin": "la tua posizione (vicino a Via Zara)", "destination": "Via Faentina 16, Firenze"},
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert "Dalla tua posizione (vicino a Via Zara) a Via Faentina 16, Firenze:" in reply
+    assert "Da la tua posizione" not in reply
+
+
 # --- _format_detail (deterministic single-mode step block, Python not LLM) ----
 
 def _bus_arc_with_stops() -> list:
@@ -1187,7 +1288,7 @@ async def test_respond_no_detail_block_for_multi_mode():
     }
     out = await respond(state)
     reply = out["response"]["messages"][-1]["content"]
-    assert "Più veloce" in reply  # the multi-mode comparison names the fastest
+    assert "più veloce" in reply  # the multi-mode comparison names the fastest
     assert "Totale:" not in reply and "Partenza:" not in reply
 
 

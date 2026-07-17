@@ -154,6 +154,7 @@ class AdvisorState(TypedDict, total=False):
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
     unsupported: bool  # execute could not run a flow ("other" intent or missing slots)
     endpoints: dict[str, Any]  # precise resolved {origin, destination} {lat,lng} for the route
+    labels: dict[str, Any]  # resolved endpoint labels {origin, destination} for the reply's "Da .. a .." lead
     parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
     services: dict[str, list[dict[str, Any]]]  # along-route services per mode, when the user asked for a category
     departure: str  # requested departure "HH:MM" ('' = leave now), for the reply to state
@@ -484,8 +485,9 @@ async def execute(
         search: str,
         anchor: dict[str, Any] | None = None,
         anchor_city: Any = None,
-    ) -> tuple[list[float] | None, str | None]:
-        # Returns the picked ([lng, lat], city) — (None, None) when nothing resolves.
+    ) -> tuple[list[float] | None, str | None, str | None]:
+        # Returns the picked ([lng, lat], city, human label) — (None, None, None) when
+        # nothing resolves. The label ("Via X 12, Firenze") lets respond echo the endpoint.
         # `anchor` disambiguates same-name streets across towns (with no named city and
         # no GPS, the server's first hit once put a Florence trip's "via Pisana" in
         # Lucca): the pool candidate nearest to it wins. The destination anchors on the
@@ -515,13 +517,14 @@ async def execute(
                     # _nearest_service): respond reads the geocode entry to say how it
                     # read the place, and two entries for one endpoint would confuse it.
                     results.append(_audit("address_search_location", aug_args, aug, extra=f" (picked {coord})"))
-                    return coord, (picked.get("properties") or {}).get("city")
+                    return coord, (picked.get("properties") or {}).get("city"), _endpoint_label(picked)
         picked = _pick_feature(result, search, gps=anchor)
         coord = _feature_coords(picked) if picked else None
         results.append(_audit("address_search_location", args, result, extra=f" (picked {coord})"))
-        return coord, ((picked.get("properties") or {}).get("city") if picked and coord else None)
+        city = (picked.get("properties") or {}).get("city") if picked and coord else None
+        return coord, city, (_endpoint_label(picked) if picked and coord else None)
 
-    async def _nearest_service(anchor: list[float], category: str) -> list[float] | None:
+    async def _nearest_service(anchor: list[float], category: str) -> tuple[list[float] | None, str | None]:
         # Nearest service of `category` around anchor [lng, lat], widening the radius per
         # rung. Only the deciding call enters the audit: the winning rung (respond names
         # the found place from it), or the last empty one (so respond can explain a miss).
@@ -544,12 +547,12 @@ async def execute(
                     "nearest %s within %s km: %r", category, radius, nearest.get("name")
                 )
                 if nearest.get("lat") is not None and nearest.get("lng") is not None:
-                    return [nearest["lng"], nearest["lat"]]
-                return None
+                    return [nearest["lng"], nearest["lat"]], nearest.get("name")
+                return None, None
         if entry is not None:
             results.append(entry)
         logger.debug("nearest %s: no service within %s km", category, NEAREST_SERVICE_RADII_KM[-1])
-        return None
+        return None, None
 
     # Lazily-resolved GPS reverse geocode. The origin-default path needs it anyway
     # (respond's "dalla tua posizione (vicino a ...)" label) and its municipality feeds
@@ -569,7 +572,7 @@ async def execute(
 
     # --- origin: user text, else the GPS position itself (labelled via reverse geocode).
     if origin_text:
-        origin, origin_city = await _geocode(origin_text, user_gps, anchor_city=_gps_city)
+        origin, origin_city, origin_label = await _geocode(origin_text, user_gps, anchor_city=_gps_city)
     else:
         origin = [user_gps["lng"], user_gps["lat"]]
         rev_args = {"latitude": user_gps["lat"], "longitude": user_gps["lng"]}
@@ -580,6 +583,10 @@ async def execute(
             # trigger its error rule for a trip that is actually fine.
             results.append(_audit("coordinates_to_address", rev_args, rev))
         origin_city = _rev_municipality(rev)
+        # The origin label the reply echoes: "la tua posizione", enriched with the reverse-
+        # geocoded street when available.
+        addr = _rev_address(rev)
+        origin_label = f"la tua posizione (vicino a {addr.title()})" if addr else "la tua posizione"
 
     # --- destination: nearest-category service when asked, else plain text geocode.
     # Its geocodes anchor on the resolved origin (see _geocode), falling back to GPS;
@@ -588,27 +595,29 @@ async def execute(
     dest_anchor = {"lat": origin[1], "lng": origin[0]} if origin is not None else user_gps
     dest_anchor_city = origin_city
     dest = None
+    dest_label = None
     if dest_category:
         geocoded = None
+        geocoded_label = None
         if user_gps:
             anchor = [user_gps["lng"], user_gps["lat"]]
         else:
             # No GPS: anchor on the geocoded destination text ("farmacia, Pisa" lands in
             # Pisa via the named-city ladder), then snap to the nearest real service.
-            geocoded, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
+            geocoded, _, geocoded_label = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
             anchor = geocoded
         if anchor is not None:
-            dest = await _nearest_service(anchor, dest_category)
+            dest, dest_label = await _nearest_service(anchor, dest_category)  # label = found place name
         if dest is None:
             # Category miss (bad category name / nothing within the widest rung):
             # degrade to the text geocode so the trip still resolves when possible.
             # Without GPS the text was already geocoded above (never re-call it).
             if not user_gps:
-                dest = geocoded
+                dest, dest_label = geocoded, geocoded_label
             elif dest_text:
-                dest, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
+                dest, _, dest_label = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
     else:
-        dest, _ = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
+        dest, _, dest_label = await _geocode(dest_text, dest_anchor, anchor_city=dest_anchor_city)
 
     if origin is None or dest is None:
         return {"tool_results": results, "unsupported": False}  # geocode error: respond explains
@@ -741,6 +750,10 @@ async def execute(
         "tool_results": results,
         "unsupported": False,
         "endpoints": endpoints,
+        # How each endpoint was resolved, for the reply's "Da ORIGIN a DESTINATION:" lead
+        # (a geocoded address, "la tua posizione", or the found category place; None when
+        # the feature carried no address). Own-frontend/reply field, not the widget contract.
+        "labels": {"origin": origin_label, "destination": dest_label},
         "parking": parking,
         "services": services,
         # HH:MM only (never a date or seconds, L43): this is the one form the reply may print.
@@ -1026,49 +1039,97 @@ def _category_it(category: str, *, plural: bool = False) -> str:
     return category.replace("_", " ").lower()
 
 
-def _audit_entry(results: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    """First audit entry with the given tool name, or None."""
-    return next((e for e in results if e.get("name") == name), None)
+def _endpoint_label(feature: dict[str, Any] | None) -> str | None:
+    """A human 'Via Ciro Menotti 19, Firenze' from a picked geocode feature (address +
+    civic + city, title-cased), or None when the feature carries no address. Lets the reply
+    echo how each endpoint was resolved so the user can spot a wrong geocode."""
+    props = (feature or {}).get("properties") or {}
+    addr = props.get("address")
+    if not (isinstance(addr, str) and addr.strip()):
+        return None
+    label = addr.strip().title()
+    civic = props.get("civic")
+    if civic is not None and str(civic).strip():
+        label += f" {str(civic).strip()}"
+    city = props.get("city")
+    if isinstance(city, str) and city.strip():
+        label += f", {city.strip().title()}"
+    return label
 
 
-def _rev_address(entry: dict[str, Any]) -> str | None:
-    """The best candidate's street address from a coordinates_to_address entry, or None."""
-    rev = entry.get("result")
+def _rev_address(rev: Any) -> str | None:
+    """The best candidate's street address from a coordinates_to_address RESULT, or None
+    (mirrors _rev_municipality — takes the raw reverse-geocode result, not an audit entry)."""
     if isinstance(rev, dict) and "error" not in rev:
-        res = rev.get("result")
-        if isinstance(res, list) and res and isinstance(res[0], dict):
-            addr = res[0].get("address")
+        entries = rev.get("result")
+        if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+            addr = entries[0].get("address")
             if isinstance(addr, str) and addr.strip():
                 return addr.strip()
     return None
 
 
-def _route_bits(route: dict[str, Any]) -> list[str]:
-    """A route's user-facing figures: ['1.83 km', '0:23:18'] (either may be absent)."""
-    bits = []
-    if route.get("distance_km") is not None:
-        bits.append(f"{route['distance_km']} km")
-    if route.get("duration"):
-        bits.append(str(route["duration"]))
-    return bits
+def _human_km(km: Any) -> str | None:
+    """A distance as natural Italian '2.6 km' (1 decimal, trailing zero trimmed), or None."""
+    if not isinstance(km, (int, float)):
+        return None
+    return f"{km:.1f}".rstrip("0").rstrip(".") + " km"
 
 
-def _route_sentences(routes: list[dict[str, Any]]) -> list[str]:
-    """The route comparison as Italian sentences: one 'A piedi: … ; in auto: …' line (first
-    label capitalized), plus a 'Più veloce: …' line when more than one mode is present."""
-    parts = []
+def _human_duration(duration: Any) -> str | None:
+    """A duration as natural Italian 'circa 5 minuti' (rounded to the minute), or None. The
+    exact H:MM:SS stays in each route's detail block; the chat lead reads like a person."""
+    mins = _route_minutes({"duration": duration})
+    if mins == float("inf"):
+        return None
+    m = max(1, round(mins))
+    return "circa un minuto" if m == 1 else f"circa {m} minuti"
+
+
+def _mode_phrase(route: dict[str, Any]) -> str:
+    """One mode as a natural fragment: 'in auto 2.6 km, circa 5 minuti' (figures omitted
+    when absent, so a route with no ETA still reads 'in auto 2.6 km')."""
+    label = _MODE_LABEL.get(route.get("mode") or "", "il percorso")
+    tail = ", ".join(
+        p for p in (_human_km(route.get("distance_km")), _human_duration(route.get("duration"))) if p
+    )
+    return f"{label} {tail}" if tail else label
+
+
+def _route_block(routes: list[dict[str, Any]]) -> str:
+    """The route comparison as a tidy multi-line block: one 'In auto: 2.6 km, circa 5 minuti'
+    line per mode (newline-separated — the chat bubble renders \\n via white-space: pre-wrap),
+    plus a fastest-option line when more than one mode is present. '' when nothing is drawable."""
+    lines = []
     for r in routes:
-        bits = _route_bits(r)
-        if bits:
-            label = _MODE_LABEL.get(r.get("mode") or "", "percorso")
-            parts.append(f"{label}: {' · '.join(bits)}")
-    if not parts:
-        return []
-    parts[0] = parts[0][:1].upper() + parts[0][1:]
-    out = ["; ".join(parts)]
+        tail = ", ".join(
+            p for p in (_human_km(r.get("distance_km")), _human_duration(r.get("duration"))) if p
+        )
+        if tail:
+            label = _MODE_LABEL.get(r.get("mode") or "", "percorso").capitalize()
+            lines.append(f"{label}: {tail}")
+    if not lines:
+        return ""
+    block = "\n".join(lines)
     if len(routes) > 1:
-        out.append(f"Più veloce: {_MODE_LABEL.get(routes[0].get('mode') or '', 'percorso')}")
-    return out
+        fastest = _MODE_LABEL.get(routes[0].get("mode") or "", "il percorso")
+        block += f"\nL'opzione più veloce è {fastest}."
+    return block
+
+
+# A message that is ONLY a greeting/pleasantry ("ciao", "buongiorno", "grazie"): the reply
+# welcomes the user instead of the dry "unsupported" pitch (the understand stage classes a
+# bare greeting as 'other'). Words are matched after stripping punctuation and casing.
+_GREETINGS = frozenset(
+    "ciao salve buongiorno buonasera buonanotte hey ehi hola hello hi".split()
+)
+_PLEASANTRIES = frozenset("grazie prego per favore piacere".split())
+
+
+def _is_greeting(text: str) -> bool:
+    """True when the user's message is nothing but a greeting/pleasantry."""
+    words = re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
+    return bool(words) and all(w in _GREETINGS or w in _PLEASANTRIES for w in words)
 
 
 def _compose_reply(
@@ -1080,26 +1141,39 @@ def _compose_reply(
     missing: list[str] | None,
     departure: str,
     services_found: bool,
+    first_turn: bool,
+    user_text: str,
+    labels: dict[str, Any],
 ) -> str:
     """The deterministic Italian reply (no LLM, L57).
 
     Everything it states is derived from execute's structured output: the routes
-    (fastest-first, from _extract_data), the requested departure, and a few audit entries
-    (the GPS reverse-geocode label, the category-destination place name). It reimplements
-    the cases the old respond prompt covered — missing endpoints, unsupported intent, a
-    route error, a single/multi-mode comparison, a public-transport degrade, and the
-    along-route-services acknowledgement — with no gateway round-trip and no fabrication
-    risk. Italian only (the dashboard's language); the reply lives in messages[-1].content.
+    (fastest-first, from _extract_data), the requested departure, and the resolved endpoint
+    `labels` (origin/destination — a geocoded address, "la tua posizione", or the found
+    category place). It reimplements the cases the old respond prompt covered — a bare
+    greeting, missing endpoints, unsupported intent, a route error, a single/multi-mode
+    comparison, a public-transport degrade, and the along-route-services acknowledgement —
+    with no gateway round-trip and no fabrication risk. The answer leads with a
+    "Da ORIGIN a DESTINATION:" line (so the user can spot a wrong geocode) then one line per
+    mode. A short "Ciao!" leads only on the FIRST turn (like the old prompt); follow-ups
+    answer directly. Italian only; the reply lives in messages[-1].content.
     """
+    if _is_greeting(user_text):
+        # Pure greeting: welcome + one-line onboarding, never the dry unsupported pitch.
+        return (
+            "Ciao! Sono l'assistente per la mobilità: dimmi da dove a dove vuoi andare "
+            "(a piedi, in auto o con i mezzi) e ti trovo il percorso."
+        )
+    hi = "Ciao! " if first_turn else ""
     if missing:
         labels = {
             "origin": "il punto di partenza (o la tua posizione)",
             "destination": "la destinazione",
         }
         asked = " e ".join(labels[m] for m in missing)
-        return f"Mi serve ancora {asked} per rispondere."
+        return hi + f"Mi serve ancora {asked} per rispondere."
     if unsupported:
-        return (
+        return hi + (
             "Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto "
             "o con i mezzi pubblici), anche verso il luogo più vicino di un certo "
             "tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla "
@@ -1111,28 +1185,30 @@ def _compose_reply(
         # an alternative — never echo the raw English error string.
         label = _MODE_LABEL.get((slots.get("mode") or "").strip())
         suffix = f" {label}" if label else ""
-        return (
+        return hi + (
             f"Non sono riuscito a calcolare il percorso{suffix}. "
             "Prova un altro mezzo o un indirizzo più preciso."
         )
 
-    sentences: list[str] = []
-    if departure:
-        sentences.append(f"Partenza alle {departure}")
-    # Trip from the user's own position: only when no origin text was given AND the GPS
-    # reverse-geocode was audited (a successful lookup — see execute's origin-default path).
-    if not (slots.get("origin_text") or "").strip():
-        rev = _audit_entry(results, "coordinates_to_address")
-        if rev is not None:
-            addr = _rev_address(rev)
-            sentences.append("Dalla tua posizione" + (f" (vicino a {addr})" if addr else ""))
-    # Category destination: name the nearest place the near-search resolved to.
-    if (slots.get("destination_category") or "").strip():
-        near = _audit_entry(results, "service_search_near_gps_position")
-        if near is not None:
-            spots = parse_service_features(near.get("result"))
-            if spots and spots[0].get("name"):
-                sentences.append(f"Destinazione più vicina: {spots[0]['name']}")
+    # Lead: "Da ORIGIN a DESTINATION[, partenza alle HH:MM]:" from execute's resolved
+    # endpoint labels — the user sees how each end was read and can spot a wrong geocode.
+    origin_label = (labels or {}).get("origin")
+    dest_label = (labels or {}).get("destination")
+    lead = None
+    if origin_label and dest_label:
+        # "da" contracts with the article of "la tua posizione" -> "dalla"; a street label is
+        # title-cased ("Via ...") with no article, so "da Via ...". Street labels never start
+        # with a lowercase "la ", so this cleanly tells the GPS-origin phrasing apart.
+        if origin_label.startswith("la "):
+            lead = f"Dalla {origin_label[3:]} a {dest_label}"
+        else:
+            lead = f"Da {origin_label} a {dest_label}"
+        if departure:
+            lead += f", partenza alle {departure}"
+        lead += ":"
+    elif departure:
+        lead = f"Partenza alle {departure}:"
+
     # A public-transport request that degraded to a walking-only journey (L39): _extract_data
     # relabelled the single route 'foot', but the audit still flags the degrade — say there is
     # no direct transit and give the walk. In a multi-mode run the real modes carry the answer
@@ -1142,24 +1218,24 @@ def _compose_reply(
         for e in results if e.get("name") == "routing"
     )
     if (slots.get("mode") or "").strip() == "public_transport" and degraded:
-        line = "Non c'è un collegamento diretto con i mezzi pubblici"
-        bits = _route_bits(routes[0])
-        if bits:
-            line += f"; a piedi: {' · '.join(bits)}"
-        sentences.append(line)
+        base = "Non c'è un collegamento diretto con i mezzi pubblici"
+        has_figures = _human_km(routes[0].get("distance_km")) or _human_duration(routes[0].get("duration"))
+        body = f"{base}, ma {_mode_phrase(routes[0])}." if has_figures else base + "."
     else:
-        sentences.extend(_route_sentences(routes))
+        body = _route_block(routes)
+
     # Along-route services the user asked to SEE: the pins are the answer; the reply only
-    # confirms (or reports none found). The plural label carries its article.
+    # confirms (or reports none found), on its own line. The plural label carries its article.
     services_category = (slots.get("services_category") or "").strip()
+    svc_line = None
     if services_category:
         plural = _category_it(services_category, plural=True)
-        sentences.append(
-            f"Ho segnato {plural} lungo il percorso sulla mappa"
+        svc_line = (
+            f"Ho segnato {plural} lungo il percorso sulla mappa."
             if services_found
-            else f"Non ho trovato {plural} lungo il percorso"
+            else f"Non ho trovato {plural} lungo il percorso."
         )
-    return ". ".join(s for s in sentences if s).strip() + "."
+    return hi + "\n".join(b for b in (lead, body, svc_line) if b)
 
 
 def _routing_entry_for(
@@ -1361,6 +1437,13 @@ async def respond(
         else None
     ) or None
 
+    # A greeting leads only on the FIRST turn (no prior assistant message, like the old
+    # prompt); the latest user message also drives the bare-greeting welcome. messages here is
+    # [history..., current user] — the assistant turn is appended after.
+    first_turn = not any(m.get("role") == "assistant" for m in messages)
+    user_text = next(
+        (m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""
+    )
     # Along-route services (services_category slot) are pins-only (data.routes[].services, L53):
     # the reply just acknowledges they are on the map (or reports none found). services_map is
     # non-empty only when the user asked AND some were found.
@@ -1372,6 +1455,9 @@ async def respond(
         missing=missing,
         departure=state.get("departure") or "",
         services_found=bool(services_map),
+        first_turn=first_turn,
+        user_text=user_text or "",
+        labels=state.get("labels") or {},
     )
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no
