@@ -34,7 +34,7 @@ from snap4city_mobility_mcp.orchestrator import (
 def _parking_search(*spots) -> dict:
     """service_search_near_gps_position envelope from (name, lng, lat) tuples, in the LIVE
     shape probe_parking.py captured: {"result": [[uris], {"Services": {"features": [...]}}]}.
-    The search carries NO free-spaces (that comes per-spot from service_info_dev)."""
+    The search carries NO free-spaces (parking is pins-only — none is ever fetched)."""
     features = [
         {
             "type": "Feature",
@@ -51,13 +51,6 @@ def _parking_search(*spots) -> dict:
     ]
     uris = [f["properties"]["serviceUri"] for f in features]
     return {"result": [uris, {"Services": {"features": features}}]}
-
-
-def _parking_realtime(free, capacity=200) -> dict:
-    """service_info_dev realtime response: latest binding carries free/total as strings."""
-    return {"realtime": {"head": {"vars": ["freeParkingLots", "capacity"]}, "results": {"bindings": [
-        {"freeParkingLots": {"value": str(free)}, "capacity": {"value": str(capacity)}},
-    ]}}}
 
 
 def _slots_response(arguments: str) -> dict:
@@ -537,23 +530,22 @@ async def test_execute_car_error_drops_parking(make_client, make_result):
 
 async def test_execute_parking_ladder_widens_on_empty(make_client, make_result):
     """An empty first parking rung re-searches wider (0.5 then 1 km — suburban destinations
-    often have no car park nearby); only the deciding (hit) call enters the audit, and the
-    pins still come out. A first-rung hit keeps costing a single call (other tests)."""
+    often have no car park nearby); the pins still come out. Parking is pins-only, so no
+    search entry is audited. A first-rung hit keeps costing a single call (other tests)."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # route (car)
         make_result(structured=_parking_search()),                   # parking rung 0.5 km: empty
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # rung 1.0 km: hit
-        make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
     near = [a for n, a in client.calls if n == "service_search_near_gps_position"]
     assert [a["maxdistance"] for a in near] == [0.5, 1.0]
-    assert out["parking"][0]["free_spaces"] == 5
-    audited = [e for e in out["tool_results"] if e["name"] == "service_search_near_gps_position"]
-    assert len(audited) == 1 and json.loads(audited[0]["args"])["maxdistance"] == 1.0
+    assert out["parking"][0]["name"] == "P1" and out["parking"][0]["free_spaces"] is None
+    # Parking is pins-only: the search entry is never audited (not in the LLM view).
+    assert not [e for e in out["tool_results"] if e["name"] == "service_search_near_gps_position"]
 
 
 # --- _extract_data -----------------------------------------------------------
@@ -615,15 +607,14 @@ async def test_execute_unspecified_mode_routes_all_three(make_client, make_resul
         make_result(structured=_journey()),                          # car
         make_result(structured=_journey()),                          # public_transport
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search (car in modes)
-        make_result(structured=_parking_realtime(5, 50)),            # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
     out = await execute({"slots": slots}, client=client)
     routetypes = [json.loads(e["args"])["routetype"] for e in out["tool_results"] if e["name"] == "routing"]
     assert routetypes == ["foot", "car", "public_transport"]
-    # car is among the modes → the parking entry is appended after all routing entries.
-    assert out["tool_results"][-1]["name"] == "service_search_near_gps_position"
-    assert out["parking"][0]["free_spaces"] == 5
+    # car is among the modes → parking pins come out, but pins-only: never audited.
+    assert not [e for e in out["tool_results"] if e["name"] == "service_search_near_gps_position"]
+    assert out["parking"][0]["name"] == "P1" and out["parking"][0]["free_spaces"] is None
 
 
 async def test_execute_explicit_mode_pays_no_bus_latency(make_client, make_result):
@@ -652,7 +643,6 @@ async def test_execute_stages_are_reported_in_order(make_client, make_result):
         make_result(structured=_journey()),                          # car
         make_result(structured=_journey()),                          # public_transport
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),
-        make_result(structured=_parking_realtime(5, 50)),
     ])
     seen = []
     slots = {"intent": "route", "origin_text": "Duomo, Firenze", "destination_text": "Santa Croce, Firenze", "mode": ""}
@@ -815,47 +805,21 @@ def test_parse_service_features_reads_nested_service_envelope():
     assert mcp_tools.parse_service_features(live)[0]["name"] == "P"
 
 
-def test_read_parking_realtime():
-    """Latest free/total from a service_info_dev realtime binding; absent → None."""
-    rt = mcp_tools.read_parking_realtime(_parking_realtime(31, 202))
-    assert rt == {"free_spaces": 31, "total_spaces": 202}
-    assert mcp_tools.read_parking_realtime({"realtime": {}}) == {"free_spaces": None, "total_spaces": None}
-    assert mcp_tools.read_parking_realtime({"error": "x"}) == {"free_spaces": None, "total_spaces": None}
-
-
-async def test_enrich_parking_fills_free_and_resorts(make_client, make_result):
-    """_enrich_parking calls service_info_dev per spot, fills live free-spaces, and re-sorts
-    so a farther parking with known free outranks a nearer one without realtime."""
-    from snap4city_mobility_mcp.orchestrator import _enrich_parking
-    spots = [
-        {"name": "near_nodata", "uri": "http://near", "lat": 43.771, "lng": 11.250, "distance_km": 0.1, "free_spaces": None},
-        {"name": "far_30free", "uri": "http://far", "lat": 43.780, "lng": 11.260, "distance_km": 1.2, "free_spaces": None},
-    ]
-    client = make_client([
-        make_result(structured={"realtime": {}}),              # near → no realtime
-        make_result(structured=_parking_realtime(30, 200)),    # far → 30 free
-    ])
-    out = await _enrich_parking(client, spots)
-    assert out[0]["name"] == "far_30free" and out[0]["free_spaces"] == 30 and out[0]["total_spaces"] == 200
-    assert out[1]["name"] == "near_nodata" and out[1]["free_spaces"] is None
-
-
-async def test_execute_car_enriches_parking(make_client, make_result):
-    """Car route → search car parks, then enrich each with live free-spaces via service_info_dev."""
+async def test_execute_car_finds_parking_pins(make_client, make_result):
+    """Car route → search car parks near the destination for map pins. NOT audited (pins-only,
+    absent from the LLM view) and NOT enriched (no service_info_dev call): free_spaces stays
+    None — the widget resolves each pin's own live availability."""
     client = make_client([
         make_result(structured=_feature_collection(11.24, 43.77)),  # geocode origin
         make_result(structured=_feature_collection(11.26, 43.76)),  # geocode dest
         make_result(structured=_journey()),                          # routing (car)
         make_result(structured=_parking_search(("P1", 11.26, 43.76))),  # parking search
-        make_result(structured=_parking_realtime(42, 100)),          # P1 realtime enrichment
     ])
     slots = {"intent": "route", "origin_text": "A, Firenze", "destination_text": "B, Firenze", "mode": "car"}
     out = await execute({"slots": slots}, client=client)
-    assert out["parking"][0]["name"] == "P1"
-    assert out["parking"][0]["free_spaces"] == 42 and out["parking"][0]["total_spaces"] == 100
-    # the enrichment call hit service_info_dev but is NOT in the audit (internal only)
-    assert any(n == "service_info_dev" for n, _ in client.calls)
-    assert not any(e["name"] == "service_info_dev" for e in out["tool_results"])
+    assert out["parking"][0]["name"] == "P1" and out["parking"][0]["free_spaces"] is None
+    assert not any(n == "service_info_dev" for n, _ in client.calls)
+    assert not [e for e in out["tool_results"] if e["name"] == "service_search_near_gps_position"]
 
 
 async def test_execute_foot_only_skips_parking(make_client, make_result):
@@ -1135,24 +1099,6 @@ def test_results_view_carries_the_requested_departure():
     assert "departure_time" not in _results_view(entry, unsupported=False)
 
 
-def test_results_view_parking_item_carries_the_live_free_spaces():
-    """The LLM's car-park item speaks for the ENRICHED list (free-spaces from service_info_dev),
-    not the raw search: the search envelope never carries occupancy (L33), so re-slimming it
-    would show free_spaces: null on every spot and the reply could never say there are free
-    spots. Without an enriched list, the raw search still speaks (availability unknown)."""
-    entry = [{
-        "name": "service_search_near_gps_position",
-        "args": json.dumps({"categories": "Car_park"}),
-        "result": _parking_search(("P1", 11.26, 43.76)),
-    }]
-    parking = [{"name": "P1", "free_spaces": 31, "total_spaces": 202, "distance_km": 0.08}]
-    item = _results_view(entry, unsupported=False, parking=parking)["results"][0]
-    assert item["categories"] == "Car_park"
-    assert item["result"] == {"count": 1, "services": [{"name": "P1", "free_spaces": 31}]}
-    raw = _results_view(entry, unsupported=False)["results"][0]
-    assert raw["result"]["services"][0]["free_spaces"] is None
-
-
 def test_results_view_routing_item_carries_only_distance_and_time():
     """The LLM's routing view is stripped to distance + duration — no legs, no streets. With
     nothing to enumerate, the reply is concise by construction (the Python detail block owns
@@ -1235,9 +1181,10 @@ def test_format_detail_missing_arc_yields_totals_only():
     assert _format_detail(results, route) == "Totale: 1.83 km · 00:23:18"
 
 
-async def test_respond_appends_detail_block_for_single_mode(make_llm):
-    """A single-mode request with a drawable route → the concise LLM reply gets the
-    deterministic step block appended (fermate + orari for bus)."""
+async def test_respond_single_mode_detail_on_route_not_reply(make_llm):
+    """A single-mode request → the deterministic step block rides routes[0].detail (the
+    front-end renders it as a structured bubble), NOT the reply text: the concise LLM reply
+    stays clean so the block never leaks into the next turn's history."""
     llm = make_llm([_text_response("In autobus, circa 42.6 km.")])
     state = {
         "intent": "route",
@@ -1250,8 +1197,10 @@ async def test_respond_appends_detail_block_for_single_mode(make_llm):
     }
     out = await respond(state, llm=llm)
     reply = out["response"]["messages"][-1]["content"]
-    assert "In autobus, circa 42.6 km." in reply  # the LLM lead survives
-    assert "Linea 56" in reply and "PONTE MOSSE" in reply and "17:45" in reply  # block appended
+    assert reply == "In autobus, circa 42.6 km."  # reply is the LLM lead only, no block
+    assert "Linea 56" not in reply and "Totale:" not in reply
+    detail = out["response"]["data"]["routes"][0].get("detail")
+    assert detail and "Linea 56" in detail and "PONTE MOSSE" in detail and "17:45" in detail
 
 
 async def test_respond_no_detail_block_for_multi_mode(make_llm):
@@ -1307,25 +1256,6 @@ async def test_respond_attaches_detail_to_every_route_multi_mode(make_llm):
     assert "Via Ricasoli" in by_mode["foot"]["detail"]
     # No arc in the car audit → departure + totals only, never a raise.
     assert by_mode["car"]["detail"] == "Partenza: 18:00\nTotale: 3.5 km · 00:08:00"
-
-
-async def test_respond_single_mode_detail_field_equals_appended_block(make_llm):
-    """Single-mode: the same pre-rendered detail rides both the payload (routes[0].detail)
-    and the reply tail — one rendering, no second _format_detail path to drift."""
-    llm = make_llm([_text_response("In autobus, circa 42.6 km.")])
-    state = {
-        "intent": "route",
-        "messages": [{"role": "user", "content": "da A a B in autobus"}],
-        "tool_results": [_routing_entry("public_transport", route={
-            "wkt": "LINESTRING(0 0,3 3)", "distance": 42.6, "time": "0:47:03", "arc": _bus_arc_with_stops(),
-        })],
-        "unsupported": False,
-        "slots": {"intent": "route", "mode": "public_transport"},
-    }
-    out = await respond(state, llm=llm)
-    detail = out["response"]["data"]["routes"][0].get("detail")
-    assert detail and "Linea 56" in detail
-    assert out["response"]["messages"][-1]["content"].endswith(detail)
 
 
 async def test_respond_no_detail_on_route_error(make_llm):

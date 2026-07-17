@@ -46,7 +46,6 @@ from snap4city_mobility_mcp.mcp_tools import (
     PARKING_CATEGORY,
     PARKING_MAX,
     PARKING_RADII_KM,
-    PARKING_REALTIME_FROMTIME,
     _build_config,
     _label_tokens,
     _local_config,
@@ -55,7 +54,6 @@ from snap4city_mobility_mcp.mcp_tools import (
     exec_tool,
     group_arc_legs,
     parse_service_features,
-    read_parking_realtime,
     reverse_geocode,
     slim_result_for_llm,
 )
@@ -95,8 +93,10 @@ LEAVE ("alle 18", "domani alle 9"); '' when they give none — NEVER invent one.
 </examples>"""
 
 RESPOND_SYSTEM = """\
-You are a friendly urban-mobility assistant. ALWAYS reply in the user's own language; \
-if it is unclear (e.g. a bare greeting), default to ITALIAN. Natural phrasing, lead \
+You are a friendly urban-mobility assistant. Reply in ITALIAN by default; switch to \
+another language ONLY when the user's message is clearly and unmistakably written in \
+it (not a foreign place name or a short ambiguous phrase) — when in doubt, use Italian. \
+Natural phrasing, lead \
 with the answer, keep it concise. A short greeting is fine ONLY on the FIRST turn \
 (the message says which); on a follow-up answer directly — no greeting, no sign-offs.
 Hard rules (never break these):
@@ -136,13 +136,8 @@ request is unsupported.
 position: say so ("dalla tua posizione", optionally "vicino a <address>" using ONLY \
 that entry's address). No origin given and no such entry → "dalla tua posizione \
 attuale", naming no street.
-- A `service_search_near_gps_position` entry whose `categories` is `Car_park` is \
-parking near the destination: ONE short closing sentence — how many car parks are \
-nearby and, if any `free_spaces` > 0, that there are free spots (else that live \
-availability is not known right now). Never list their names, addresses, or \
-coordinates: the map already shows the pins.
-- The same entry with any OTHER `categories` is how the destination was resolved — \
-the nearest place of that kind: name the found place (the first listed service) \
+- A `service_search_near_gps_position` entry is how a category destination was resolved \
+— the nearest place of that kind: name the found place (the first listed service) \
 naturally in the answer.
 - Status "unsupported": explain in your own words that for now you answer \
 point-to-point trip questions (on foot, by car, or by public transport), including \
@@ -721,9 +716,9 @@ async def execute(
         # it adds no wall-clock when routing is the long pole. Widening radius ladder like
         # _nearest_service: an empty rung re-searches wider (a suburban destination often has
         # no car park within the first rung — silently pinless before the ladder, L56), and
-        # only the deciding call becomes the entry: the winning rung, or the last empty one
-        # (so respond can still explain a miss). The search has no free-spaces; the live
-        # count is fetched per-spot afterwards (_enrich_parking). Returns the entry.
+        # only the deciding call becomes the entry: the winning rung, or the last empty one.
+        # The result carries only the spots' coordinates (no live free-spaces, and none is
+        # fetched — parking is pins-only). Returns the entry.
         entry: dict[str, Any] = {}
         for radius in PARKING_RADII_KM:
             p_args = {
@@ -759,8 +754,10 @@ async def execute(
     # Parking is only meaningful when a car route was actually found: if the car routing
     # failed (ZTL / route-not-found), there is nowhere to drive to, so we drop the parking
     # (the search was fetched concurrently above to add no wall-clock, and is simply discarded
-    # here). Parking entry goes after every routing entry so _extract_data (routing-only) is
-    # unaffected and _extract_parking finds it deterministically.
+    # here). The entry is NOT audited — parking is pins-only (data.parking → drawParkingPins),
+    # exactly like along-route services: the map pins ARE the answer, so the LLM view carries
+    # nothing about it (the old "N car parks, availability unknown" sentence was noise — the
+    # front-end never reads free_spaces, so live enrichment is skipped too).
     car_ok = any(
         m == "car"
         and isinstance(entry["result"], dict)
@@ -769,14 +766,10 @@ async def execute(
     )
     parking: list[dict[str, Any]] = []
     if parking_entry is not None and car_ok:
-        results.append(parking_entry)
-        # Build the nearest-N list (parse + Haversine distance + sort), then enrich each with
-        # its live free-spaces (service_info_dev per spot, concurrently). The entry is passed
-        # directly (not scanned from results): a category-destination search logs an entry
-        # under the same tool name, and only this one is parking.
-        spots = _extract_parking(parking_entry, {"lat": dest[1], "lng": dest[0]})
-        if spots:
-            parking = await _enrich_parking(client, spots)
+        # Nearest-N list (parse + Haversine distance + sort), nearest first. free_spaces stays
+        # None: the pins are widget-rendered from each serviceUri, which resolves its own live
+        # availability — our side needs only {name, lat, lng, uri, distance_km}.
+        parking = _extract_parking(parking_entry, {"lat": dest[1], "lng": dest[0]}) or []
 
     # Along-route services (referente item 3): only when the user named a category to see.
     # A second, sequential gather — the anchors are sampled FROM the routed geometry, so
@@ -806,32 +799,6 @@ async def execute(
         # departure rather than announcing "now".
         "departure": departure.strftime("%H:%M") if departure else "",
     }
-
-
-async def _enrich_parking(
-    client: Client, spots: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Fill each car park's live free/total spaces via service_info_dev (concurrent, one per
-    spot), then re-sort so spots with known availability come first (most free first), the
-    rest by distance. Plain POI car parks have no realtime → free stays None (degraded
-    display). The enrichment calls are NOT added to the audit (internal, not LLM-facing)."""
-
-    async def one(spot: dict[str, Any]) -> dict[str, Any]:
-        if not spot.get("uri"):
-            return spot
-        res = await exec_tool(
-            client, "service_info_dev",
-            {"serviceuri": spot["uri"], "fromtime": PARKING_REALTIME_FROMTIME},
-        )
-        rt = read_parking_realtime(res)
-        if rt["free_spaces"] is not None:
-            spot["free_spaces"] = rt["free_spaces"]
-        if rt["total_spaces"] is not None:
-            spot["total_spaces"] = rt["total_spaces"]
-        return spot
-
-    enriched = await asyncio.gather(*(one(s) for s in spots))
-    return sorted(enriched, key=_parking_sort_key)
 
 
 def _sample_polyline(
@@ -892,7 +859,7 @@ async def _along_route_services(
     """Services of `category` along each successfully routed mode: {mode: [spots]}.
 
     One near-search per anchor (anchors per _service_anchors), concurrent within a mode.
-    The calls are NOT audited — internal like _enrich_parking, and an audited non-Car_park
+    The calls are NOT audited — internal like the parking search, and an audited non-Car_park
     near-search entry would trip respond's "how the destination was resolved" rule. The
     LLM view carries nothing about them either: the map pins ARE the answer (the old
     one-sentence summary was dropped as noise, 2026-07-16). Spots are
@@ -1048,13 +1015,11 @@ def _extract_data(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {**routes[0], "routes": routes}
 
 
-def _parking_sort_key(s: dict[str, Any]) -> tuple[bool, float, float]:
-    """Sort key for car parks: spots with a known free-space count first (most free
-    first), then by distance; spots with unknown free (realtime not loaded, the agreed
-    degraded case) sort after, nearest first."""
-    free = s.get("free_spaces")
+def _parking_sort_key(s: dict[str, Any]) -> float:
+    """Sort key for car parks: nearest first. free_spaces is never fetched (pins-only, the
+    widget resolves each spot's live availability itself), so distance is the only order."""
     dist = s.get("distance_km")
-    return (free is None, -(free or 0), dist if dist is not None else float("inf"))
+    return dist if dist is not None else float("inf")
 
 
 def _extract_parking(
@@ -1062,14 +1027,13 @@ def _extract_parking(
 ) -> list[dict[str, Any]] | None:
     """Mine the parking search entry into the widget payload.
 
-    entry is the Car_park search's audit entry (passed directly by execute — a
-    category-destination search logs an entry under the same tool name). dest is the
-    resolved destination {"lat","lng"} (from the endpoints). Each spot gets a Haversine
-    distance from dest (the search envelope is not relied on for distance — units are
-    unverified, L-style probe discipline). Sort: spots with a known free-space count
-    first (most free first), then by distance; spots with unknown free (realtime not
-    loaded, the agreed degraded case) sort after, nearest first. Capped to PARKING_MAX.
-    None when the entry is empty/errored (route still returned without it)."""
+    entry is the Car_park search entry (passed directly by execute — NOT audited, parking
+    is pins-only). dest is the resolved destination {"lat","lng"} (from the endpoints). Each
+    spot gets a Haversine distance from dest (the search envelope is not relied on for
+    distance — units are unverified, L-style probe discipline). Sorted nearest first and
+    capped to PARKING_MAX; free_spaces stays None (the widget resolves each pin's live
+    availability itself). None when the entry is empty/errored (route still returned without
+    it)."""
     spots = parse_service_features(entry.get("result"))
     if not spots:
         return None
@@ -1271,17 +1235,15 @@ def _results_view(
     unsupported: bool,
     missing: list[str] | None = None,
     departure: str = "",
-    parking: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compact, LLM-facing summary of what execute produced (no huge WKT).
 
     `departure` is the HH:MM the user asked to leave at ('' = they asked for no time): it
     rides at the root, not on a routing item, because it applies to the whole request.
 
-    `parking` is the ENRICHED car-park list (execute filled each spot's live free-spaces from
-    service_info_dev). The raw Car_park search entry in `results` carries no occupancy at all
-    (L33), so the parking item is rebuilt from this list instead — otherwise the model would
-    see free_spaces: null on every spot and could never say there are free spots."""
+    Parking is NOT in this view: it is pins-only (data.parking → drawParkingPins), like
+    along-route services — the map pins ARE the answer, so the parking search entry is never
+    audited (execute) and the LLM says nothing about car parks."""
     if missing:
         return {"status": "missing_place", "missing": missing}
     if unsupported:
@@ -1293,10 +1255,9 @@ def _results_view(
     view = []
     for e in results:
         name = e.get("name")
-        # Near-search entries ARE shown to the LLM (slimmed to count + per-spot name/
-        # free_spaces): the parking one feeds the availability sentence, a category-
-        # destination one names the found place. The map still plots parking pins
-        # (data.parking); the reply no longer lists spot names.
+        # A category-destination near-search (e.g. "farmacia più vicina") is the only
+        # service_search entry audited: slimmed, it lets the LLM name the found place. Parking
+        # never reaches here (not audited — pins-only), so no Car_park special-case is needed.
         item: dict[str, Any] = {"name": name}
         if name == "routing":
             # Keep only distance + duration in the LLM's view: it must never narrate legs
@@ -1323,26 +1284,6 @@ def _results_view(
             hint = _routing_hint(routetype, e.get("result"))
             if hint:
                 item["hint"] = hint
-        elif name == "service_search_near_gps_position":
-            # Surface the searched category: the prompt tells parking (Car_park) apart
-            # from a nearest-category destination by this field.
-            try:
-                item["categories"] = json.loads(e.get("args") or "{}").get("categories")
-            except (json.JSONDecodeError, TypeError):
-                pass
-            if item.get("categories") == PARKING_CATEGORY and parking:
-                # The car-park item speaks for the ENRICHED list (live free-spaces per spot),
-                # not the raw search: the search itself never carries occupancy (L33), so
-                # slimming the raw payload would only be overwritten here.
-                item["result"] = {
-                    "count": len(parking),
-                    "services": [
-                        {"name": p.get("name"), "free_spaces": p.get("free_spaces")}
-                        for p in parking[:PARKING_MAX]
-                    ],
-                }
-            else:
-                item["result"] = slim_result_for_llm(name, e.get("result"))
         else:
             item["result"] = slim_result_for_llm(name, e.get("result"))
         view.append(item)
@@ -1394,29 +1335,19 @@ async def respond(
             if svc:
                 r["services"] = svc
     # Every drawable route ships its deterministic step-by-step block (fermate + orari for
-    # bus, turn-by-turn streets for foot/car) as routes[i].detail: the dashboard's local mode
-    # picker shows it when the user taps an option, WITHOUT starting a new turn (a bus
-    # re-route costs 30-45s, L31). Built in Python from the audit, NOT the LLM (exact
-    # timetable; the LLM view carries no legs/streets). Small strings only — no raw arcs (the
-    # rule-8 note on data.arcs stands). Consumed by our own front-end, like data.origin/
+    # bus, turn-by-turn streets for foot/car) as routes[i].detail. The front-end owns ALL of
+    # its rendering (renderDetail): a single-route turn shows it under the reply, a multi-mode
+    # turn shows the tapped route's on selection — WITHOUT starting a new turn (a bus re-route
+    # costs 30-45s, L31), and WITHOUT it ever entering the reply text (so it never rides
+    # messages[-1].content into the next understand prompt). Built in Python from the audit,
+    # NOT the LLM (exact timetable; the LLM view carries no legs/streets). Small strings only —
+    # no raw arcs (the rule-8 note on data.arcs stands). Own front-end field like data.origin/
     # destination/parking.
     if intent == "route":
         for r in data.get("routes") or []:
             block = _format_detail(results, r, state.get("departure") or "")
             if block:
                 r["detail"] = block
-    # Single-mode request with a drawable route → that same block is ALSO appended to the
-    # reply below. Multi-mode (default) and failures get no block in the text — a concise
-    # comparison only (the picker covers the detail). Keyed off the mode the user asked for,
-    # but rendered for the route ACTUALLY drawn (data.routes[0]), so an explicit-bus request
-    # that degraded to a foot-only journey renders the walk while the concise reply still
-    # explains there was no direct bus.
-    requested_mode = ((state.get("slots") or {}).get("mode") or "").strip()
-    detail_route = (
-        data["routes"][0]
-        if intent == "route" and requested_mode and data.get("routes")
-        else None
-    )
     # A route intent execute refused means an endpoint was unresolvable (no text and
     # nothing covering it). respond then asks for it instead of claiming the request
     # is unsupported; a GPS-covered origin is never asked for.
@@ -1438,7 +1369,6 @@ async def respond(
         unsupported=unsupported,
         missing=missing,
         departure=state.get("departure") or "",
-        parking=parking,
     )
     answer: str | None = None
     try:
@@ -1467,8 +1397,6 @@ async def respond(
         pass  # fall back to the deterministic template below
     if answer is None:
         answer = _template_answer(data, unsupported=unsupported, missing=missing)
-    if detail_route and detail_route.get("detail"):
-        answer = answer.rstrip() + "\n\n" + detail_route["detail"]
 
     messages.append({"role": "assistant", "content": answer})
     # Widget JSON. The reply lives in messages[-1].content (OpenAI standard), with no

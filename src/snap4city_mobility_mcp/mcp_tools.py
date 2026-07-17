@@ -42,7 +42,6 @@ EXPOSED_TOOLS = (
     "coordinates_to_address",  # reverse geocode: labels a GPS-defaulted origin for the reply
     "route",  # local: all-modes (foot/car/bus) route via the What-If router (mcp_server.py, L19/L46)
     "service_search_near_gps_position",  # nearest-category POIs: car parks + "farmacia più vicina" destinations
-    "service_info_dev",  # latest realtime free-spaces for a car park (serviceUri + time window)
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
@@ -53,14 +52,11 @@ TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 # broken) so it is NOT local-only here.
 LOCAL_ONLY_TOOLS = frozenset({"route"})
 
-# Parking discovery (car routes): search car parks near the destination, then read live
-# free-spaces per spot. Calibrated by a JupyterHub probe (2026-06-26; the one-shot script is
-# gone, see git history):
-# - PARKING_CATEGORY="Car_park" CONFIRMED (serviceType "TransferServiceAndRenting_Car_park").
-# - The search result carries NO free-spaces; the live count is on the orion/IoT car-park
-#   entities and is fetched per-spot via service_info_dev, whose `realtime.results.bindings`
-#   (newest first) carry freeParkingLots/capacity as string values (read_parking_realtime).
-#   Plain POI car parks have no realtime → free stays None (the agreed degraded display).
+# Parking discovery (car routes): search car parks near the destination for MAP PINS only.
+# PARKING_CATEGORY="Car_park" CONFIRMED by a JupyterHub probe (2026-06-26; serviceType
+# "TransferServiceAndRenting_Car_park"). Live free-spaces are NOT fetched: the pins are
+# widget-rendered from each serviceUri (the widget resolves its own realtime), and the reply
+# says nothing about car parks — so our side needs only the search result's coordinates.
 PARKING_CATEGORY = "Car_park"  # probe-confirmed (2026-06-26)
 # Widening radius ladder (km) around the destination, like the nearest-category search: an
 # empty rung means "no car park within <radius>", so the next rung re-searches wider (a
@@ -69,7 +65,6 @@ PARKING_CATEGORY = "Car_park"  # probe-confirmed (2026-06-26)
 # I park".
 PARKING_RADII_KM = (0.5, 1.0)
 PARKING_MAX = 5
-PARKING_REALTIME_FROMTIME = "1-hour"  # service_info_dev window; bindings[0] is the latest reading
 
 
 async def _build_config() -> dict[str, Any]:
@@ -293,31 +288,6 @@ def group_arc_legs(arcs: list[Any]) -> list[dict[str, Any]]:
     return legs
 
 
-def read_parking_realtime(result: Any) -> dict[str, int | None]:
-    """Latest free/total spaces from a service_info_dev response for a car park.
-
-    Shape (JupyterHub probe, 2026-06-26): result["realtime"]["results"]["bindings"] is a
-    list newest-first; bindings[0] carries {"freeParkingLots": {"value": "31"},
-    "capacity": {"value": "202"}, ...} as string values. Returns {"free_spaces", "total_spaces"}
-    with None when realtime is absent (plain POI car parks) or unparseable."""
-    out: dict[str, int | None] = {"free_spaces": None, "total_spaces": None}
-    if not isinstance(result, dict):
-        return out
-    rt = result.get("realtime")
-    binds = (rt.get("results") or {}).get("bindings") if isinstance(rt, dict) else None
-    if not isinstance(binds, list) or not binds or not isinstance(binds[0], dict):
-        return out
-    latest = binds[0]
-    for key, field in (("freeParkingLots", "free_spaces"), ("capacity", "total_spaces")):
-        cell = latest.get(key)
-        val = cell.get("value") if isinstance(cell, dict) else None
-        try:
-            out[field] = int(float(val))
-        except (TypeError, ValueError):
-            pass
-    return out
-
-
 def _find_feature_list(obj: Any) -> list | None:
     """Locate the GeoJSON features list inside a service-search result of unknown nesting.
 
@@ -352,10 +322,10 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
     URIs, raw grouped GeoJSON, and flattened GeoJSON" (probe-native-tools.json); the live
     shape nests the features under result[1].Services (see _find_feature_list), already
     sorted by distance from the search point. Each item yields
-    {name, lat, lng, uri, free_spaces} with missing fields as None. free_spaces starts as
-    None on every spot: the search itself carries no occupancy (L33). A car park's live
-    count is fetched afterwards, per spot, from service_info_dev (read_parking_realtime,
-    driven by orchestrator._enrich_parking). Returns [] on error / unrecognized shape."""
+    {name, lat, lng, uri, free_spaces} with missing fields as None. free_spaces is always
+    None: the search carries no occupancy (L33) and none is fetched — car-park pins are
+    widget-rendered from each serviceUri (the widget resolves its own live availability), and
+    the field is kept only as the shape's placeholder. Returns [] on error/unknown shape."""
     if not isinstance(result, dict) or "error" in result:
         return []
     feats = _find_feature_list(result)
@@ -379,7 +349,7 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
             "lat": lat,
             "lng": lng,
             "uri": props.get("serviceUri") or props.get("serviceuri") or f.get("serviceUri"),
-            "free_spaces": None,  # filled from service_info_dev (car parks only)
+            "free_spaces": None,  # shape placeholder; never filled (parking is pins-only)
         })
     return out
 
@@ -454,10 +424,12 @@ def slim_result_for_llm(name: str, result: Any) -> Any:
                 streets.append(desc)
         return {"journey": {**base, "streets": streets}}
     if name == "service_search_near_gps_position":
+        # Only a category destination ("farmacia più vicina") reaches here now — parking is
+        # pins-only (never audited), so the model just needs the found place names.
         spots = parse_service_features(result)
         if spots:
             return {"count": len(spots), "services": [
-                {"name": s["name"], "free_spaces": s["free_spaces"]} for s in spots[:PARKING_MAX]
+                {"name": s["name"]} for s in spots[:PARKING_MAX]
             ]}
     return result
 

@@ -26,7 +26,8 @@ ROUTE PICKER: a multi-mode turn fills the #advChips dock (a fixed strip between 
 and the input row) with one mode-named chip per route ("A piedi" / "In auto" / "In
 autobus" - distance/ETA already live in the reply text) plus "Mostra tutte": tapping a
 chip redraws the map with ONLY that route, shows its pre-rendered step-by-step block
-(data.routes[].detail, built backend-side from the audit) as a chat bubble, and toggles
+(data.routes[].detail, built backend-side from the audit) as a STRUCTURED bubble (renderDetail:
+mode header + one styled row per street/fermata, What-If Instructions look), and toggles
 the parking pins (car chip shows them, foot/bus hides them) - all LOCAL, no new backend
 turn (a bus re-route costs 30-45s). The selection also echoes into the carried history so
 follow-ups keep the chosen mode in context. Every routes-bearing turn REPLACES the dock
@@ -50,7 +51,8 @@ missing icon field. A ride leg carries the real GTFS shape (backend swap via the
 API, L51); when no variant matches it degrades to the router's stop-to-stop chords (L44).
 PARKING (car routes): data.parking lists car parks near the destination; each is plotted on the
 map via the widgetMap "addSelectorPin" event (one per serviceUri, Snap4City's own pin pattern).
-No list in the chat: the reply text already sums up the availability in one sentence (L37).
+Pins-only: the reply says nothing about car parks (the widget resolves each pin's own live
+availability), same as along-route services - the map pins ARE the answer.
 SERVICES (user-asked category, L53): routes[i].services lists services along that route (bus:
 near board/alight stops + walking legs); same addSelectorPin pipeline, violet pins - the widget
 resolves each serviceUri itself and renders the service's own category icon, so pharmacy pins
@@ -80,6 +82,19 @@ CLAUDE.md rule 9). The .adv box fills the host container on its own (position: a
 .adv .msg.user { background: #1f2a44; border: 1px solid #f5c518; color: #f5c518; margin-left: auto; }
 .adv .msg.bot { background: #28324d; border: 1px solid #3a4564; }
 .adv .msg.err { background: #3a2330; border: 1px solid #ff8a8a; color: #ff8a8a; }
+/* Structured step block (renderDetail): a bold header row over one flex row per step. Own
+d-prefixed classes so nothing collides with the input .row below. All still .adv-scoped. */
+.adv .msg.detail { white-space: normal; }
+.adv .detail .dhd { display: flex; align-items: center; gap: 6px; font-weight: bold; padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid #3a4564; }
+.adv .detail .dhd .dico { font-size: 15px; }
+.adv .detail .dhd .dtot { margin-left: auto; font-weight: normal; color: #9aa6b8; font-size: 12px; white-space: nowrap; }
+.adv .detail .dstep { display: flex; align-items: baseline; gap: 8px; padding: 1px 0; }
+.adv .detail .dname { flex: 1; min-width: 0; word-wrap: break-word; }
+.adv .detail .dval { color: #9aa6b8; font-size: 12px; white-space: nowrap; }
+.adv .detail .dstop { padding-left: 18px; }
+.adv .detail .dstop .dname { color: #c7cfdd; }
+.adv .detail .dbus { border-left: 3px solid #ff7f00; padding-left: 7px; margin: 5px 0 2px; font-weight: bold; }
+.adv .detail .dpart { color: #9aa6b8; font-size: 12px; margin-bottom: 4px; }
 .adv .row { display: flex; gap: 6px; margin-top: 8px; }
 .adv #advInput { flex: 1; box-sizing: border-box; padding: 8px; border: none; border-radius: 4px; font-size: 13px; }
 .adv #advSend { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; background: #f5c518; color: #1f2a44; }
@@ -140,6 +155,8 @@ var SERVICE_PIN = { color1: "#8e44ad", color2: "#8e44ad", pinattr: "square", dis
 var MODE_COLORS = { foot: "#2ecc71", car: "#1e66ff", bus: "#ff7f00" };
 // Italian chip labels for the route picker, keyed by the front-end vehicle family.
 var MODE_LABELS = { foot: "A piedi", car: "In auto", bus: "In autobus" };
+// Emoji for the detail header, same keying (What-If Instructions-style maneuver cue).
+var MODE_ICONS = { foot: "🚶", car: "🚗", bus: "🚌" };
 // ---- State --------------------------------------------------------------
 var history = [];  // conversation messages carried turn to turn (run_advisor contract)
 var gpsDenied = false;  // remembered PERMISSION_DENIED: skip further prompts this session
@@ -171,6 +188,61 @@ cb(null);
 // ---- Chat UI ------------------------------------------------------------
 function addMsg(text, kind) {
 var $m = $("<div>").addClass("msg " + kind).text(text);
+$("#advChat").append($m);
+$("#advChat").scrollTop($("#advChat")[0].scrollHeight);
+return $m;
+}
+// "H:MM:SS" -> "5 min" / "1 h 47 min" (route.duration is a plain elapsed clock, never a date).
+function fmtDur(d) {
+if (!d) return "";
+var p = String(d).split(":");
+if (p.length < 2) return String(d);
+var h = parseInt(p[0], 10) || 0, m = parseInt(p[1], 10) || 0;
+return h > 0 ? h + " h " + m + " min" : m + " min";
+}
+// One step line: name (left, flex) + optional value (right, muted). extra = "dstop" indents it.
+function stepRow(name, val, extra) {
+var $r = $("<div>").addClass("dstep" + (extra ? " " + extra : ""));
+$r.append($("<span>").addClass("dname").text(name));
+if (val) $r.append($("<span>").addClass("dval").text(val));
+return $r;
+}
+// Structured render of a route's pre-built step block (route.detail, from backend _format_detail):
+// a bold header (mode icon + label + total km/ETA) over one styled row per step. Parses the
+// Italian-labelled lines the backend emits - "Totale:" (dropped, header owns it), "Partenza:",
+// "A piedi <km>", "Linea .../In autobus ..." (bus ride, colored bar), a foot/car "<street> (<km>)"
+// suffix, and 2-space-indented "  <stop>  HH:MM" fermate. Used for BOTH a single-route turn (under
+// the reply) and a tapped chip; matches the What-If Instructions panel look. Appends + scrolls
+// like addMsg, and returns the bubble.
+function renderDetail(route) {
+var veh = vehicleOf(route.mode);
+var $m = $("<div>").addClass("msg bot detail");
+var tot = [];
+if (route.distance_km != null) tot.push(route.distance_km + " km");
+if (route.duration) tot.push(fmtDur(route.duration));
+var $hd = $("<div>").addClass("dhd");
+$hd.append($("<span>").addClass("dico").text(MODE_ICONS[veh] || "📍"));
+$hd.append($("<span>").addClass("dlbl").text(MODE_LABELS[veh] || "Percorso"));
+if (tot.length) $hd.append($("<span>").addClass("dtot").text(tot.join(" · ")));
+$m.append($hd);
+(route.detail || "").split("\n").forEach(function (raw) {
+var line = raw.replace(/\s+$/, "");
+if (!line) return;
+if (/^Totale:/.test(line)) return;  // header already carries the total
+var mPart = line.match(/^Partenza:\s*(.+)$/);
+if (mPart) { $m.append($("<div>").addClass("dpart").text("Partenza " + mPart[1])); return; }
+var mStop = line.match(/^\s{2,}(.+?)(?:\s{2,}(\d{1,2}:\d{2}))?$/);  // indented bus fermata
+if (mStop) { $m.append(stepRow(mStop[1], mStop[2] || "", "dstop")); return; }
+var mWalk = line.match(/^A piedi\s+(.+)$/);
+if (mWalk) { $m.append(stepRow("🚶 A piedi", mWalk[1], "")); return; }
+if (/^(Linea |In autobus)/.test(line)) {
+$m.append($("<div>").addClass("dbus").css("border-left-color", MODE_COLORS.bus).text(line));
+return;
+}
+var mStreet = line.match(/^(.+?)\s+\(([\d.]+ km)\)$/);  // foot/car "Via X (0.09 km)"
+if (mStreet) { $m.append(stepRow(mStreet[1], mStreet[2], "")); return; }
+$m.append(stepRow(line, "", ""));  // fallback: name only
+});
 $("#advChat").append($m);
 $("#advChat").scrollTop($("#advChat")[0].scrollHeight);
 return $m;
@@ -217,9 +289,8 @@ drawServicePins(route.services || []);
 $box.find(".chip").removeClass("sel");
 $chip.addClass("sel");
 var echo = "Scelgo l'opzione: " + label;
-var text = route.detail || label;
 addMsg(echo, "user");
-addMsg(text, "bot");
+if (route.detail) renderDetail(route); else addMsg(label, "bot");
 // Only the USER echo goes into the carried history: that one line is all a follow-up's
 // understand needs to keep the chosen mode in context, while the detail block (stop
 // lists, streets) would ride into every later LLM prompt as a few hundred tokens of
@@ -468,10 +539,14 @@ try {
 drawRoutes(routes, data.origin, data.destination);
 if (routes.length > 1) addChoices(routes, data.origin, data.destination, data.parking);
 } catch (e) { addMsg("(percorso non disegnabile: " + e.message + ")", "err"); }
+// A single-route turn (mode specified, or only one route came back) has no picker, so its
+// step block goes straight under the reply as a structured bubble (multi-mode shows it per
+// chip instead). The concise reply text no longer carries it (backend stopped appending).
+if (routes.length === 1 && routes[0].detail) renderDetail(routes[0]);
 // Parking pins live and die with the map content: refreshed only on a routes-bearing
 // turn (drawParkingPins clears first, so a non-car turn wipes the previous car's pins).
 // A routes-less turn (chat, follow-up question) leaves lines, dock AND pins alone.
-// The availability is stated in the reply text, not a list.
+// The reply says nothing about car parks now - the pins ARE the answer (pins-only, L53).
 drawParkingPins(data.parking);
 // Along-route service pins: the union across routes while every line is shown (the
 // chips then narrow the set per route). Same lifecycle as parking - a turn without a
