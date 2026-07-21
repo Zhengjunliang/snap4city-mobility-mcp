@@ -1,30 +1,26 @@
-# Examples — output di esempio
+# Examples — output reali dell'advisor
 
-File JSON con l'output reale di alcuni turni dell'advisor (il "widget JSON" restituito dal bridge),
-catturati durante i test sulla **Snap4City JupyterHub**. Servono come esempi di test / dati di
-input-output per la consegna (istruzione: "esempi di test", "file dati input e output").
+File JSON con l'output completo ("widget JSON") di alcuni turni reali dell'advisor,
+catturati durante i test sulla **Snap4City JupyterHub**. Servono come esempi di test e
+come file di dati input/output per la consegna.
 
-## Come produrli
+Ogni turno scrive `outputs.txt` (nella cwd del bridge, `.gitignore`d) con il JSON completo;
+questi file sono copie di quei risultati.
 
-Ogni turno sovrascrive `outputs.txt` (nella cwd del bridge, `.gitignore`d) con il JSON completo del
-turno. Eseguire i test descritti in `README.md` §3, poi **copiare** il contenuto di `outputs.txt`
-in un file qui con il nome corrispondente:
+## File presenti
 
-| File | Scenario | Query di esempio |
+| File | Scenario | Contenuto principale |
 |---|---|---|
-| `route-foot.json` | Rotta a piedi (modo singolo) | *"da Piazza del Duomo a Santa Croce a piedi"* |
-| `route-tre-modi.json` | Tre modi in un turno | *"da Piazza del Duomo a Santa Croce"* |
-| `route-bus.json` | Trasporto pubblico con leg | *"da Piazza del Duomo a Santa Croce in autobus"* |
-| `near-farmacia.json` | Categoria vicino al GPS | *"portami alla farmacia più vicina"* |
+| `route-tre-modi.json` | Turno a tre modi (nessun modo indicato) | tre rotte sullo stesso tragitto — auto 2,872 km / 0:04:07, trasporto pubblico 2,715 km / 0:16:59, a piedi 2,010 km / 0:24:07 — ciascuna con la propria geometria e il proprio `detail` |
+| `route-bus.json` | Trasporto pubblico, tragitto più lungo | rotta bus 6,936 km / 0:32:10 con i `legs` walk/ride separati (geometria per tratta e fermate di salita/discesa) |
+| `near-servizi.json` | Auto + servizi lungo il percorso | rotta in auto 40,478 km / 0:33:58 con l'elenco dei servizi campionati lungo il tragitto, ordinati per distanza dall'ancora |
 
 ## Formato
 
-La forma del payload è documentata in `README.md` → "The widget payload":
-`status`, `request_type`, `data` (`wkt`, `distance_km`, `duration`, `mode`, `routes[]`, per il bus
-anche `legs[]`) e `messages[]` (ultimo turno `assistant` = testo della risposta).
+La forma del payload è documentata in `README.md` → "The widget payload": `status`,
+`request_type`, `data` (`wkt`, `distance_km`, `duration`, `mode`, `routes[]`, e per il bus
+anche `legs[]`) e `messages[]` (l'ultimo turno `assistant` è il testo della risposta).
 
-## Note
-
-- Il widget JSON non contiene segreti (solo coordinate geografiche pubbliche): nessuna sanitizzazione
-  necessaria oltre a non includere `job_id` / `stage` (che comunque vivono solo nel livello di
-  trasporto e non entrano nel payload).
+I file non contengono segreti: solo coordinate geografiche e nomi di servizi pubblici.
+`job_id` e `stage` non compaiono perché vivono solo nel livello di trasporto del bridge e
+non entrano mai nel payload.

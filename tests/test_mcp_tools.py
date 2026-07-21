@@ -1,17 +1,12 @@
 """Unit tests for the deterministic MCP layer (mcp_tools.py).
 
 Lean core suite: the two-pass geocode with named-city preference (L17/L41, worldwide
-since the Tuscany bbox removal), the nearest-service parsing, the LLM-context slimming
-(L12), and the contract that every exposed tool exists in the live probe.
+since the Tuscany bbox removal), the nearest-service parsing, and the LLM-context
+slimming (L12).
 """
 import json
-import pathlib
-
-import pytest
 
 from snap4city_mobility_mcp.mcp_tools import (
-    LOCAL_ONLY_TOOLS,
-    TOOL_NAMES,
     _unwrap,
     exec_tool,
     geocode_cache_clear,
@@ -141,6 +136,15 @@ def test_parse_service_features_reads_nested_envelope():
     assert spots[0]["lng"] == 11.25459 and spots[0]["lat"] == 43.77349
     assert spots[0]["uri"] == "http://km4city/f1"
     assert spots[0]["free_spaces"] is None
+    # Defensive: the singular `Service` wrapper and the alternate property spellings
+    # (serviceName / serviceuri) the backend also returns.
+    singular = {"Service": {"features": [
+        {"geometry": {"coordinates": [11.25, 43.77]},
+         "properties": {"serviceName": "Garage X", "serviceuri": "http://x"}},
+    ]}}
+    assert parse_service_features(singular) == [
+        {"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": None}
+    ]
 
 
 def test_parse_service_features_error_gives_empty():
@@ -238,29 +242,3 @@ def test_slim_routing_multimodal_keeps_only_board_and_alight():
     assert ride["alight"] == {"name": "ACC. DEL CIMENTO ARTOM", "time": "08:34"}
     assert "S7" not in json.dumps(slim)   # no intermediate stop reaches the prompt
     assert "2026-07-06" not in json.dumps(slim)  # no ISO instant left to copy a date/seconds from
-
-
-# --- contract: exposed tools exist in the live probe -------------------------
-
-def _collect_names(obj, acc):
-    if isinstance(obj, dict):
-        name = obj.get("name")
-        if isinstance(name, str):
-            acc.add(name)
-        for v in obj.values():
-            _collect_names(v, acc)
-    elif isinstance(obj, list):
-        for v in obj:
-            _collect_names(v, acc)
-
-
-def test_exposed_tools_exist_in_probe():
-    probe = pathlib.Path(__file__).resolve().parents[1] / "probe-native-tools.json"
-    if not probe.exists():
-        pytest.skip("probe-native-tools.json not present")
-    names: set = set()
-    _collect_names(json.loads(probe.read_text(encoding="utf-8")), names)
-    # Local-only tools (route) live on our own MCP server, not referente's, so they
-    # are not expected in the referente probe.
-    missing = TOOL_NAMES - LOCAL_ONLY_TOOLS - names
-    assert not missing, f"exposed tools absent from probe: {missing}"

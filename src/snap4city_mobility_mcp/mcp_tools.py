@@ -319,7 +319,7 @@ def parse_service_features(result: Any) -> list[dict[str, Any]]:
 
     Used for every nearest-category search: car parks near the destination AND a
     category destination ("farmacia più vicina"). The backend envelope is "an array of
-    URIs, raw grouped GeoJSON, and flattened GeoJSON" (probe-native-tools.json); the live
+    URIs, raw grouped GeoJSON, and flattened GeoJSON" (the tool's own schema); the live
     shape nests the features under result[1].Services (see _find_feature_list), already
     sorted by distance from the search point. Each item yields
     {name, lat, lng, uri, free_spaces} with missing fields as None. free_spaces is always

@@ -1,25 +1,26 @@
 # Screenshots
 
-Sottocartella con le immagini degli snapshot delle schermate (istruzione di consegna, punto "screenshots").
-Le immagini vanno catturate eseguendo l'advisor sulla **Snap4City JupyterHub** con la dashboard attiva
-(vedi `README.md` §3), poi salvate qui con i nomi elencati sotto. La relazione le richiama da
-`relazione/figures/`.
+Sottocartella con le immagini degli snapshot delle schermate (istruzione di consegna).
+Sono catture reali dell'advisor in funzione sulla dashboard Snap4City, eseguito dalla
+**Snap4City JupyterHub** con i due processi attivi (vedi `README.md` §3). La relazione in
+`relazione/` richiama queste immagini.
 
-## Immagini da catturare
+## Immagini presenti
 
-| File | Scenario | Query di esempio | Cosa deve mostrare |
-|---|---|---|---|
-| `01-tre-modi.png` | Tre modi (default) | *"da Piazza del Duomo a Santa Croce"* | le tre rotte (a piedi / auto / trasporto pubblico) disegnate insieme sulla mappa + risposta di confronto |
-| `02-modo-singolo.png` | Modo singolo | *"da Piazza del Duomo a Santa Croce a piedi"* | una sola rotta (a piedi) sulla mappa |
-| `03-gps-vicino.png` | Categoria vicino alla posizione (GPS) | *"portami alla farmacia più vicina"* | origine = posizione GPS, destinazione = servizio più vicino trovato |
-| `04-servizi-lungo-percorso.png` | Servizi lungo il percorso | *"da A a B con le farmacie lungo il percorso"* | rotta + pin viola dei servizi campionati lungo il tragitto |
-| `05-bus-legs.png` | Trasporto pubblico (leg walk/ride) | *"da A a B in autobus"* | geometria per-leg a due colori (tratti a piedi + tratto in bus con pin fermata) |
-| `06-chips-dettaglio.png` | Selettore rotte + dettaglio | (un turno a tre modi, poi click su una chip) | dock delle chip fra chat e input + bolla di dettaglio della rotta scelta |
-| `07-parcheggi.png` | Parcheggi (modo auto) | *"da A a B in auto"* | pin dei parcheggi vicino alla destinazione con posti liberi |
+| File | Scenario | Cosa mostra |
+|---|---|---|
+| `01-tre-modi.png` | Tre modi in un turno (nessun modo indicato) | le tre rotte — a piedi, in auto, in trasporto pubblico — disegnate insieme sulla mappa, con la risposta di confronto e il dock delle chip |
+| `01-tre-modi-piedi.png` | Selezione chip "A piedi" | dopo il turno a tre modi, la chip ridisegna la sola rotta pedonale e apre la bolla di dettaglio |
+| `01-tre-modi-auto.png` | Selezione chip "In auto" | la sola rotta in auto + dettaglio + pin dei parcheggi |
+| `01-tre-modi-multimodale.png` | Selezione chip "In autobus" | la sola rotta in trasporto pubblico, con la geometria per-leg (tratti a piedi + tratto in bus) e i pin delle fermate |
+| `02-modo-singolo-piedi.png` | Richiesta esplicita "a piedi" | turno a modo singolo: una sola rotta calcolata e disegnata |
+| `02-modo-singolo-auto.png` | Richiesta esplicita "in auto" | idem, modo auto |
+| `02-modo-singolo-multimodale.png` | Richiesta esplicita "in autobus" | idem, trasporto pubblico (non paga l'attesa degli altri modi) |
+| `03-gps-vicino.png` | Destinazione per categoria vicino alla posizione | origine presa dal GPS del browser, destinazione risolta come servizio più vicino della categoria richiesta |
+| `04-servizi-lungo-percorso.png` | Servizi lungo il percorso | rotta con i pin viola dei servizi della categoria richiesta, campionati lungo il tragitto |
 
 ## Note
 
-- Formato PNG, ritaglio sulla finestra della dashboard (chat box + widgetMap).
-- I nomi file sono richiamati come figure nella relazione: mantenerli invariati o aggiornare
+- Le immagini sono catture della finestra della dashboard (chat box + widgetMap).
+- I nomi dei file sono richiamati come figure nella relazione: se si rinominano, aggiornare
   di conseguenza i `\includegraphics` in `relazione/relazione.tex`.
-- Gli screenshot 04–07 sono opzionali ma consigliati (mostrano le funzioni avanzate).

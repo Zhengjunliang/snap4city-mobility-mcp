@@ -793,19 +793,6 @@ def test_extract_parking_caps_and_handles_empty():
     assert _extract_parking({"name": "routing", "result": {}}, dest) is None  # unparseable entry
 
 
-def test_parse_service_features_reads_nested_service_envelope():
-    """Defensive: the parser reads the live result[1].Services nesting and a Service wrapper."""
-    nested = {"Service": {"features": [
-        {"geometry": {"coordinates": [11.25, 43.77]},
-         "properties": {"serviceName": "Garage X", "serviceuri": "http://x"}},
-    ]}}
-    spots = mcp_tools.parse_service_features(nested)
-    assert spots == [{"name": "Garage X", "lat": 43.77, "lng": 11.25, "uri": "http://x", "free_spaces": None}]
-    # the live envelope shape (result -> [uris, {Services: {features}}])
-    live = _parking_search(("P", 11.25, 43.77))
-    assert mcp_tools.parse_service_features(live)[0]["name"] == "P"
-
-
 async def test_execute_car_finds_parking_pins(make_client, make_result):
     """Car route → search car parks near the destination for map pins. NOT audited (pins-only,
     absent from the LLM view) and NOT enriched (no service_info_dev call): free_spaces stays

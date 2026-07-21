@@ -1,0 +1,9 @@
+# Files kept in version control but excluded from the delivery archive built by
+# `git archive` (scripts/build-delivery-zip.*). They are internal working documents,
+# not part of what is handed in.
+#
+# NOTE: .gitignore cannot do this — these files are already tracked. `export-ignore`
+# is the mechanism that drops tracked files from an exported archive.
+CLAUDE.md        export-ignore
+docs/lessons.md  export-ignore
+.gitattributes   export-ignore
