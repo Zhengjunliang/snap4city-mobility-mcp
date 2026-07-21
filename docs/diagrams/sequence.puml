@@ -1,0 +1,32 @@
+@startuml sequence
+title Flusso di un turno — protocollo job + poll
+
+skinparam shadowing false
+actor Utente
+participant "Chat box" as FE
+participant "Bridge (api.py)" as BR
+participant "Orchestrator\n(run_advisor)" as OR
+participant "Llama4" as LLM
+participant "MCP tools\n(local + remote)" as MCP
+
+Utente -> FE : domanda ("da A a B")
+FE -> BR : POST /advise {query, history, gps}
+BR --> FE : {job_id}  (risposta immediata)
+BR -> OR : run_advisor(on_stage=...)  (async)
+
+group polling (ogni ~1.5 s)
+  FE -> BR : GET /advise/{job_id}
+  BR --> FE : 202 {stage, elapsed_s}
+end
+
+OR -> LLM : understand — estrae gli slot
+LLM --> OR : origin / destination / mode / ...
+OR -> MCP : execute — geocode + route\n(asyncio.gather multi-modo)
+MCP --> OR : geometrie + servizi lungo il percorso
+OR -> OR : respond — _compose_reply\n→ widget JSON
+OR --> BR : risultato del turno
+
+FE -> BR : GET /advise/{job_id}
+BR --> FE : 200 widget JSON
+FE -> FE : disegna la rotta su widgetMap
+@enduml

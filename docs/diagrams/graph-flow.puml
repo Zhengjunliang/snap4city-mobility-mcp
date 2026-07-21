@@ -1,0 +1,38 @@
+@startuml graph-flow
+title Grafo deterministico — understand -> execute -> respond
+
+skinparam shadowing false
+start
+
+:understand;
+note right
+  Llama4 (unica chiamata LLM del turno)
+  forced tool call -> slot:
+  origin, destination, mode,
+  services_category,
+  destination_category,
+  departure_time
+end note
+
+if (intent supportato?) then (no / "other")
+  :respond — messaggio "non supportato";
+  stop
+endif
+
+:execute (Python puro);
+:risolvi origine\n(geocode | posizione GPS);
+:risolvi destinazione\n(geocode | servizio piu vicino per categoria);
+
+if (modo specificato?) then (si)
+  :route(modo);
+else (no)
+  :asyncio.gather\nfoot + car + public_transport;
+endif
+
+if (servizi lungo il percorso richiesti?) then (si)
+  :campiona ancore lungo la rotta\n-> near-search -> routes[i].services;
+endif
+
+:respond (Python puro)\n_compose_reply -> widget JSON\n(wkt, distanza, durata, legs, services);
+stop
+@enduml

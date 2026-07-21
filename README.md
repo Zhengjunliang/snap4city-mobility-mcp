@@ -173,4 +173,6 @@ asyncio.run(main())
 
 ## 7. License
 
-TBD — academic project.
+**MIT** — see [LICENSE](LICENSE).
+
+`src/snap4city_mobility_mcp/token_manager.py` (OAuth2 token cache/refresh) is adapted from referente's Snap4City reference notebook and redistributed here for this academic elaborato; all other code is original.

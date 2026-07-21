@@ -1,0 +1,39 @@
+@startuml deployment
+!pragma layout smetana
+title Distribuzione — Snap4City JupyterHub
+
+skinparam shadowing false
+
+node "Browser (utente)" {
+  artifact "Dashboard Snap4City\n(chat box + widgetMap)" as dash
+}
+
+node "Snap4City JupyterHub (rete interna)" {
+  component "jupyter-server-proxy" as proxy
+  node "env s4c (conda py3.11)" {
+    component "Local MCP server\n:8020" as mcp
+    component "Bridge uvicorn\napi:app :8010" as bridge
+  }
+}
+
+node "Remote MCP server\n192.168.1.117:8000 (referente)" as remote
+
+cloud "Servizi pubblici Snap4City / km4city" {
+  component "What-If GraphHopper\nwhatif-router" as whatif
+  component "km4city ServiceMap" as sm
+  component "tpl GTFS API" as tpl
+}
+
+cloud "LLM" {
+  component "llama4-agentic-inference" as llm
+}
+
+dash --> proxy : HTTP same-origin
+proxy --> bridge
+bridge --> mcp : S4C_LOCAL_MCP_URL
+bridge --> remote : apps.json discovery
+bridge --> llm
+mcp --> whatif
+mcp --> sm
+mcp --> tpl
+@enduml
