@@ -1,54 +1,62 @@
-# Front-end (Snap4City dashboard)
+# Front-end (dashboard Snap4City)
 
-A natural-language **chat box** `widgetExternalContent` that asks the FastAPI bridge
-(`api.py`, which wraps `run_advisor` on the JupyterHub) and draws the returned route on a
-sibling `widgetMap`. The backend is the brain: it understands the question, geocodes, and
-computes the route (WKT + distance/ETA); the front-end renders the reply and the line.
+Una **chat box** in linguaggio naturale, realizzata come `widgetExternalContent`, che
+interroga il bridge FastAPI (`api.py`, che incapsula `run_advisor` sulla JupyterHub) e
+disegna il percorso restituito su un `widgetMap` adiacente. L'intelligenza sta nel
+back-end: è lui che comprende la domanda, geocodifica e calcola il percorso (WKT più
+distanza e durata); il front-end si limita a mostrare la risposta e la linea.
 
-## How the map draws the route
+## Come la mappa disegna il percorso
 
-Every route goes through the widgetMap's **manual** branch of `addCustomTrajectory`
-(per-point `mode.routing.manual`): the widget just connects the given points with
-straight segments, so the front end feeds it the backend's own route geometry and the
-map **never calls a router** — the line appears together with the reply, straight from
-the `/advise` response. A bus route ships its walk/ride split as per-leg geometry
-(`data.routes[].legs`, cut by the backend from the single router response); foot/car draw
-the whole route WKT as one leg. Each segment takes the current point's `color` (a string);
-a point's non-empty `icon` becomes a marker — start/finish flags on the precise geocoded
-origin/destination, the Gea-Night bus pin (`TransferServiceAndRenting_Urban_bus.png`) on
-the board/alight vertices. A ride leg normally carries the real GTFS shape: the backend
-swaps the router's one-vertex-per-stop chords for the matching km4city *tpl* shape cut;
-when no line variant matches within tolerance, that leg degrades to the stop-to-stop
-chords the router returned.
+Ogni percorso passa dal ramo **manual** di `addCustomTrajectory` del widgetMap
+(`mode.routing.manual` su ciascun punto): il widget si limita a congiungere con
+segmenti rettilinei i punti che riceve, quindi il front-end gli passa la geometria
+calcolata dal back-end e la mappa **non interroga alcun router** — la linea compare
+insieme alla risposta, direttamente dal risultato di `/advise`. Un percorso in autobus
+trasporta la suddivisione fra tratte a piedi e tratte in autobus come geometrie
+separate (`data.routes[].legs`, ritagliate dal back-end a partire dall'unica risposta
+del router); a piedi e in auto l'intero WKT viene disegnato come un'unica tratta. Ogni
+segmento assume il `color` (una stringa) del punto corrente; un `icon` non vuoto diventa
+un segnaposto — le bandierine di partenza e arrivo sui punti geocodificati esatti, il
+segnaposto dell'autobus in stile Gea-Night
+(`TransferServiceAndRenting_Urban_bus.png`) sui vertici di salita e discesa. Una tratta
+in autobus porta di norma la geometria GTFS reale: il back-end sostituisce i segmenti
+rettilinei fermata-a-fermata del router con il ritaglio della geometria km4city *tpl*
+corrispondente; quando nessuna variante di linea corrisponde entro la tolleranza, quella
+tratta ricade sui segmenti rettilinei restituiti dal router.
 
-One trap that cost a debugging round (now encoded in the code): every point must carry
-`mode` and an `icon` field (empty string = no marker) — a missing one crashes the map in
-`addCustomTrajectoryToMap` (`Cannot read properties of undefined (reading 'length')`).
+Un errore che è costato un ciclo di debug (ora codificato nel sorgente): ogni punto deve
+portare `mode` e un campo `icon` (stringa vuota = nessun segnaposto) — se manca, la mappa
+va in errore dentro `addCustomTrajectoryToMap` (`Cannot read properties of undefined
+(reading 'length')`).
 
 ## File
 
-- `mobility_advisor_dashboard.html` — paste into a `widgetExternalContent`.
+- `mobility_advisor_dashboard.html` — da incollare in un `widgetExternalContent`.
 
-## Put it on your dashboard
+## Inserimento nella dashboard
 
-1. Add a **widgetMap** and note its widget id (e.g. `w_Map_xxxx_widgetMapyyyyy`).
-2. Add a **widgetExternalContent**. In "More options", enable **Enable CKEditor**, and
-   paste the whole content of `mobility_advisor_dashboard.html` into the CKEditor box.
-3. In the pasted script, set `MAP_WIDGET_ID` to the widgetMap id, and `BRIDGE_BASE` to the
-   URL where the FastAPI bridge (`api.py`) is reachable **from the browser** (decided per
-   deployment — see below).
+1. Aggiungere un **widgetMap** e annotarne l'identificativo (per esempio
+   `w_Map_xxxx_widgetMapyyyyy`).
+2. Aggiungere un **widgetExternalContent**. In "More options" attivare **Enable
+   CKEditor** e incollare l'intero contenuto di `mobility_advisor_dashboard.html` nella
+   casella di CKEditor.
+3. Nello script incollato, impostare `MAP_WIDGET_ID` con l'identificativo del widgetMap e
+   `BRIDGE_BASE` con l'indirizzo a cui il bridge FastAPI (`api.py`) è raggiungibile **dal
+   browser** (dipende dal tipo di deploy — vedi sotto).
 
-## Run the bridge (JupyterHub)
+## Avvio del bridge (JupyterHub)
 
-The bridge needs Llama4 + the MCP servers, all reachable only on the JupyterHub. Start
-the local MCP server first (it serves geocoding and ALL routing — the `route` tool):
+Il bridge ha bisogno di Llama4 e dei server MCP, raggiungibili solo dalla JupyterHub. Si
+avvia per primo il server MCP locale (fornisce la geocodifica e TUTTO il calcolo dei
+percorsi, con lo strumento `route`):
 
 ```
 python -m snap4city_mobility_mcp.mcp_server   # :8020, terminal 1
 uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2
 ```
 
-Sanity-check without the dashboard:
+Verifica rapida senza dashboard:
 
 ```
 curl -s localhost:8010/health
@@ -58,92 +66,111 @@ JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" 
 curl -s localhost:8010/advise/$JOB    # 202 while computing, then the widget JSON
 ```
 
-**Job + poll**: the POST only *starts* the turn (it answers `{job_id}` at once) and the
-widget polls `GET /advise/{job_id}` until it returns 200. A bus turn takes ~50–70 s and the
-proxy chain in front of the bridge cuts any single request past ~60 s — and heartbeat bytes do
-not help, because `jupyter-server-proxy` buffers the whole body of a non-SSE response. Never
-collapse the widget back into one long request.
+**Job + poll**: la POST si limita ad *avviare* il turno (risponde subito con
+`{job_id}`) e il widget interroga `GET /advise/{job_id}` finché non ottiene 200. Un
+turno in autobus richiede circa 50–70 s e la catena di proxy davanti al bridge
+interrompe qualunque singola richiesta oltre i ~60 s — e i byte di heartbeat non
+aiutano, perché `jupyter-server-proxy` bufferizza per intero il corpo di una risposta
+non SSE. Da non riportare mai a un'unica richiesta lunga.
 
-Each 202 carries `{"status":"pending","stage":...,"elapsed_s":...}`; the widget rewrites its
-"thinking" bubble from it (`STAGE_TEXT`), so a bus turn shows *"Calcolo il percorso in bus… 34s"*
-rather than a blank bubble for the better part of a minute. An unrecognized stage falls back to
-the generic bubble, so a new backend stage can never blank the line.
+Ogni 202 trasporta `{"status":"pending","stage":...,"elapsed_s":...}`; il widget
+riscrive da lì la propria bolla di attesa (`STAGE_TEXT`), così un turno in autobus mostra
+*"Calcolo il percorso in bus… 34s"* invece di una bolla muta per quasi un minuto. Una
+fase non riconosciuta ricade sul testo generico, quindi una nuova fase lato back-end non
+può mai svuotare la riga.
 
-The collected 200 is the widget JSON `{status, request_type, data, messages}`; check that
-`data.wkt` (the LINESTRING), `data.distance_km`, `data.duration`, and `data.mode` are
-present and `messages[-1].content` is the Italian reply.
+Il 200 finale è il JSON per il widget `{status, request_type, data, messages}`: vanno
+verificati la presenza di `data.wkt` (la LINESTRING), `data.distance_km`,
+`data.duration` e `data.mode`, e che `messages[-1].content` sia la risposta in italiano.
 
-### Exposing the bridge to the browser
+### Esporre il bridge al browser
 
-The browser reaches the bridge **same-origin** through `jupyter-server-proxy`:
-`BRIDGE_BASE = https://www.snap4city.org/jupyterhub/user/<account>/proxy/8010`. The origin
-must match the dashboard's exactly (`www.` included) — a different origin triggers a CORS
-preflight that the proxy redirects to the login page, which the browser rejects.
+Il browser raggiunge il bridge **same-origin** attraverso `jupyter-server-proxy`:
+`BRIDGE_BASE = https://www.snap4city.org/jupyterhub/user/<account>/proxy/8010`. L'origine
+deve coincidere esattamente con quella della dashboard (`www.` compreso): un'origine
+diversa fa scattare una richiesta di preflight CORS che il proxy reindirizza alla pagina
+di login, e il browser la rifiuta.
 
-Installing that extension on the JupyterHub's old `jupyter_server` needs care, because a
-careless install upgrades the base Jupyter stack and bricks the singleuser server on its
-next restart:
+Installare quell'estensione sul `jupyter_server` datato della JupyterHub richiede
+attenzione, perché un'installazione disattenta aggiorna lo stack Jupyter di base e rende
+il singleuser server non avviabile:
 
-1. Pin the major version: `jupyter-server-proxy>=3.2,<4` (4.x demands `jupyter_server>=2`).
-2. Install with `pip install --no-deps` so nothing upgrades `jupyter_server`/`jupyterlab`/`notebook`.
-3. Add the one real dependency `--no-deps` skips: `pip install aiohttp`.
-4. **Preflight without touching the running server**: `jupyter server extension list` should
-   show the extension `OK`, then start a throwaway server (`jupyter server --port=9999
-   --no-browser --ServerApp.token=''`) and confirm it loads with no traceback. Only then
-   restart the main server from the Hub Control Panel.
+1. Fissare la versione maggiore: `jupyter-server-proxy>=3.2,<4` (la 4.x richiede
+   `jupyter_server>=2`).
+2. Installare con `pip install --no-deps`, così nulla aggiorna
+   `jupyter_server`/`jupyterlab`/`notebook`.
+3. Aggiungere l'unica dipendenza reale che `--no-deps` salta: `pip install aiohttp`.
+4. **Verificare senza toccare il server in esecuzione**: `jupyter server extension list`
+   deve mostrare l'estensione come `OK`, poi si avvia un server usa e getta
+   (`jupyter server --port=9999 --no-browser --ServerApp.token=''`) e si controlla che
+   carichi senza traceback. Solo a quel punto si riavvia il server principale dal Hub
+   Control Panel.
 
-CORS in `api.py` is dev-permissive (`*`) and should be tightened for a production deployment.
+La configurazione CORS in `api.py` è permissiva (`*`) perché pensata per lo sviluppo e
+andrebbe ristretta in un deploy di produzione.
 
-## GPS (near-me)
+## GPS (posizione dell'utente)
 
-Each send calls `navigator.geolocation.getCurrentPosition` (5 s timeout, 60 s cache, low
-accuracy) and POSTs the fix as `gps: {lat, lng}` — `null` on denial, unsupported API, or
-timeout, and the backend then behaves exactly as before (asks for the origin when it is
-missing). A `PERMISSION_DENIED` is remembered for the session so the user is not
-re-prompted every turn.
+A ogni invio viene chiamata `navigator.geolocation.getCurrentPosition` (timeout 5 s,
+cache 60 s, bassa precisione) e la posizione viene inviata come `gps: {lat, lng}` —
+`null` in caso di rifiuto, API non disponibile o timeout; in quel caso il back-end si
+comporta esattamente come prima (chiede l'origine quando manca). Un `PERMISSION_DENIED`
+viene ricordato per la sessione, così l'utente non se lo ritrova richiesto a ogni turno.
 
-Two environment requirements, both **outside this file's control**:
+Due requisiti dell'ambiente, entrambi **fuori dal controllo di questo file**:
 
-- **Secure context**: geolocation only works on HTTPS pages (the dashboard is HTTPS, ok).
-- **Iframe permission**: the widget runs in the dashboard iframe; if the parent iframe
-  lacks `allow="geolocation"` the prompt never appears and `getCurrentPosition` fails with
-  code 1 — the widget silently degrades to the no-GPS flow. Whether Snap4City's
-  widgetExternalContent iframes carry that permission is a platform setting: test with
-  DevTools (run `navigator.permissions.query({name:'geolocation'})` in the iframe context)
-  and ask the referente to add it if blocked.
+- **Contesto sicuro**: la geolocalizzazione funziona solo su pagine HTTPS (la dashboard
+  è in HTTPS, quindi va bene).
+- **Permesso dell'iframe**: il widget vive nell'iframe della dashboard; se l'iframe
+  genitore non ha `allow="geolocation"` la richiesta di permesso non compare mai e
+  `getCurrentPosition` fallisce con codice 1 — il widget ricade silenziosamente sul
+  flusso senza GPS. Se gli iframe dei widgetExternalContent di Snap4City abbiano quel
+  permesso è un'impostazione della piattaforma: si verifica con i DevTools (eseguendo
+  `navigator.permissions.query({name:'geolocation'})` nel contesto dell'iframe) e, se
+  risulta bloccato, va chiesto al referente di abilitarlo.
 
-## Notes
+## Note
 
-- The reply bubble is `messages[-1].content` (OpenAI standard, no custom `answer` field).
-- Multi-turn: the front-end keeps `response.messages` and sends it back as `history`.
-- All three modes are routed by the backend's local `route` tool (What-If GraphHopper) and
-  drawn from its geometry — walking green, car blue, bus ride orange with bus pins at the
-  board/alight stops. A walking-only bus itinerary (short trip — walking beats any bus)
-  comes back relabeled as a foot route, so the map draws a plain green walking line.
-- **Route picker**: a multi-mode turn (no mode specified → 2-3 routes back) fills the
-  `#advChips` dock (a fixed strip between the chat and the input row) with one
-  mode-named chip per route ("A piedi" / "In auto" / "In autobus" — distance/ETA already
-  live in the reply text) plus "Mostra tutte". Tapping a chip redraws the map with
-  **only** that route, shows its step-by-step block (`data.routes[].detail`,
-  pre-rendered backend-side: fermate + orari for bus, turn-by-turn streets for foot/car)
-  as a chat bubble, toggles the parking pins (car shows them, foot/bus hides them) and
-  swaps the along-route service pins to that route's own set.
-  The selection is **purely local** — no new backend turn (a bus re-route would cost
-  another 30-45 s) — and only the one-line user echo ("Scelgo l'opzione: …") enters the
-  carried `history`: that keeps the chosen mode in context for follow-ups while the
-  detail block stays a bubble, off every later LLM prompt.
-  Every routes-bearing turn **replaces** the dock (a single-route
-  turn empties it); the dock hides itself when empty.
-- **Along-route service pins**: when the user asked to see a category along the way, each
-  route carries `data.routes[].services` and the map plots them with the same
-  `addSelectorPin` pipeline as parking, violet pins — the widget resolves each
-  `serviceUri` itself and renders the service's own category icon (a pharmacy pin looks
-  like a pharmacy with zero icon code here). While all routes are shown the pin set is the
-  deduped union; a chip narrows it to that route's list (bus lists only stop-vicinity and
-  walking-leg services, backend rule).
-- **Parking pins** are removed with the `removeSelectorPin` event **keyed by `desc`**
-  (verified in `widgetMap.php`, disit/dashboard-builder: the map indexes each pin layer
-  by `passedData.desc` and the remove handler also dereferences `passedData.query`
-  unguarded) — the clear must resend the same `desc` + `query` + `display` used on add.
-  Sending only `{query, queryType}` makes removal a silent no-op and pins pile up.
-  Service pins ride the same rule with their own bookkeeping.
+- La bolla di risposta è `messages[-1].content` (standard OpenAI, nessun campo `answer`
+  aggiuntivo).
+- Conversazione a più turni: il front-end conserva `response.messages` e li rispedisce
+  come `history`.
+- Tutti e tre i modi sono calcolati dallo strumento locale `route` del back-end (router
+  What-If GraphHopper) e disegnati dalla sua geometria — verde a piedi, blu in auto,
+  arancione per la tratta in autobus con i segnaposto alle fermate di salita e discesa.
+  Un itinerario di trasporto pubblico interamente pedonale (tragitto breve: camminare
+  batte qualunque autobus) torna ri-etichettato come percorso a piedi, quindi la mappa
+  disegna una normale linea verde.
+- **Selettore dei percorsi**: un turno multimodale (nessun modo indicato → 2-3 percorsi
+  restituiti) riempie il dock `#advChips` (una barra fissa fra la chat e la riga di
+  input) con una chip per percorso, etichettata con il solo nome del modo ("A piedi" /
+  "In auto" / "In autobus" — distanza e durata sono già nel testo della risposta), più
+  "Mostra tutte". Toccando una chip la mappa viene ridisegnata con **solo** quel
+  percorso, viene mostrato come bolla di chat il suo blocco passo-passo
+  (`data.routes[].detail`, già formattato dal back-end: fermate e orari per l'autobus,
+  indicazioni stradali per a piedi e auto), vengono commutati i segnaposto dei parcheggi
+  (visibili in auto, nascosti a piedi e in autobus) e vengono sostituiti quelli dei
+  servizi lungo il percorso con l'insieme relativo a quel percorso.
+  La selezione è **puramente locale** — nessun nuovo turno verso il back-end (ricalcolare
+  l'autobus costerebbe altri 30-45 s) — e nella `history` conservata entra solo la riga
+  di eco dell'utente ("Scelgo l'opzione: …"): basta a mantenere in contesto il modo
+  scelto per le domande successive, mentre il blocco di dettaglio resta una bolla e non
+  finisce in tutti i prompt seguenti.
+  Ogni turno che porta percorsi **sostituisce** il contenuto del dock (un turno a
+  percorso singolo lo svuota); il dock si nasconde quando è vuoto.
+- **Segnaposto dei servizi lungo il percorso**: quando l'utente ha chiesto di vedere una
+  categoria lungo il tragitto, ogni percorso porta `data.routes[].services` e la mappa li
+  disegna con la stessa pipeline `addSelectorPin` dei parcheggi, in viola — è il widget
+  a risolvere ogni `serviceUri` e a disegnare l'icona della categoria del servizio (il
+  segnaposto di una farmacia ha l'aspetto di una farmacia senza una riga di codice qui).
+  Finché sono mostrati tutti i percorsi l'insieme dei segnaposto è l'unione deduplicata;
+  una chip lo restringe alla lista di quel percorso (per l'autobus il back-end elenca
+  solo i servizi vicini alle fermate e lungo le tratte a piedi).
+- **I segnaposto dei parcheggi** si rimuovono con l'evento `removeSelectorPin`
+  **indicizzato per `desc`** (verificato in `widgetMap.php`, disit/dashboard-builder: la
+  mappa indicizza per `passedData.desc` il livello di ciascun segnaposto e il gestore
+  della rimozione dereferenzia anche `passedData.query` senza protezioni) — la
+  cancellazione deve rispedire gli stessi `desc`, `query` e `display` usati in
+  inserimento. Inviare solo `{query, queryType}` rende la rimozione una no-op
+  silenziosa e i segnaposto si accumulano. I segnaposto dei servizi seguono la stessa
+  regola, con una propria contabilità.

@@ -1,26 +1,28 @@
-# Snap4City Smart City API: field-by-field observations
+# API Smart City Snap4City: osservazioni campo per campo
 
-Backend reference: field-by-field notes from live-probing the km4city endpoints behind
-referente's remote MCP server. §1 covers the geocoding semantics the advisor depends on, §2
-the remote tool signatures it calls (bare names — a single-server config adds no prefix), §3
-the probe evidence for why forward geocoding is served locally.
+Riferimento sul backend: appunti campo per campo raccolti interrogando dal vivo gli endpoint
+km4city che stanno dietro al server MCP del referente. La §1 tratta la semantica di geocodifica
+da cui l'advisor dipende, la §2 le firme degli strumenti remoti che invoca (nomi nudi: una
+configurazione a server singolo non aggiunge prefissi), la §3 le prove del perché la geocodifica
+diretta è servita localmente.
 
-Spec source: `ascapi-openapiv3.json` (OAS3, mirrored at https://www.km4city.org/swagger/external/ascapi-openapiv3.json).
-Backend base URL: `https://www.snap4city.org/superservicemap/api/v1/` (what the remote tools call internally; we don't touch it directly).
+Sorgente delle specifiche: `ascapi-openapiv3.json` (OAS3, copia su https://www.km4city.org/swagger/external/ascapi-openapiv3.json).
+URL di base del backend: `https://www.snap4city.org/superservicemap/api/v1/` (è quello che gli strumenti remoti chiamano internamente; noi non lo tocchiamo direttamente).
 
 ---
 
-## §1. Geocoding: `address_search_location` / km4city `/location/`
+## §1. Geocodifica: `address_search_location` / km4city `/location/`
 
-Served by our **local** MCP server (`mcp_server.py`) wrapping the public km4city ServiceMap —
-the remote tool of the same name is server-side broken (see §3). The response
-shape below is what both return, so the client's parsing is identical either way.
+Servita dal nostro server MCP **locale** (`mcp_server.py`), che incapsula la ServiceMap pubblica
+di km4city — lo strumento remoto con lo stesso nome è difettoso lato server (vedi §3). La forma
+della risposta riportata qui sotto è quella restituita da entrambi, quindi il parsing del client
+è identico nei due casi.
 
-### Query
-- `search` (string): free-text address / POI keywords
-- `excludePOI` (bool, default true), `maxresults` (int, default 100), `logic` ("or"/"and"), `lang`
+### Interrogazione
+- `search` (stringa): indirizzo o parole chiave del punto di interesse, in testo libero
+- `excludePOI` (booleano, default true), `maxresults` (intero, default 100), `logic` ("or"/"and"), `lang`
 
-### Response shape (confirmed)
+### Forma della risposta (verificata)
 
 ```jsonc
 {
@@ -35,40 +37,40 @@ shape below is what both return, so the client's parsing is identical either way
 }
 ```
 
-`f["geometry"]["coordinates"]` is `[lng, lat]` (GeoJSON order); `properties.name` is an
-uppercase KB service name and may be `null`.
+`f["geometry"]["coordinates"]` è nell'ordine `[lng, lat]` (convenzione GeoJSON); `properties.name`
+è il nome del servizio in maiuscolo così come sta nella knowledge base e può essere `null`.
 
-### Binding gotchas
+### Vincoli da conoscere
 
-- **Not region-locked**: the index holds Valencia (ES) / southern France / Maastricht (NL) entries, so `"...Firenze"` can return 100 out-of-region hits and zero Tuscan. There is no geo-constraint parameter; the client narrows to a city the user named ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)) and otherwise picks the candidate nearest an anchor ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)) — no distance cap (a 150 km sentinel mis-killed legitimate named-city trips and was removed: naming a far-away city is a legitimate query). Usable data is effectively Tuscany-only (live-tested: no Brescia/Milan streets anywhere), so out-of-region queries return fuzzy noise: test with Tuscan places.
-- **POIs outrank the real place**: with `excludePOI=false`, `"Piazza del Duomo"` returns the `PRIZIO STEFANO` company before the actual square. The advisor geocodes in two passes (`excludePOI=true` first, POI fallback only when the address pass has no named-city hit, [mcp_tools._geocode_address_first](../src/snap4city_mobility_mcp/mcp_tools.py)), then prefers features whose label tokens are a subset of the search tokens ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)).
-- **Same-name towns**: `"Piazza Duomo"` also matches squares in Castelnuovo / Pietrasanta (90 km away). A city the user names wins; otherwise the candidate nearest an anchor does — the destination anchors on the resolved origin, the origin on the user's GPS (live-tested: without the origin anchor, "via Pisana 166" from a Florence origin picked Lucca's VIA PISANA, the server's first hit).
-- **House numbers ride the search text** (no dedicated query param exists): `/location/?search=via Zara 3` ranks the exact `serviceType:"StreetNumber", civic:"3"` feature first with the top score (measured). But the client's anchor-nearest pick would bury it (the destination is always anchored) — so `_normalize_feature` passes `civic`/`serviceType` through and [orchestrator._pick_feature](../src/snap4city_mobility_mcp/orchestrator.py) narrows to the civic-exact hit when the user's text carries a house number, falling back to street-shaped labels (a name-only POI like "LAURA" must not win "via Laura 11") and only then to anchor-nearest.
-- **Pure-noise input gives HTTP 500**, not an empty FeatureCollection. Callers must tolerate 5xx, and an empty / `[]` result is not a clean "no match" signal.
-- **Backend is non-deterministic over time**: the same string can return all-foreign one minute and the correct Tuscan hit the next.
+- **Nessun vincolo territoriale**: l'indice contiene voci di Valencia (ES), del sud della Francia e di Maastricht (NL), quindi una ricerca `"...Firenze"` può restituire 100 risultati fuori regione e nessuno toscano. Non esiste un parametro di vincolo geografico: il client restringe alla città nominata dall'utente ([mcp_tools._narrow_by_city](../src/snap4city_mobility_mcp/mcp_tools.py)) e altrimenti sceglie il candidato più vicino a un punto di ancoraggio ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)) — senza alcun limite di distanza (una soglia di 150 km uccideva richieste legittime ed è stata rimossa: nominare esplicitamente una città lontana è un uso corretto). I dati utilizzabili coprono di fatto la sola Toscana (verificato dal vivo: nessuna via di Brescia o Milano), quindi le interrogazioni fuori regione restituiscono rumore: conviene provare con località toscane.
+- **I punti di interesse scavalcano il luogo reale**: con `excludePOI=false`, `"Piazza del Duomo"` restituisce l'azienda `PRIZIO STEFANO` prima della piazza vera. L'advisor geocodifica in due passate (prima `excludePOI=true`, ricadendo sui punti di interesse solo quando la passata sugli indirizzi non trova nulla nella città nominata, [mcp_tools._geocode_address_first](../src/snap4city_mobility_mcp/mcp_tools.py)), e poi preferisce le voci le cui parole dell'etichetta sono un sottoinsieme di quelle cercate ([orchestrator._pick_coord](../src/snap4city_mobility_mcp/orchestrator.py)).
+- **Località omonime**: `"Piazza Duomo"` corrisponde anche alle piazze di Castelnuovo e Pietrasanta (90 km di distanza). Una città nominata dall'utente ha la precedenza; altrimenti vince il candidato più vicino all'ancora — la destinazione si ancora all'origine già risolta, l'origine alla posizione GPS dell'utente (verificato dal vivo: senza l'ancoraggio all'origine, "via Pisana 166" partendo da Firenze veniva risolta nella VIA PISANA di Lucca, il primo risultato del server).
+- **I numeri civici viaggiano nel testo della ricerca** (non esiste un parametro dedicato): `/location/?search=via Zara 3` mette al primo posto, con il punteggio più alto, proprio la voce `serviceType:"StreetNumber", civic:"3"` (misurato). Ma la scelta per vicinanza all'ancora la seppellirebbe (la destinazione è sempre ancorata): per questo `_normalize_feature` lascia passare `civic` e `serviceType` e [orchestrator._pick_feature](../src/snap4city_mobility_mcp/orchestrator.py) restringe alla corrispondenza esatta sul civico quando il testo dell'utente contiene un numero, ricadendo poi sulle etichette di forma stradale (un punto di interesse con il solo nome, come "LAURA", non deve vincere su "via Laura 11") e solo da ultimo sulla vicinanza all'ancora.
+- **Un input di puro rumore produce un HTTP 500**, non una FeatureCollection vuota. Il chiamante deve tollerare i 5xx, e un risultato vuoto o `[]` non è un segnale pulito di "nessuna corrispondenza".
+- **Il backend non è deterministico nel tempo**: la stessa stringa può restituire solo risultati stranieri in un momento e quello toscano corretto poco dopo.
 
 ---
 
-## §2. Referente remote MCP server: tool signatures (probe 2026-05-28)
+## §2. Server MCP remoto del referente: firme degli strumenti (rilevate il 2026-05-28)
 
-Source: `GET http://192.168.1.117:8000/apps.json` → `Client(cfg)` → `list_tools()`; [mcp_tools._build_config](../src/snap4city_mobility_mcp/mcp_tools.py) narrows to the `native` server and rewrites the intranet IP to `DASHBOARD_URL`. Server scope: `snap4agentic_advisor_native` only (25 tools exposed).
+Origine: `GET http://192.168.1.117:8000/apps.json` → `Client(cfg)` → `list_tools()`; [mcp_tools._build_config](../src/snap4city_mobility_mcp/mcp_tools.py) restringe la configurazione al server `native` e sostituisce l'indirizzo interno con `DASHBOARD_URL`. Ambito: il solo `snap4agentic_advisor_native` (25 strumenti esposti).
 
-> **This is a 2026-05-28 snapshot.** Re-probe on the JupyterHub before relying on it (one-liner in README §5), in case the native server version was bumped.
+> **Questa è una fotografia del 2026-05-28.** Conviene rileggere il registro dalla JupyterHub prima di farvi affidamento (il comando è nella §5 del README), nel caso la versione del server sia cambiata.
 
-Names appear **without server prefix** under a single-server config (as we use): `coordinates_to_address`, not `snap4agentic_advisor_native_coordinates_to_address`. FastMCP only prefixes when merging multiple servers.
+I nomi compaiono **senza prefisso del server** con una configurazione a server singolo come la nostra: `coordinates_to_address`, non `snap4agentic_advisor_native_coordinates_to_address`. FastMCP antepone il prefisso solo quando fonde più server.
 
-### Tools the advisor drives (remote)
+### Strumenti usati dall'advisor (remoti)
 
-| Tool | Required input | Notable optional | Purpose |
+| Strumento | Ingresso obbligatorio | Opzioni rilevanti | Scopo |
 |---|---|---|---|
-| `coordinates_to_address` | `latitude` + `longitude` | — | Reverse geocode; labels a GPS-defaulted origin for the reply |
-| `service_search_near_gps_position` | `latitude` + `longitude` | `categories`, `maxdistance` (km), `maxresults` | Nearest-category POIs: car parks + "farmacia più vicina" destinations |
-| `service_info_dev` | `serviceUri` | `fromTime` | Latest realtime free-spaces for a car park |
+| `coordinates_to_address` | `latitude` + `longitude` | — | Geocodifica inversa; dà un nome all'origine ricavata dal GPS |
+| `service_search_near_gps_position` | `latitude` + `longitude` | `categories`, `maxdistance` (km), `maxresults` | Punti di interesse più vicini per categoria: parcheggi e destinazioni del tipo "farmacia più vicina" |
+| `service_info_dev` | `serviceUri` | `fromTime` | Ultimo dato in tempo reale sui posti liberi di un parcheggio |
 
-Forward geocoding (`address_search_location`) and routing (`route`, all modes) come from the **local** MCP server instead (§1, §3). The probed tools accept an optional `authentication` (Bearer); the probe surfaced no token requirement, so the advisor omits it (public km4city backend).
+La geocodifica diretta (`address_search_location`) e il calcolo dei percorsi (`route`, per tutti i modi) arrivano invece dal server MCP **locale** (§1, §3). Gli strumenti rilevati accettano un parametro opzionale `authentication` (Bearer); la rilevazione non ha mostrato alcun requisito di token, quindi l'advisor lo omette (il backend km4city interrogato è pubblico).
 
 ---
 
-## §3. Why forward geocoding is served locally
+## §3. Perché la geocodifica diretta è servita localmente
 
-**`address_search_location` (remote) is server-side broken** — bare-probe comparison, same query `via zara 3`: the public ServiceMap returns `VIA ZARA, FIRENZE` (score 12.64) first, while the remote MCP tool returns **zero Tuscan hits** (top hits Antwerpen / Greece, score 3–7) **and does not sort by score**. The schema exposes no sort/bbox/region parameter, and raising `maxresults` to 5000 does not surface the Tuscan hit — it is not in the result set at all. Hence the local geocode tool. SuperServiceMap, the federated backend, has the same ranking failure ("via zara firenze" ranks a Maastricht bus stop first). The client can switch back with one env var (`S4C_SERVICEMAP_BASE`) if the ranking is fixed.
+**`address_search_location` (remoto) è difettoso lato server** — confronto fra interrogazioni diverse, stessa ricerca `via zara 3`: la ServiceMap pubblica restituisce al primo posto `VIA ZARA, FIRENZE` (punteggio 12,64), mentre lo strumento MCP remoto restituisce **zero risultati toscani** (in testa Anversa e Grecia, punteggio 3–7) **e non ordina per punteggio**. Lo schema non espone alcun parametro di ordinamento, di riquadro geografico o di regione, e portare `maxresults` a 5000 non fa comparire il risultato toscano: semplicemente non è nell'insieme restituito. Da qui la scelta dello strumento di geocodifica locale. SuperServiceMap, il backend federato, ha lo stesso difetto di ordinamento ("via zara firenze" mette al primo posto una fermata di Maastricht). Il client può tornare a usarlo cambiando una sola variabile d'ambiente (`S4C_SERVICEMAP_BASE`) se l'ordinamento verrà corretto.

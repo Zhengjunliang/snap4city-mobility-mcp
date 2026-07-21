@@ -1,54 +1,78 @@
 % Relazione — elaborato di Tipo A, Sistemi Distribuiti (UNIFI)
-% Compilazione: pdflatex -> bibtex -> pdflatex x2  (vedi README.md in questa cartella)
-\documentclass[11pt,a4paper]{article}
+% Classe: Tptesi2 (template UNIFI, incluso in questa cartella).
+% Compilazione: pdflatex x2  (vedi README.md in questa cartella)
+\documentclass[a4paper,oneside]{Tptesi2}
 
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage[italian]{babel}
-\usepackage{graphicx}
+% Tptesi2 carica gia': babel(italian), inputenc, fontenc, amsmath, amssymb,
+% graphicx, hyperref, float, algorithm2e, mathrsfs. Qui serve solo il resto.
 \usepackage{booktabs}
-\usepackage{geometry}
-\usepackage{listings}
-\usepackage{xcolor}
-\usepackage[hidelinks]{hyperref}
-
-\geometry{margin=2.6cm}
 
 % Le figure vivono nelle cartelle del progetto: nessuna copia duplicata.
 % "figures/" viene provata per prima, cosi' e' possibile creare un progetto
 % Overleaf autonomo copiando li' le immagini necessarie.
-\graphicspath{{figures/}{../docs/diagrams/}{../screenshots/}}
+\graphicspath{{figures/}{img/}{../docs/diagrams/}{../screenshots/}}
 
-\lstset{
-  basicstyle=\ttfamily\footnotesize,
-  breaklines=true,
-  frame=single,
-  showstringspaces=false,
-  columns=fullflexible,
-}
-
-\title{\textbf{Mobility Advisor per Snap4City}\\[0.4em]
-\large Un client MCP con orchestrazione LangGraph per la pianificazione\\
-multimodale di percorsi urbani}
-
-\author{Junliang Zheng \\ \small Matricola: \textit{[inserire matricola]}}
-
-\date{Universit\`a degli Studi di Firenze \\
-Corso di \emph{Sistemi Distribuiti} --- Elaborato di Tipo A \\
-Docente: \textit{[inserire docente]} \\[0.6em]
-Anno Accademico 2025/2026}
+\hypersetup{%
+  plainpages=false,%
+  breaklinks,%
+  pdftitle={Mobility Advisor per Snap4City},%
+  pdfauthor={Junliang Zheng},%
+  pdfsubject={Elaborato di Tipo A - Sistemi Distribuiti},%
+  colorlinks=false}
 
 \begin{document}
 
-\maketitle
-\thispagestyle{empty}
-\newpage
+\frontmatter
+
+% ---------------------------------------------------------------------
+% Frontespizio: riprende l'impaginazione del template, con la dicitura
+% corretta per un elaborato (il \maketitle della classe scrive "Tesi di
+% Laurea Triennale").
+% ---------------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{-10mm}
+  \includegraphics[height=30mm]{stemma}\\[4mm]
+  {\textsc{\Large Universit\`a degli Studi di Firenze}}\\[2mm]
+  {\textsc{Scuola di Ingegneria --- Dipartimento di Ingegneria dell'Informazione}}\\[3mm]
+  \rule{50mm}{0.01mm}\\[3mm]
+  {\small Elaborato di Tipo A per il corso di}\\[1mm]
+  {\large Sistemi Distribuiti}
+
+  \vfill
+
+  {\Large\bfseries\textsc{Mobility Advisor per Snap4City}\par}
+  \vspace{5mm}
+  {\large Un client MCP con orchestrazione LangGraph\\
+   per la pianificazione multimodale di percorsi urbani\par}
+
+  \vspace{2.5cm}
+
+  \begin{minipage}[t]{0.48\textwidth}
+    \raggedright
+    {\itshape Candidato}\\[1mm]
+    Junliang Zheng\\
+    {\small Matricola 7046609}
+  \end{minipage}%
+  \begin{minipage}[t]{0.48\textwidth}
+    \raggedleft
+    {\itshape Docente}\\[1mm]
+    Prof. Paolo Nesi
+  \end{minipage}
+
+  \vfill
+
+  \rule{40mm}{0.01mm}\\[2mm]
+  Anno Accademico 2025/2026
+\end{titlepage}
 
 \tableofcontents
-\newpage
+\cleardoublepage
+
+\mainmatter
 
 % =====================================================================
-\section{Introduzione}
+\chapter{Introduzione}
 
 Snap4City \`e la piattaforma \emph{Smart City} sviluppata dal DISIT Lab
 dell'Universit\`a degli Studi di Firenze: raccoglie, federa ed espone dati urbani
@@ -60,17 +84,17 @@ piattaforma: l'utente pone una domanda di viaggio in linguaggio naturale
 (\emph{``da Piazza del Duomo a Santa Croce''}) e il sistema risponde con il confronto
 fra i modi di trasporto disponibili, disegnando i percorsi su una mappa della dashboard.
 
-\subsection{Obiettivo}
+\section{Obiettivo}
 
 L'obiettivo \`e collegare un modello linguistico e un insieme di strumenti remoti
 esposti secondo il \emph{Model Context Protocol} (MCP) in modo che il risultato sia
 \textbf{affidabile e riproducibile}. La scelta progettuale centrale, discussa nel
-Capitolo~\ref{sec:architettura}, \`e stata rinunciare all'approccio \emph{agentico}
+Capitolo~\ref{cap:architettura}, \`e stata rinunciare all'approccio \emph{agentico}
 (un LLM libero di invocare strumenti in un ciclo) a favore di un \textbf{grafo
 deterministico} in cui il modello interviene una sola volta, per estrarre i parametri
 della richiesta.
 
-\subsection{Contenuto della consegna}
+\section{Contenuto della consegna}
 
 Il server MCP \emph{advisor} remoto \`e gestito dal referente e ospitato sulla rete
 interna del DISIT: non fa parte di questa consegna. Questo progetto fornisce:
@@ -90,9 +114,9 @@ interna del DISIT: non fa parte di questa consegna. Questo progetto fornisce:
 \end{itemize}
 
 % =====================================================================
-\section{Contesto e tecnologie}
+\chapter{Contesto e tecnologie}
 
-\subsection{Model Context Protocol (MCP)}
+\section{Model Context Protocol (MCP)}
 
 MCP \`e un protocollo aperto che standardizza il modo in cui un'applicazione basata su
 LLM accede a strumenti e risorse esterne \cite{mcp}. Un \emph{server} MCP dichiara un
@@ -112,7 +136,7 @@ tool \textbf{solo} quando fonde pi\`u server in un'unica configurazione. Mantene
 client separati, ciascuno con un solo server, i tool restano invocabili con il nome
 nudo e il codice non deve inseguire i prefissi.
 
-\subsection{LangGraph}
+\section{LangGraph}
 
 LangGraph \cite{langgraph} modella il flusso applicativo come un grafo di stato: ogni
 nodo \`e una funzione che riceve e restituisce porzioni di uno stato tipizzato. Qui il
@@ -124,7 +148,7 @@ da un nodo che \textbf{non} sono dichiarate nello schema dello stato vengono
 silenziosamente scartate. Ogni dato che attraversa i nodi ha quindi un canale
 esplicito in \texttt{AdvisorState}.
 
-\subsection{Le sorgenti dati Snap4City e km4city}
+\section{Le sorgenti dati Snap4City e km4city}
 
 \begin{description}
   \item[ServiceMap km4city] indice di indirizzi e punti di interesse della Toscana;
@@ -138,7 +162,7 @@ esplicito in \texttt{AdvisorState}.
         disponibilit\`a in tempo reale dei parcheggi.
 \end{description}
 
-\subsection{Il modello linguistico}
+\section{Il modello linguistico}
 
 Il modello \`e \textbf{Llama~4} servito dall'endpoint Snap4City
 \texttt{llama4-agentic-inference}, compatibile con l'API OpenAI e dotato di
@@ -146,10 +170,10 @@ Il modello \`e \textbf{Llama~4} servito dall'endpoint Snap4City
 piattaforma, con credenziali legate a un account funzionale.
 
 % =====================================================================
-\section{Architettura}
-\label{sec:architettura}
+\chapter{Architettura}
+\label{cap:architettura}
 
-\subsection{Il principio: un solo punto di non determinismo}
+\section{Il principio: un solo punto di non determinismo}
 
 Il primo prototipo era agentico: il modello riceveva l'elenco dei tool e decideva da
 s\'e quali invocare. Si \`e rivelato inaffidabile. Quando il modello ``voleva''
@@ -176,7 +200,7 @@ l'esposizione ai timeout del gateway e introduceva rischi di deriva linguistica 
 invenzione di dati (in un caso il modello aveva elencato numeri di linea inesistenti).
 Il risultato \`e una sola chiamata LLM per turno.
 
-\subsection{I componenti}
+\section{I componenti}
 
 La Figura~\ref{fig:component} mostra la struttura complessiva.
 
@@ -209,7 +233,7 @@ Restano remoti tre tool che funzionano correttamente: geocodifica inversa
 (\texttt{service\_search\_near\_gps\_position}) e disponibilit\`a parcheggi
 (\texttt{service\_info\_dev}).
 
-\subsection{Il flusso di un turno}
+\section{Il flusso di un turno}
 
 La Figura~\ref{fig:graphflow} descrive la logica interna del grafo.
 
@@ -222,9 +246,9 @@ La Figura~\ref{fig:graphflow} descrive la logica interna del grafo.
 \end{figure}
 
 % =====================================================================
-\section{Implementazione}
+\chapter{Implementazione}
 
-\subsection{Estrazione dei parametri}
+\section{Estrazione dei parametri}
 
 Il nodo \texttt{understand} invia la domanda dell'utente, insieme agli ultimi turni di
 conversazione, con una chiamata a strumento forzata. Lo schema estrae:
@@ -236,7 +260,7 @@ La cronologia inviata al modello \`e limitata agli ultimi otto messaggi: il cont
 per un \emph{follow-up} sta negli ultimi turni, mentre una cronologia illimitata
 amplifica la latenza e il rischio di errori del gateway.
 
-\subsection{Risoluzione degli estremi del percorso}
+\section{Risoluzione degli estremi del percorso}
 
 \`E la parte con pi\`u casistica, perch\'e l'indice geografico non offre alcun
 parametro di vincolo territoriale. La strategia \`e a scalini:
@@ -271,7 +295,7 @@ Se l'origine manca del tutto, si usa la posizione GPS del browser, geocodificata
 ritroso una sola volta per poter dire \emph{``dalla tua posizione''}; in assenza di GPS
 il sistema chiede il punto di partenza invece di indovinare.
 
-\subsection{Calcolo dei percorsi}
+\section{Calcolo dei percorsi}
 
 Quando l'utente non indica un modo, i tre profili vengono calcolati
 \textbf{concorrentemente} con un unico \texttt{asyncio.gather} piatto, e il turno
@@ -288,7 +312,7 @@ Un itinerario di trasporto pubblico che il router restituisce interamente pedona
 \`e un errore: su tragitti brevi camminare domina qualunque attesa. In quel caso il
 percorso viene ri-etichettato come pedonale e presentato onestamente come tale.
 
-\subsection{La geometria reale delle tratte in autobus}
+\section{La geometria reale delle tratte in autobus}
 
 Il router restituisce, per una tratta percorsa in autobus, \textbf{un vertice per
 fermata}: la linea disegnata taglia gli isolati in linea retta. Non \`e un difetto dei
@@ -307,7 +331,7 @@ punteggio di distanza non distinguerebbe le due direzioni di marcia, che insisto
 sulla stessa sede stradale. Se nessuna variante \`e accettabile, la tratta conserva la
 geometria originale: la funzionalit\`a degrada, non fallisce.
 
-\subsection{Il bridge: protocollo \emph{job + poll}}
+\section{Il bridge: protocollo \emph{job + poll}}
 
 Un turno con trasporto pubblico dura circa 50--70 secondi, mentre la catena di reverse
 proxy davanti al JupyterHub interrompe qualunque richiesta HTTP che superi il minuto.
@@ -338,7 +362,7 @@ la bolla di attesa della chat dichiara che cosa sta facendo il sistema
 identificativo del job vivono solo nel livello di trasporto: non entrano mai nel
 payload restituito al widget.
 
-\subsection{Il front-end}
+\section{Il front-end}
 
 La chat box \`e un \texttt{widgetExternalContent} incollato nella dashboard, che
 disegna i percorsi su un \texttt{widgetMap} adiacente. Il widget dispone di un ramo
@@ -363,7 +387,7 @@ spuria. Tutti i selettori del foglio di stile sono perci\`o limitati a una class
 dedicata.
 
 % =====================================================================
-\section{Distribuzione e integrazione}
+\chapter{Distribuzione e integrazione}
 
 Il sistema gira sulla \textbf{JupyterHub di Snap4City}, unico ambiente da cui sono
 raggiungibili sia il server MCP remoto (rete interna) sia l'endpoint del modello.
@@ -407,9 +431,9 @@ a modo singolo e destinazione per categoria a partire dalla posizione GPS --- so
 raccolte nella cartella \texttt{screenshots/} e descritte nel relativo indice.
 
 % =====================================================================
-\section{Test e validazione}
+\chapter{Test e validazione}
 
-\subsection{Suite automatica}
+\section{Suite automatica}
 
 La suite conta \textbf{126 test} eseguibili ovunque: sono completamente \emph{offline}
 e non richiedono n\'e il modello n\'e i server MCP. I doppi di test sostituiscono il
@@ -442,7 +466,7 @@ un risultato di errore), una coda disallineata poteva far passare un test senza 
 nulla fosse realmente verificato: il \emph{teardown} verifica ora che la coda sia stata
 consumata completamente.
 
-\subsection{Validazione sul campo}
+\section{Validazione sul campo}
 
 Il sistema \`e stato verificato end-to-end sulla dashboard. La
 Tabella~\ref{tab:misure} riporta i valori di alcuni turni reali, i cui output completi
@@ -473,7 +497,7 @@ mostrano una netta asimmetria: i profili \texttt{foot} e \texttt{car} rispondono
 circa 0,3--0,5 secondi, mentre \texttt{bus} richiede 30--45 secondi.
 
 % =====================================================================
-\section{Limiti noti e sviluppi futuri}
+\chapter{Limiti noti e sviluppi futuri}
 
 \paragraph{Latenza del trasporto pubblico.}
 L'istanza online del router ricostruisce il grafo del trasporto pubblico a ogni
@@ -511,7 +535,7 @@ espone il parametro corrispondente. Le domande di consultazione della rete (elen
 linee, orari delle fermate) restituiscono una risposta esplicita di non supporto.
 
 % =====================================================================
-\section{Conclusioni}
+\chapter{Conclusioni}
 
 Il lavoro ha prodotto un advisor di mobilit\`a funzionante e integrato nella dashboard
 Snap4City, capace di rispondere in linguaggio naturale confrontando percorsi a piedi,
@@ -537,6 +561,7 @@ o una risposta che dichiara di non aver trovato collegamenti, sono preferibili a
 verosimile ma inventato.
 
 % =====================================================================
+\addcontentsline{toc}{chapter}{Bibliografia}
 \begin{thebibliography}{9}
 
 \bibitem{mcp}
