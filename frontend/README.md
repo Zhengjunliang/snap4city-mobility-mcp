@@ -56,16 +56,6 @@ python -m snap4city_mobility_mcp.mcp_server   # :8020, terminal 1
 uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2
 ```
 
-Verifica rapida senza dashboard:
-
-```
-curl -s localhost:8010/health
-JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
-  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
-curl -s localhost:8010/advise/$JOB    # 202 while computing, then the widget JSON
-```
-
 **Job + poll**: la POST si limita ad *avviare* il turno (risponde subito con
 `{job_id}`) e il widget interroga `GET /advise/{job_id}` finché non ottiene 200. Un
 turno in autobus richiede circa 50–70 s e la catena di proxy davanti al bridge

@@ -82,16 +82,6 @@ Il testo della risposta è **l'ultimo turno `assistant` in `messages`** (standar
 
 **Modi di trasporto.** Quando la domanda non ne indica uno (*"da Piazza del Duomo a Santa Croce"*), tutti e tre vengono calcolati **in parallelo** — a piedi, in auto e con il trasporto pubblico — così la risposta li confronta e la mappa disegna una linea per ciascuno. I primi due sono itinerari **monomodali** (un unico mezzo dall'origine alla destinazione, quindi un'unica geometria); quello con il trasporto pubblico è **multimodale** — tratto pedonale fino alla fermata di salita, una o più tratte in autobus, tratto pedonale finale — e per questo viaggia suddiviso in `legs`, ciascuna con la propria geometria e il proprio mezzo. Il turno risponde una sola volta, quando tutti e tre sono pronti: il tempo totale è quello del più lento, oggi quello in autobus, perché il router What-If online ricostruisce il grafo del trasporto pubblico a ogni richiesta `vehicle=bus` (~30–45 s, una latenza accettata — l'indicatore di fase mantiene visibile l'attesa); i profili a piedi e auto rispondono in meno di un secondo. Indicando un modo (*"a piedi"*) si calcola solo quello, che quindi non paga mai la latenza dell'autobus. Un **orario di partenza** fornito dall'utente (*"alle 18"*, *"domani alle 9"*) diventa la finestra sugli orari del trasporto pubblico; un orario di *arrivo* non è supportato (il servlet What-If non espone `arrive_by`).
 
-**Limite noto — la linea dell'autobus è disegnata di fermata in fermata quando nessuna geometria GTFS corrisponde.** Una tratta percorsa in autobus torna dal router con un vertice per fermata, quindi la linea grezza taglia gli isolati in linea retta (misurato: 8 vertici su 1,78 km, con un salto massimo di 476 m). Non è un problema di dati mancanti — entrambi i feed GTFS contengono `shapes.txt` — ma dell'**importatore GTFS di GraphHopper, che quel file lo ignora**. Non è nemmeno una questione di parametri: il servlet non ne espone alcuno per la geometria e GraphHopper non ha un'opzione per le *shapes* (la sua PR aperta #3127 non è stata integrata; anche il ramo principale disegna di fermata in fermata). Il client aggira il problema a runtime (`gtfs_shapes.py`) confrontando la linea con l'API pubblica *tpl* di km4city e sostituendo la geometria reale, tagliata fra la fermata di salita e quella di discesa; quando nessuna variante corrisponde entro la tolleranza, la tratta conserva il segmento rettilineo. La correzione pulita è lato server ed è piccola: la libreria gtfs-lib carica già `shapes.txt` in memoria ed espone `GTFSFeed.getTripGeometry(trip_id)`, e il servlet dispone già di `ptLeg.trip_id` nel punto in cui serializza la tratta, quindi un campo `shape_wkt` lì darebbe a ogni client il percorso reale dell'autobus (richiesta di funzionalità per il team Snap4City).
-
-### Opzionale — puntare `route` a un altro whatif-router
-
-`route` usa di default il router What-If **online** (`https://www.snap4city.org/whatif-router/route`), che dal 2026-07-10 contiene il GTFS della Toscana e restituisce trasporto pubblico reale: **non serve un terzo processo**. Per provare un router costruito in proprio (per esempio con un diverso insieme di feed GTFS) basta modificare l'endpoint:
-
-```bash
-export S4C_WHATIF_ROUTER_URL=http://localhost:8080/whatif-router/route
-```
-
 ---
 
 ## 4. Struttura del progetto
@@ -130,39 +120,11 @@ Il server remoto `snap4agentic_advisor_native` (della piattaforma Snap4City) for
 
 **La geocodifica diretta e il calcolo dei percorsi sono serviti localmente** da `mcp_server.py`: `address_search_location` (che incapsula la ServiceMap **pubblica** di km4city, perché quella remota è difettosa lato server) e `route` (`vehicle="foot"|"car"|"bus"` più coordinate di partenza e arrivo e un `startdatetime` opzionale, che incapsula il router What-If GraphHopper). Il client vi si collega come **client separato** a server singolo (`S4C_LOCAL_MCP_URL`); è proprio tenerlo separato che preserva i nomi nudi degli strumenti remoti.
 
-Il nodo deterministico `execute` li concatena in Python — risoluzione dell'origine (geocodifica o punto GPS) → risoluzione della destinazione (geocodifica o servizio più vicino per categoria) → calcolo di ciascun modo → eventuale campionamento dei servizi lungo la geometria — e ogni chiamata passa da `mcp_tools.exec_tool`. Le firme esatte degli strumenti sono in [docs/snap4city-api-notes.md](docs/snap4city-api-notes.md) §2; per rileggere il registro aggiornato dalla JupyterHub:
-
-```powershell
-uv run python -c "
-import asyncio, json, httpx
-from fastmcp import Client
-async def main():
-    async with httpx.AsyncClient() as h:
-        cfg = (await h.get('http://192.168.1.117:8000/apps.json', timeout=10)).json()
-    async with Client(cfg) as c:
-        for t in await c.list_tools():
-            print(t.name, '—', (t.description or '').strip().splitlines()[0][:120])
-asyncio.run(main())
-"
-```
+Il nodo deterministico `execute` li concatena in Python — risoluzione dell'origine (geocodifica o punto GPS) → risoluzione della destinazione (geocodifica o servizio più vicino per categoria) → calcolo di ciascun modo → eventuale campionamento dei servizi lungo la geometria — e ogni chiamata passa da `mcp_tools.exec_tool`.
 
 ---
 
-## 6. Risoluzione dei problemi
-
-| Sintomo | Causa / rimedio |
-|---|---|
-| `uvicorn api:app` → `ModuleNotFoundError: snap4city_mobility_mcp` | Il pacchetto non è installato nell'ambiente attivo. Eseguire `pip install -e .` (nell'ambiente conda `s4c` sulla JupyterHub) oppure `uv run uvicorn api:app …` in locale. |
-| `POST /advise` → `Llama4Error: no user_credentials.json found` | Mettere `user_credentials.json` (`{"username": ..., "password": ...}`) nella radice del progetto. L'LLM risponde solo dalla JupyterHub. |
-| `apps.json` dà 404 / connessione rifiutata / timeout | Non si sta eseguendo dentro la JupyterHub (l'indirizzo interno è raggiungibile solo da lì), oppure la dashboard non è attiva. Verificare che `S4C_DASHBOARD_URL` non sia stato modificato. |
-| Una richiesta `public_transport` impiega ~30–45 s | Comportamento noto e accettato, non un difetto del client: il router What-If online ricostruisce il grafo del trasporto pubblico a ogni richiesta di quel tipo. `BUS_ROUTE_TIMEOUT_S=120` copre l'attesa. I profili a piedi e auto non toccano quel grafo (~0,3–0,5 s). |
-| Gli estremi del percorso si spostano, `civic` risulta vuoto, o una correzione sembra non avere effetto | Il server MCP locale (`:8020`) non è stato riavviato dopo la modifica al codice. Riavviare **entrambi** i processi. |
-| La chat mostra *"bridge non raggiungibile"* su un turno lungo (autobus) | Il widget deve essere quello aggiornato (job + poll). Un widget vecchio a singola richiesta resta appeso sulla POST e la catena di proxy la interrompe a ~60 s anche se il turno è andato a buon fine. Reincollare `frontend/mobility_advisor_dashboard.html`. |
-| VS Code: *"Package `fastmcp` is not installed in the selected environment"* | Impostare l'interprete dell'IDE su `.venv\Scripts\python.exe` (Command Palette → *Python: Select Interpreter*). |
-
----
-
-## 7. Licenza
+## 6. Licenza
 
 **MIT** — vedi [LICENSE](LICENSE).
 
