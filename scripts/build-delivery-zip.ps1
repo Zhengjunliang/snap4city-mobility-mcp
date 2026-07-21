@@ -6,7 +6,7 @@
     Wraps `git archive`, which ships ONLY tracked files. Two consequences matter:
 
       * anything .gitignore'd (user_credentials.json, .venv/, caches, outputs.txt,
-        debug.log) can never end up in the archive — no secret can leak;
+        debug.log) can never end up in the archive -- no secret can leak;
       * files marked `export-ignore` in .gitattributes (CLAUDE.md, docs/lessons.md)
         are dropped even though they are tracked.
 
@@ -20,7 +20,7 @@ Set-Location $repo
 # --- the archive comes from HEAD, so uncommitted work would be silently missing ---
 $dirty = git status --porcelain
 if ($dirty) {
-    Write-Host "Uncommitted changes — `git archive` exports HEAD, so these would NOT be included:" -ForegroundColor Yellow
+    Write-Host "Uncommitted changes -- 'git archive' exports HEAD, so these would NOT be included:" -ForegroundColor Yellow
     $dirty | ForEach-Object { Write-Host "  $_" }
     throw "Commit (or stash) first, then re-run."
 }
@@ -66,7 +66,7 @@ foreach ($dir in 'docs/diagrams', 'screenshots', 'examples', 'src', 'tests', 'fr
 # (anchored to that directory: img/stemma.pdf must not count as the report)
 $pdf = $entries | Where-Object { $_ -match '^snap4city-mobility-mcp/relazione/[^/]+\.pdf$' }
 if (-not $pdf) {
-    Write-Host "NOTE: no relazione/*.pdf in the archive — compile it (see relazione/README.md), commit it, and re-run." -ForegroundColor Yellow
+    Write-Host "NOTE: no relazione/*.pdf in the archive -- compile it (see relazione/README.md), commit it, and re-run." -ForegroundColor Yellow
 }
 
 "{0} entries -> {1} ({2:N1} MB)" -f $entries.Count, $out, ((Get-Item $out).Length / 1MB)
