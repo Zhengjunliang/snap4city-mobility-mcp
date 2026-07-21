@@ -44,8 +44,11 @@ for dir in docs/diagrams screenshots examples src tests frontend; do
     printf '%-16s %3s file\n' "$dir" "$(grep -c "^snap4city-mobility-mcp/$dir/" <<<"$entries" || true)"
 done
 
-if ! grep -qx "snap4city-mobility-mcp/relazione/relazione.pdf" <<<"$entries"; then
-    echo "NOTE: relazione.pdf is not in the archive — compile it (see relazione/README.md), commit it, and re-run."
+# The compiled report: Overleaf names the PDF after the project, so accept any
+# relazione/*.pdf rather than one fixed filename.
+# (anchored to that directory: img/stemma.pdf must not count as the report)
+if ! grep -q "^snap4city-mobility-mcp/relazione/[^/]\+\.pdf$" <<<"$entries"; then
+    echo "NOTE: no relazione/*.pdf in the archive — compile it (see relazione/README.md), commit it, and re-run."
 fi
 
 printf '%s entries -> %s\n' "$(wc -l <<<"$entries")" "$out"

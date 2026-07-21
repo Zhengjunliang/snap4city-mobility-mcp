@@ -5,7 +5,7 @@ Relazione dell'elaborato (Tipo A, *Sistemi Distribuiti*, UNIFI).
 | File | Contenuto |
 |---|---|
 | `relazione.tex` | sorgente LaTeX (da consegnare insieme al PDF) |
-| `relazione.pdf` | versione compilata — **da generare e depositare qui** |
+| `snap4city_mobility_mcp.pdf` | versione compilata (il nome è quello assegnato da Overleaf al progetto) |
 | `Tptesi2.cls` | classe LaTeX del template UNIFI (non è una classe standard: va consegnata insieme al sorgente, altrimenti il documento non compila) |
 | `img/stemma.pdf` | stemma dell'Ateneo usato nel frontespizio |
 
@@ -23,13 +23,16 @@ cartelle del progetto tramite
 \graphicspath{{figures/}{img/}{../docs/diagrams/}{../screenshots/}}
 ```
 
-Le sette immagini incluse sono:
+Le sei immagini incluse sono:
 
 | Immagine | Provenienza |
 |---|---|
 | `stemma.pdf` | `relazione/img/` |
-| `component.png`, `graph-flow.png`, `sequence.png`, `deployment.png` | `docs/diagrams/` |
+| `component.png`, `graph-flow.png`, `deployment.png` | `docs/diagrams/` |
 | `01-tre-modi.png`, `04-servizi-lungo-percorso.png` | `screenshots/` |
+
+`docs/diagrams/sequence.png` resta nel progetto come diagramma UML della consegna, ma
+non è incluso nella relazione.
 
 ## Compilazione su Overleaf (consigliata)
 
@@ -42,7 +45,8 @@ Le sette immagini incluse sono:
 3. Compilare con **pdfLaTeX**. La bibliografia è inclusa nel sorgente
    (`thebibliography`), quindi **non serve BibTeX**: due passate di pdfLaTeX bastano
    per risolvere indice e riferimenti alle figure.
-4. Scaricare il PDF e salvarlo qui come `relazione.pdf`.
+4. Scaricare il PDF e salvarlo in questa cartella (qualunque nome: lo script di
+   pacchettizzazione cerca un `relazione/*.pdf`).
 
 > `Tptesi2.cls` sta accanto a `relazione.tex`, quindi Overleaf la trova senza
 > configurazione aggiuntiva.
@@ -50,7 +54,7 @@ Le sette immagini incluse sono:
 ### Variante: progetto Overleaf autonomo
 
 Se si preferisce caricare solo questa cartella, copiare prima in `relazione/figures/`
-le sei immagini che stanno fuori (i quattro diagrammi e le due schermate):
+le cinque immagini che stanno fuori (i tre diagrammi e le due schermate):
 `\graphicspath` prova quel percorso per primo, quindi il sorgente compila senza
 modifiche. Classe e stemma sono già in questa cartella.
 

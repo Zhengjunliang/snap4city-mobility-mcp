@@ -1,8 +1,8 @@
 # snap4city-mobility-mcp
 
-**Client MCP con orchestrazione LangGraph** per il server *mobility advisor* Snap4City gestito dal referente. UNIFI — *Sistemi Distribuiti, elaborato di Tipo A*.
+**Client MCP con orchestrazione LangGraph** per il server *mobility advisor* remoto della piattaforma Snap4City. UNIFI — *Sistemi Distribuiti, elaborato di Tipo A*.
 
-L'utente pone una domanda di viaggio → un grafo LangGraph **deterministico** (`understand → execute → respond`) la risolve: il modello **Llama4** di Snap4City si limita a estrarre i parametri della richiesta (origine/destinazione/modo), mentre il codice Python guida in modo deterministico gli strumenti MCP — geocodifica e calcolo percorsi (tutti i modi) su un **server MCP locale** (`mcp_server.py`, che incapsula la ServiceMap pubblica km4city e il router What-If GraphHopper di Snap4City), geocodifica inversa / ricerca di servizi per prossimità / parcheggi in tempo reale sul server remoto — e compone la risposta. Il modello non invoca mai strumenti di propria iniziativa. Il risultato è il JSON che il widget della dashboard Snap4City disegna. Il server MCP remoto è gestito dal referente ed è ospitato sulla rete interna (raggiungibile direttamente dalla JupyterHub di Snap4City); questo progetto fornisce **client + orchestratore LangGraph + bridge FastAPI (`api.py`) + front-end della dashboard (`frontend/`) + il server MCP locale**.
+L'utente pone una domanda di viaggio → un grafo LangGraph **deterministico** (`understand → execute → respond`) la risolve: il modello **Llama4** di Snap4City si limita a estrarre i parametri della richiesta (origine/destinazione/modo), mentre il codice Python guida in modo deterministico gli strumenti MCP — geocodifica e calcolo percorsi (tutti i modi) su un **server MCP locale** (`mcp_server.py`, che incapsula la ServiceMap pubblica km4city e il router What-If GraphHopper di Snap4City), geocodifica inversa / ricerca di servizi per prossimità / parcheggi in tempo reale sul server remoto — e compone la risposta. Il modello non invoca mai strumenti di propria iniziativa. Il risultato è il JSON che il widget della dashboard Snap4City disegna. Il server MCP remoto fa parte della piattaforma Snap4City ed è ospitato sulla rete interna (raggiungibile direttamente dalla JupyterHub di Snap4City); questo progetto fornisce **client + orchestratore LangGraph + bridge FastAPI (`api.py`) + front-end della dashboard (`frontend/`) + il server MCP locale**.
 
 La relazione scritta dell'elaborato è in [relazione/](relazione/); i diagrammi dell'architettura in [docs/diagrams/](docs/diagrams/), le schermate della dashboard in [screenshots/](screenshots/) e gli output reali end-to-end in [examples/](examples/).
 
@@ -10,9 +10,9 @@ La relazione scritta dell'elaborato è in [relazione/](relazione/); i diagrammi 
 
 ## 1. Stato
 
-Funzionante end-to-end sulla **JupyterHub di Snap4City** (accesso da browser, MCP raggiunto direttamente sulla rete interna, senza VPN né tunnel SSH). Il server MCP remoto del referente è collegato via HTTP Streamable e il **client per l'LLM Llama4** (`src/snap4city_mobility_mcp/llm.py`, endpoint `llama4-agentic-inference`) è attivo in quell'ambiente.
+Funzionante end-to-end sulla **JupyterHub di Snap4City** (accesso da browser, MCP raggiunto direttamente sulla rete interna). Il server MCP remoto di Snap4City è collegato via HTTP Streamable e il **client per l'LLM Llama4** (`src/snap4city_mobility_mcp/llm.py`, endpoint `llama4-agentic-inference`) è attivo in quell'ambiente.
 
-L'advisor deterministico risponde a **domande di percorso punto-punto** — a piedi, in auto o con il trasporto pubblico — risolvendo gli estremi anche in base alla posizione GPS:
+L'advisor deterministico risponde a **domande di percorso punto-punto** — due itinerari **monomodali** (a piedi, in auto) e uno **multimodale** con il trasporto pubblico (tratto pedonale → tratte in autobus → tratto pedonale) — risolvendo gli estremi anche in base alla posizione GPS:
 
 - I **luoghi nominati** vengono geocodificati senza vincolo di regione; una città indicata dall'utente ha sempre la precedenza e, quando il GPS del browser è disponibile, fra candidati equivalenti vince quello **più vicino all'utente**. I dati km4city utilizzabili coprono di fatto la sola Toscana: conviene provare con località toscane.
 - Se **manca l'origine** ("portami al Duomo") si usa la **posizione GPS** dell'utente (geocodificata a ritroso una sola volta, così la risposta può dire *"dalla tua posizione"*); senza GPS l'advisor chiede il punto di partenza.
@@ -28,15 +28,13 @@ Lo strumento remoto `routing` è stato dismesso lato client: **tutto il calcolo 
 Servono **Python ≥ 3.10** (`.python-version` fissa la 3.10) e [`uv`](https://github.com/astral-sh/uv) (`pip install uv`):
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/Zhengjunliang/snap4city-mobility-mcp.git
 cd snap4city-mobility-mcp
 uv sync          # creates .venv/ and installs the lockfile's exact versions
 uv run pytest -q # local mock tests: no LLM / MCP needed, runs anywhere
 ```
 
-`uv run <cmd>` usa sempre il `.venv/` del progetto — attivarlo (`.venv\Scripts\Activate.ps1`, oppure `source .venv/bin/activate`) serve solo a risparmiare il prefisso.
-
-Sulla **JupyterHub** (l'unico ambiente in cui l'advisor gira davvero, vedi §3) `uv` di solito non c'è: conviene creare un ambiente conda con **Python 3.11** (`s4c`) — il kernel predefinito 3.9 è troppo vecchio per fastmcp — e installare con `pip install -e .`. **Non eseguire mai `pip install` nell'ambiente base della JupyterHub**: installare un pacchetto che aggiorna il `jupyter-server` di base rende il singleuser server non avviabile al riavvio successivo, e poiché il livello del container viene riutilizzato fra un riavvio e l'altro il problema non si risolve da solo.
+Sulla **JupyterHub** (l'unico ambiente in cui l'advisor gira davvero, vedi §3) `uv` di solito non c'è: conviene creare un ambiente conda con **Python 3.11** (`s4c`) — il kernel predefinito 3.9 è troppo vecchio per fastmcp — e installare con `pip install -e .`.
 
 L'**LLM Llama4** risponde **solo dalla JupyterHub**: le credenziali dell'account funzionale vanno messe lì in un file `user_credentials.json` (`{"username": "...", "password": "..."}`) — è escluso da git, quindi va caricato a mano nella radice del progetto. Il client lo cerca in `S4C_CREDENTIALS_FILE` → directory di lavoro → radice del progetto.
 
@@ -44,14 +42,9 @@ L'**LLM Llama4** risponde **solo dalla JupyterHub**: le credenziali dell'account
 
 ## 3. Esecuzione (JupyterHub)
 
-Il server MCP remoto è sulla rete interna e viene raggiunto direttamente dalla JupyterHub (senza VPN né tunnel SSH); l'orchestratore punta di default a `http://192.168.1.117:8000` (modificabile con `S4C_DASHBOARD_URL`). Accesso: snap4city.org → *Strumenti di sviluppo* → *Jupyter Hub - Python*, poi si verifica che la dashboard risponda:
+Il server MCP remoto è sulla rete interna e viene raggiunto direttamente dalla JupyterHub; l'orchestratore punta di default a `http://192.168.1.117:8000` (modificabile con `S4C_DASHBOARD_URL`). Accesso: snap4city.org → *Strumenti di sviluppo* → *Jupyter Hub - Python*
 
-```bash
-curl -s http://192.168.1.117:8000/apps.json | python -m json.tool | head
-# JSON with mcpServers listing snap4agentic_advisor_native / _legacy / _experimental
-```
-
-Servono **due processi**, ciascuno in un terminale della JupyterHub dentro l'ambiente `s4c`, avviando per primo il server MCP locale. Vanno fermati con `Ctrl-C`, mai chiudendo la scheda del browser: una scheda chiusa può lasciare la porta occupata (`Address already in use`; si verifica con `ss -ltn | grep -E ':8020|:8010'`).
+Servono **due processi**, ciascuno in un terminale della JupyterHub dentro l'ambiente `s4c`, avviando per primo il server MCP locale.
 
 ```bash
 python -m snap4city_mobility_mcp.mcp_server   # terminal 1 — :8020
@@ -61,31 +54,13 @@ uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2 — :8010
 - **Terminale 1, server MCP locale** (`:8020`): geocodifica diretta (incapsula la ServiceMap **pubblica** di km4city, perché lo strumento remoto `address_search_location` è difettoso lato server — le prove sono in [docs/snap4city-api-notes.md](docs/snap4city-api-notes.md) §3) e lo strumento `route` per tutti i modi (incapsula il router What-If GraphHopper). Gli serve solo traffico HTTP in uscita. Il client lo raggiunge tramite `S4C_LOCAL_MCP_URL` (default `http://127.0.0.1:8020/mcp`).
 - **Terminale 2, bridge dell'advisor** (`:8010`): guida l'LLM ed entrambi i server MCP. Il browser lo raggiunge *same-origin* attraverso `jupyter-server-proxy` (procedura di installazione e configurazione in [frontend/README.md](frontend/README.md)).
 
-**Dopo una modifica al codice vanno riavviati entrambi i processi.** Riavviare solo il bridge lascia in esecuzione il vecchio server MCP locale, con sintomi sconcertanti (estremi del percorso che si spostano, campo `civic` sempre vuoto) che sembrano errori di logica e sono invece un processo non aggiornato.
-
 Il front-end è una **chat box** in linguaggio naturale sulla dashboard Snap4City (`frontend/mobility_advisor_dashboard.html`, un `widgetExternalContent`) che dialoga con il bridge, con il percorso disegnato su un `widgetMap` adiacente.
 
 ### Il protocollo del bridge: job + poll
 
-`POST /advise` **avvia** il turno e risponde subito `{"job_id": ...}`; `GET /advise/{job_id}` restituisce `202` mentre il calcolo è in corso e `200` con il JSON per il widget quando è finito. Un turno con trasporto pubblico dura circa 50–70 s e la catena di reverse proxy interrompe qualunque singola richiesta oltre i ~60 s: nessuna richiesta HTTP può quindi durare quanto un turno intero.
-
-**Da non riportare a una singola richiesta, e da non tentare di risolvere con lo streaming di heartbeat**: `jupyter-server-proxy` inoltra progressivamente solo le risposte il cui `Accept` è `text/event-stream` e bufferizza integralmente tutte le altre, quindi i byte di heartbeat non raggiungono mai il proxy a monte. Con job + poll ogni richiesta HTTP dura meno di un secondo, e nessuna politica di buffering o timeout dei proxy può interromperla.
+`POST /advise` **avvia** il turno e risponde subito `{"job_id": ...}`; `GET /advise/{job_id}` restituisce `202` mentre il calcolo è in corso e `200` con il JSON per il widget quando è finito.
 
 Ogni `202` trasporta anche la **fase** (`understand` → `geocode` → `routing` / `routing_bus` → `respond`) e il tempo trascorso, così la chat dichiara che cosa sta facendo invece di mostrare una bolla di attesa muta. Fase e identificativo del job vivono solo nel livello di trasporto: non entrano mai nel JSON destinato al widget.
-
-Verifica rapida senza dashboard:
-
-```bash
-curl -s localhost:8010/health
-JOB=$(curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"da Piazza del Duomo a Santa Croce a piedi","history":[]}' \
-  | python -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
-until curl -s -o /tmp/turn.json -w '%{http_code}' localhost:8010/advise/$JOB | grep -q 200; do sleep 2; done
-head -c 300 /tmp/turn.json    # status="success", request_type="route", data.distance_km ≈ 0.68, full data.wkt
-# GPS-aware turn: the origin defaults to the position, a category resolves to the nearest service
-curl -s -X POST localhost:8010/advise -H "Content-Type: application/json" \
-  -d '{"query":"portami alla farmacia più vicina","history":[],"gps":{"lat":43.7731,"lng":11.2558}}'
-```
 
 Ogni turno sovrascrive `outputs.txt` con il JSON completo dell'output e `debug.log` con la diagnostica a livello di strumenti (entrambi esclusi da git, entrambi nella directory di lavoro): sono il primo posto da guardare quando un turno non disegna alcun percorso. Alcuni esempi di quell'output sono allegati in [examples/](examples/).
 
@@ -103,11 +78,11 @@ Ogni turno sovrascrive `outputs.txt` con il JSON completo dell'output e `debug.l
 }
 ```
 
-Il testo della risposta è **l'ultimo turno `assistant` in `messages`** (standard OpenAI): non esiste alcun campo `answer` aggiuntivo. `data` contiene il `wkt` completo, `distance_km`, `duration` e `mode`, più una lista `routes` (una voce per modo di trasporto; un percorso in autobus trasporta anche la geometria delle tratte in `legs` per la suddivisione sulla mappa, e ogni percorso porta con sé una stringa `detail` già formattata e i propri `services`). Il front-end conserva `messages` e li rispedisce come `history` al turno successivo, e a ogni turno invia la geolocalizzazione del browser come `gps: {lat, lng}` (oppure `null`). Le domande fuori ambito (comprese quelle di consultazione della rete, come elenchi di linee od orari) ricevono una risposta esplicita di non supporto.
+Il testo della risposta è **l'ultimo turno `assistant` in `messages`** (standard OpenAI): `data` contiene il `wkt` completo, `distance_km`, `duration` e `mode`, più una lista `routes` (una voce per modo di trasporto; un percorso in autobus trasporta anche la geometria delle tratte in `legs` per la suddivisione sulla mappa, e ogni percorso porta con sé una stringa `detail` già formattata e i propri `services`). Il front-end conserva `messages` e li rispedisce come `history` al turno successivo, e a ogni turno invia la geolocalizzazione del browser come `gps: {lat, lng}` (oppure `null`). Le domande fuori ambito (comprese quelle di consultazione della rete, come elenchi di linee od orari) ricevono una risposta esplicita di non supporto.
 
-**Modi di trasporto.** Quando la domanda non ne indica uno (*"da Piazza del Duomo a Santa Croce"*), tutti e tre vengono calcolati **in parallelo** — a piedi, in auto e con il trasporto pubblico — così la risposta li confronta e la mappa disegna una linea per ciascuno. Il turno risponde una sola volta, quando tutti e tre sono pronti: il tempo totale è quello del più lento, oggi quello in autobus, perché il router What-If online ricostruisce il grafo del trasporto pubblico a ogni richiesta `vehicle=bus` (~30–45 s, una latenza accettata — l'indicatore di fase mantiene visibile l'attesa); i profili a piedi e auto rispondono in meno di un secondo. Indicando un modo (*"a piedi"*) si calcola solo quello, che quindi non paga mai la latenza dell'autobus. Un **orario di partenza** fornito dall'utente (*"alle 18"*, *"domani alle 9"*) diventa la finestra sugli orari del trasporto pubblico; un orario di *arrivo* non è supportato (il servlet What-If non espone `arrive_by`).
+**Modi di trasporto.** Quando la domanda non ne indica uno (*"da Piazza del Duomo a Santa Croce"*), tutti e tre vengono calcolati **in parallelo** — a piedi, in auto e con il trasporto pubblico — così la risposta li confronta e la mappa disegna una linea per ciascuno. I primi due sono itinerari **monomodali** (un unico mezzo dall'origine alla destinazione, quindi un'unica geometria); quello con il trasporto pubblico è **multimodale** — tratto pedonale fino alla fermata di salita, una o più tratte in autobus, tratto pedonale finale — e per questo viaggia suddiviso in `legs`, ciascuna con la propria geometria e il proprio mezzo. Il turno risponde una sola volta, quando tutti e tre sono pronti: il tempo totale è quello del più lento, oggi quello in autobus, perché il router What-If online ricostruisce il grafo del trasporto pubblico a ogni richiesta `vehicle=bus` (~30–45 s, una latenza accettata — l'indicatore di fase mantiene visibile l'attesa); i profili a piedi e auto rispondono in meno di un secondo. Indicando un modo (*"a piedi"*) si calcola solo quello, che quindi non paga mai la latenza dell'autobus. Un **orario di partenza** fornito dall'utente (*"alle 18"*, *"domani alle 9"*) diventa la finestra sugli orari del trasporto pubblico; un orario di *arrivo* non è supportato (il servlet What-If non espone `arrive_by`).
 
-**Limite noto — la linea dell'autobus è disegnata di fermata in fermata quando nessuna geometria GTFS corrisponde.** Una tratta percorsa in autobus torna dal router con un vertice per fermata, quindi la linea grezza taglia gli isolati in linea retta (misurato: 8 vertici su 1,78 km, con un salto massimo di 476 m). Non è un problema di dati mancanti — entrambi i feed GTFS contengono `shapes.txt` — ma dell'**importatore GTFS di GraphHopper, che quel file lo ignora**. Non è nemmeno una questione di parametri: il servlet non ne espone alcuno per la geometria e GraphHopper non ha un'opzione per le *shapes* (la sua PR aperta #3127 non è stata integrata; anche il ramo principale disegna di fermata in fermata). Il client aggira il problema a runtime (`gtfs_shapes.py`) confrontando la linea con l'API pubblica *tpl* di km4city e sostituendo la geometria reale, tagliata fra la fermata di salita e quella di discesa; quando nessuna variante corrisponde entro la tolleranza, la tratta conserva il segmento rettilineo. La correzione pulita è lato server ed è piccola: la libreria gtfs-lib carica già `shapes.txt` in memoria ed espone `GTFSFeed.getTripGeometry(trip_id)`, e il servlet dispone già di `ptLeg.trip_id` nel punto in cui serializza la tratta, quindi un campo `shape_wkt` lì darebbe a ogni client il percorso reale dell'autobus (richiesta di funzionalità per il referente).
+**Limite noto — la linea dell'autobus è disegnata di fermata in fermata quando nessuna geometria GTFS corrisponde.** Una tratta percorsa in autobus torna dal router con un vertice per fermata, quindi la linea grezza taglia gli isolati in linea retta (misurato: 8 vertici su 1,78 km, con un salto massimo di 476 m). Non è un problema di dati mancanti — entrambi i feed GTFS contengono `shapes.txt` — ma dell'**importatore GTFS di GraphHopper, che quel file lo ignora**. Non è nemmeno una questione di parametri: il servlet non ne espone alcuno per la geometria e GraphHopper non ha un'opzione per le *shapes* (la sua PR aperta #3127 non è stata integrata; anche il ramo principale disegna di fermata in fermata). Il client aggira il problema a runtime (`gtfs_shapes.py`) confrontando la linea con l'API pubblica *tpl* di km4city e sostituendo la geometria reale, tagliata fra la fermata di salita e quella di discesa; quando nessuna variante corrisponde entro la tolleranza, la tratta conserva il segmento rettilineo. La correzione pulita è lato server ed è piccola: la libreria gtfs-lib carica già `shapes.txt` in memoria ed espone `GTFSFeed.getTripGeometry(trip_id)`, e il servlet dispone già di `ptLeg.trip_id` nel punto in cui serializza la tratta, quindi un campo `shape_wkt` lì darebbe a ogni client il percorso reale dell'autobus (richiesta di funzionalità per il team Snap4City).
 
 ### Opzionale — puntare `route` a un altro whatif-router
 
@@ -137,21 +112,21 @@ snap4city-mobility-mcp/
 ├── scripts/                    # delivery packaging
 ├── tests/                      # local mock unit tests (no LLM / MCP needed)
 └── src/
-    └── snap4city_mobility_mcp/    # client package + local MCP server — the remote advisor server is referente-managed
+    └── snap4city_mobility_mcp/    # client package + local MCP server — the remote advisor server is Snap4City-managed
         ├── mcp_tools.py           # client MCP layer: Client config, exec_tool, two-pass geocode, result parsers
         ├── mcp_server.py          # our local MCP server: forward geocode (public km4city ServiceMap) + `route` for all modes (What-If GraphHopper)
         ├── orchestrator.py        # deterministic Langgraph graph: understand → execute → respond; run_advisor
         ├── gtfs_shapes.py         # swaps bus ride-leg chords for real km4city GTFS shapes
         ├── geo.py                 # haversine + WKT helpers, shared by the graph and the local server
         ├── llm.py                 # Llama4Client — Snap4City agentic LLM (llama4-agentic-inference, OpenAI-compatible)
-        └── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from referente's reference example
+        └── token_manager.py       # vendored auth util (OAuth2 token cache/refresh) from the Snap4City reference example
 ```
 
 ---
 
 ## 5. Strumenti utilizzati — 3 remoti + 2 locali
 
-Il server remoto `snap4agentic_advisor_native` (gestito dal referente) fornisce la **geocodifica inversa** (`coordinates_to_address`, che dà un nome all'origine ricavata dal GPS), la **ricerca di servizi per prossimità** (`service_search_near_gps_position`, usata per i parcheggi vicino alla destinazione, per le destinazioni del tipo "farmacia più vicina" e per i servizi lungo il percorso) e i **parcheggi in tempo reale** (`service_info_dev`, posti liberi per singolo parcheggio). Lo si raggiunge tramite la scoperta automatica della dashboard (`http://192.168.1.117:8000/apps.json` → `Client(config)`), restringendo la configurazione a quel solo server: FastMCP antepone il prefisso ai nomi degli strumenti solo quando fonde **più** server in un'unica configurazione, quindi con un solo server gli strumenti si invocano con il nome nudo.
+Il server remoto `snap4agentic_advisor_native` (della piattaforma Snap4City) fornisce la **geocodifica inversa** (`coordinates_to_address`, che dà un nome all'origine ricavata dal GPS), la **ricerca di servizi per prossimità** (`service_search_near_gps_position`, usata per i parcheggi vicino alla destinazione, per le destinazioni del tipo "farmacia più vicina" e per i servizi lungo il percorso) e i **parcheggi in tempo reale** (`service_info_dev`, posti liberi per singolo parcheggio). Lo si raggiunge tramite la scoperta automatica della dashboard (`http://192.168.1.117:8000/apps.json` → `Client(config)`), restringendo la configurazione a quel solo server: FastMCP antepone il prefisso ai nomi degli strumenti solo quando fonde **più** server in un'unica configurazione, quindi con un solo server gli strumenti si invocano con il nome nudo.
 
 **La geocodifica diretta e il calcolo dei percorsi sono serviti localmente** da `mcp_server.py`: `address_search_location` (che incapsula la ServiceMap **pubblica** di km4city, perché quella remota è difettosa lato server) e `route` (`vehicle="foot"|"car"|"bus"` più coordinate di partenza e arrivo e un `startdatetime` opzionale, che incapsula il router What-If GraphHopper). Il client vi si collega come **client separato** a server singolo (`S4C_LOCAL_MCP_URL`); è proprio tenerlo separato che preserva i nomi nudi degli strumenti remoti.
 
@@ -191,4 +166,4 @@ asyncio.run(main())
 
 **MIT** — vedi [LICENSE](LICENSE).
 
-`src/snap4city_mobility_mcp/token_manager.py` (gestione della cache e del rinnovo del token OAuth2) è adattato dal notebook di riferimento Snap4City del referente e qui ridistribuito nell'ambito di questo elaborato accademico; tutto il resto del codice è originale.
+`src/snap4city_mobility_mcp/token_manager.py` (gestione della cache e del rinnovo del token OAuth2) è adattato dal notebook di riferimento Snap4City e qui ridistribuito nell'ambito di questo elaborato accademico; tutto il resto del codice è originale.

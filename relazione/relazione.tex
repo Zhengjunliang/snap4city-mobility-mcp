@@ -82,26 +82,26 @@ km4city e un insieme di servizi web e dashboard configurabili.
 Questo elaborato realizza un \textbf{mobility advisor} conversazionale per quella
 piattaforma: l'utente pone una domanda di viaggio in linguaggio naturale
 (\emph{``da Piazza del Duomo a Santa Croce''}) e il sistema risponde con il confronto
-fra i modi di trasporto disponibili, disegnando i percorsi su una mappa della dashboard.
+fra i modi di trasporto disponibili --- due itinerari \textbf{monomodali}, a piedi e in
+auto, e uno \textbf{multimodale} con il trasporto pubblico --- disegnando i percorsi su
+una mappa della dashboard.
 
 \section{Obiettivo}
 
 L'obiettivo \`e collegare un modello linguistico e un insieme di strumenti remoti
 esposti secondo il \emph{Model Context Protocol} (MCP) in modo che il risultato sia
-\textbf{affidabile e riproducibile}. La scelta progettuale centrale, discussa nel
-Capitolo~\ref{cap:architettura}, \`e stata rinunciare all'approccio \emph{agentico}
-(un LLM libero di invocare strumenti in un ciclo) a favore di un \textbf{grafo
-deterministico} in cui il modello interviene una sola volta, per estrarre i parametri
-della richiesta.
+\textbf{affidabile e riproducibile}. Il sistema \`e realizzato come un \textbf{grafo
+deterministico} (Capitolo~\ref{cap:architettura}) in cui il modello interviene una sola
+volta, per estrarre i parametri della richiesta.
 
 \section{Contenuto della consegna}
 
-Il server MCP \emph{advisor} remoto \`e gestito dal referente e ospitato sulla rete
-interna del DISIT: non fa parte di questa consegna. Questo progetto fornisce:
+Il server MCP \emph{advisor} remoto fa parte della piattaforma Snap4City ed \`e ospitato
+sulla rete interna del DISIT: non fa parte di questa consegna. Questo progetto fornisce:
 
 \begin{itemize}
   \item il \textbf{client MCP} e l'\textbf{orchestratore LangGraph}
-        (\texttt{src/snap4city\_mobility\_mcp/orchestrator.py});
+        (\texttt{orchestrator.py});
   \item un \textbf{server MCP locale} (\texttt{mcp\_server.py}) che espone
         geocodifica diretta e calcolo percorsi per tutti i modi;
   \item un \textbf{bridge HTTP} FastAPI (\texttt{api.py}) fra la dashboard e
@@ -125,16 +125,11 @@ scopre a runtime e li invoca. In questo progetto il client \`e realizzato con Fa
 \cite{fastmcp} e dialoga con due server distinti:
 
 \begin{itemize}
-  \item il server \textbf{remoto} del referente
+  \item il server \textbf{remoto} della piattaforma Snap4City
         (\texttt{snap4agentic\_advisor\_native}), scoperto automaticamente tramite
         l'endpoint \texttt{/apps.json} della dashboard;
   \item il server \textbf{locale} sviluppato in questo elaborato.
 \end{itemize}
-
-Un dettaglio operativo rilevante: FastMCP aggiunge il prefisso del server ai nomi dei
-tool \textbf{solo} quando fonde pi\`u server in un'unica configurazione. Mantenendo due
-client separati, ciascuno con un solo server, i tool restano invocabili con il nome
-nudo e il codice non deve inseguire i prefissi.
 
 \section{LangGraph}
 
@@ -303,6 +298,16 @@ risponde una sola volta quando tutti sono pronti: il tempo totale \`e quello del
 lento, non la somma. Se il modo \`e indicato esplicitamente si calcola solo quello, in
 modo che chi chiede un percorso a piedi non paghi la latenza del trasporto pubblico.
 
+I tre risultati non hanno per\`o la stessa struttura. A piedi e in auto sono itinerari
+\textbf{monomodali}: un unico mezzo copre l'intero tragitto, dall'origine alla
+destinazione. Quello con il trasporto pubblico \`e invece \textbf{multimodale}, perch\'e
+combina un tratto pedonale fino alla fermata di salita, una o pi\`u tratte a bordo
+dell'autobus e un tratto pedonale finale. Per questo il back-end lo restituisce
+suddiviso in tratte (\texttt{legs}), ciascuna con la propria geometria e il proprio
+mezzo, mentre per un itinerario monomodale \`e sufficiente un'unica geometria: \`e la
+suddivisione che permette al front-end di disegnare con colori distinti la parte a piedi
+e quella in autobus, e di collocare i segnaposto alle fermate di salita e di discesa.
+
 L'eventuale orario di partenza viene passato \emph{solo} al profilo di trasporto
 pubblico, l'unico con un modello temporale (gli orari GTFS); il fuso orario viene
 fissato esplicitamente a \texttt{Europe/Rome}, perch\'e il servlet interpreta le date
@@ -310,57 +315,19 @@ prive di offset nel proprio fuso e il processo sul JupyterHub lavora in UTC.
 
 Un itinerario di trasporto pubblico che il router restituisce interamente pedonale non
 \`e un errore: su tragitti brevi camminare domina qualunque attesa. In quel caso il
-percorso viene ri-etichettato come pedonale e presentato onestamente come tale.
+percorso perde la propria natura multimodale e viene ri-etichettato come pedonale,
+presentato onestamente come tale.
 
 \section{La geometria reale delle tratte in autobus}
 
-Il router restituisce, per una tratta percorsa in autobus, \textbf{un vertice per
-fermata}: la linea disegnata taglia gli isolati in linea retta. Non \`e un difetto dei
-dati --- entrambi i feed GTFS contengono \texttt{shapes.txt} --- ma
-dell'importatore GTFS di GraphHopper, che quel file lo ignora.
+Per una tratta percorsa in autobus il router restituisce \textbf{un vertice per fermata}:
+la geometria reale del percorso non \`e presente nella sua risposta, quindi la linea
+disegnata taglia gli isolati in linea retta.
 
-Il modulo \texttt{gtfs\_shapes.py} recupera la geometria vera a runtime interrogando
-l'API pubblica \emph{tpl} di km4city. Il punto delicato \`e l'\textbf{assenza di
-identificatori comuni}: gli \texttt{trip\_id} del router appartengono alla sua istantanea
-del feed, gli URI km4city alla propria acquisizione, e i due spazi di identificatori non
-sono confrontabili. L'unica chiave condivisa \`e la geometria stessa. Il modulo quindi
-seleziona le varianti di linea il cui nome breve corrisponde, e accetta una variante
-solo se la distanza media delle fermate dalla geometria \`e sotto soglia \emph{e} la
-proiezione ordinata dei punti di salita e discesa \`e coerente --- un semplice
-punteggio di distanza non distinguerebbe le due direzioni di marcia, che insistono
-sulla stessa sede stradale. Se nessuna variante \`e accettabile, la tratta conserva la
-geometria originale: la funzionalit\`a degrada, non fallisce.
-
-\section{Il bridge: protocollo \emph{job + poll}}
-
-Un turno con trasporto pubblico dura circa 50--70 secondi, mentre la catena di reverse
-proxy davanti al JupyterHub interrompe qualunque richiesta HTTP che superi il minuto.
-Il primo tentativo di soluzione --- mantenere viva la connessione inviando byte di
-\emph{heartbeat} --- si \`e rivelato inefficace: \texttt{jupyter-server-proxy}
-inoltra progressivamente solo le risposte dichiarate \texttt{text/event-stream} e
-bufferizza integralmente tutte le altre, quindi quei byte non uscivano mai.
-
-La soluzione adottata rimuove il problema alla radice separando il turno dalla durata
-della richiesta (Figura~\ref{fig:sequence}): \texttt{POST /advise} avvia
-l'elaborazione e risponde immediatamente con un identificativo; il front-end interroga
-\texttt{GET /advise/\{job\_id\}} ogni 1,5 secondi ottenendo \texttt{202} finch\'e il
-calcolo prosegue e \texttt{200} con il risultato al termine. Ogni richiesta HTTP dura
-meno di un secondo, quindi nessuna politica di buffering o timeout dei livelli
-intermedi pu\`o interromperla --- propriet\`a che resta valida anche cambiando ambiente
-di deploy.
-
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=\textwidth]{sequence.png}
-  \caption{Sequenza di un turno con il protocollo \emph{job + poll}.}
-  \label{fig:sequence}
-\end{figure}
-
-Ogni risposta \texttt{202} trasporta anche la fase corrente e il tempo trascorso, cos\`i
-la bolla di attesa della chat dichiara che cosa sta facendo il sistema
-(\emph{``Calcolo il percorso in bus\ldots{} 34s''}) invece di restare muta. Fase e
-identificativo del job vivono solo nel livello di trasporto: non entrano mai nel
-payload restituito al widget.
+Il modulo \texttt{gtfs\_shapes.py} la recupera a runtime dall'API pubblica \emph{tpl} di
+km4city: individua la variante di linea che corrisponde alla tratta e ne ritaglia il tratto
+compreso fra la fermata di salita e quella di discesa. Quando nessuna variante corrisponde,
+la tratta conserva la geometria originale: la funzionalit\`a degrada, non fallisce.
 
 \section{Il front-end}
 
@@ -368,7 +335,7 @@ La chat box \`e un \texttt{widgetExternalContent} incollato nella dashboard, che
 disegna i percorsi su un \texttt{widgetMap} adiacente. Il widget dispone di un ramo
 \emph{manual} che collega semplicemente i punti forniti: usandolo, la mappa
 \textbf{non interroga alcun router} e la linea compare insieme al testo della risposta.
-Per il trasporto pubblico il back-end invia la suddivisione in tratte a piedi e in
+Per l'itinerario multimodale il back-end invia la suddivisione in tratte a piedi e in
 autobus, che vengono disegnate con colori distinti e con i segnaposto alle fermate di
 salita e discesa.
 
@@ -378,13 +345,6 @@ mostra il dettaglio gi\`a pre-calcolato dal back-end e commuta i segnaposto --- 
 un nuovo turno costerebbe di nuovo la latenza dell'autobus. Nella cronologia conversazionale
 viene riscritta solo una riga di eco della scelta, sufficiente a mantenere il contesto
 per le domande successive senza gonfiare i prompt seguenti.
-
-Un vincolo di piattaforma merita una nota: il codice del widget viene incollato
-direttamente nel DOM della dashboard, non in un \emph{iframe}. Un selettore CSS globale
-si propaga quindi all'intera pagina --- una singola regola su \texttt{html, body} aveva
-fatto sparire la barra del titolo del widget e comparire una barra di scorrimento
-spuria. Tutti i selettori del foglio di stile sono perci\`o limitati a una classe
-dedicata.
 
 % =====================================================================
 \chapter{Distribuzione e integrazione}
@@ -409,8 +369,9 @@ modo indicato produce i tre percorsi, il testo di confronto e la barra di selezi
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{01-tre-modi.png}
-  \caption{Turno a tre modi: percorsi a piedi, in auto e in trasporto pubblico
-           disegnati insieme sulla mappa della dashboard.}
+  \caption{Turno a tre modi: i due itinerari monomodali (a piedi, in auto) e quello
+           multimodale (trasporto pubblico) disegnati insieme sulla mappa della
+           dashboard.}
   \label{fig:tremodi}
 \end{figure}
 
@@ -438,18 +399,19 @@ raccolte nella cartella \texttt{screenshots/} e descritte nel relativo indice.
 La suite conta \textbf{126 test} eseguibili ovunque: sono completamente \emph{offline}
 e non richiedono n\'e il modello n\'e i server MCP. I doppi di test sostituiscono il
 client MCP con una coda deterministica di risposte e il client LLM con una risposta
-predefinita.
+predefinita; la Tabella~\ref{tab:test} ne riassume la composizione.
 
 \begin{table}[htbp]
   \centering
-  \begin{tabular}{lr l}
+  \small
+  \begin{tabular}{lrp{0.48\textwidth}}
     \toprule
     \textbf{File} & \textbf{Test} & \textbf{Copertura} \\
     \midrule
-    \texttt{test\_orchestrator.py} & 74 & nodi del grafo, risoluzione estremi, concorrenza, composizione risposta \\
-    \texttt{test\_mcp\_server.py}  & 20 & tool \texttt{route}, suddivisione tratte, geocodifica \\
+    \texttt{test\_orchestrator.py} & 74 & nodi del grafo, risoluzione degli estremi, concorrenza, composizione della risposta \\
+    \texttt{test\_mcp\_server.py}  & 20 & tool \texttt{route}, suddivisione delle tratte, geocodifica \\
     \texttt{test\_mcp\_tools.py}   & 13 & doppia passata, parser degli envelope, riduzione del contesto \\
-    \texttt{test\_api.py}          &  9 & sanificazione GPS e protocollo job/poll \\
+    \texttt{test\_api.py}          &  9 & sanificazione del GPS e API del bridge \\
     \texttt{test\_gtfs\_shapes.py} &  6 & scelta della variante, taglio della geometria, degradazioni \\
     \texttt{test\_llm.py}          &  4 & ritentativi su errori transitori, credenziali \\
     \bottomrule
@@ -457,14 +419,6 @@ predefinita.
   \caption{Composizione della suite di test.}
   \label{tab:test}
 \end{table}
-
-Due accorgimenti si sono rivelati necessari. Le cache di processo (geocodifica e indice
-delle linee) vengono azzerate prima di ogni test, altrimenti un risultato memorizzato
-salta una risposta della coda e disallinea tutte le successive. Inoltre, poich\'e lo
-strato di esecuzione degli strumenti non solleva mai eccezioni (converte ogni errore in
-un risultato di errore), una coda disallineata poteva far passare un test senza che
-nulla fosse realmente verificato: il \emph{teardown} verifica ora che la coda sia stata
-consumata completamente.
 
 \section{Validazione sul campo}
 
@@ -497,44 +451,6 @@ mostrano una netta asimmetria: i profili \texttt{foot} e \texttt{car} rispondono
 circa 0,3--0,5 secondi, mentre \texttt{bus} richiede 30--45 secondi.
 
 % =====================================================================
-\chapter{Limiti noti e sviluppi futuri}
-
-\paragraph{Latenza del trasporto pubblico.}
-L'istanza online del router ricostruisce il grafo del trasporto pubblico a ogni
-richiesta con profilo \texttt{bus}. \`E una caratteristica del deploy, non del client:
-l'unica leva a disposizione \`e stata rendere l'attesa visibile con l'indicatore di
-fase. Una correzione lato server (mantenere il grafo in memoria fra le richieste)
-azzererebbe il problema senza modifiche al client.
-
-\paragraph{Geometria delle tratte in autobus.}
-La soluzione basata sull'API \emph{tpl} copre le linee presenti nell'acquisizione
-km4city; quando le versioni dei feed divergono, la tratta ricade sulla geometria
-fermata-a-fermata. La correzione definitiva \`e piccola e lato server: la libreria GTFS
-gi\`a in uso da GraphHopper carica \texttt{shapes.txt} in memoria ed espone un metodo
-per ottenere la geometria di una corsa; il servlet dispone gi\`a dell'identificativo
-della corsa nel punto in cui serializza la tratta. Aggiungere l\`i un campo con la
-geometria reale renderebbe superfluo l'intero meccanismo di riconciliazione.
-
-\paragraph{Copertura territoriale.}
-L'intera catena di dati (indice degli indirizzi, grafo stradale, feed GTFS) copre
-di fatto la sola Toscana. Interrogazioni fuori regione restituiscono rumore anzich\'e
-un errore esplicito. Si era valutato un limite di distanza come sentinella, ma \`e stato
-rimosso perch\'e uccideva richieste legittime: nominare esplicitamente una citt\`a
-lontana \`e un uso corretto del sistema.
-
-\paragraph{Precisione dei numeri civici.}
-Nell'indice km4city numeri civici adiacenti sullo stesso lato della strada condividono
-spesso le medesime coordinate, ancorate allo spigolo dell'isolato. La selezione del
-civico corretto funziona, ma la posizione pu\`o discostarsi di oltre cento metri. Non
-esistono dati migliori nell'ecosistema e la deviazione ricade comunque sulla stessa
-via, quindi si \`e scelto di non introdurre dipendenze esterne.
-
-\paragraph{Funzionalit\`a non supportate.}
-L'orario di \emph{arrivo} desiderato non \`e gestito, perch\'e il servlet di routing non
-espone il parametro corrispondente. Le domande di consultazione della rete (elenchi di
-linee, orari delle fermate) restituiscono una risposta esplicita di non supporto.
-
-% =====================================================================
 \chapter{Conclusioni}
 
 Il lavoro ha prodotto un advisor di mobilit\`a funzionante e integrato nella dashboard
@@ -542,23 +458,10 @@ Snap4City, capace di rispondere in linguaggio naturale confrontando percorsi a p
 in auto e con il trasporto pubblico, di risolvere destinazioni generiche a partire dalla
 posizione dell'utente e di mostrare i servizi lungo il tragitto.
 
-Il risultato tecnicamente pi\`u significativo non \`e una singola funzionalit\`a, ma la
-scelta architetturale che le sostiene tutte: \textbf{confinare il modello linguistico
-all'unico compito che richiede davvero comprensione del linguaggio}, l'estrazione dei
-parametri, e lasciare a codice deterministico l'esecuzione e la formulazione della
-risposta. Questa scelta ha eliminato una classe di guasti (chiamate a strumento
-malformate, informazioni inventate, deriva linguistica), ha dimezzato le chiamate al
-gateway e ha reso l'intero sistema verificabile con test offline.
-
-La seconda lezione ricorrente riguarda l'integrazione con servizi di terze parti: pi\`u
-volte la spiegazione plausibile di un malfunzionamento si \`e rivelata errata, e la
-soluzione \`e emersa solo misurando il comportamento reale --- confrontando la risposta
-di un endpoint con quella del suo equivalente pubblico, oppure leggendo il codice
-sorgente del componente intermedio invece di ipotizzarne il comportamento. Ne \`e
-derivata anche la scelta, ove possibile, di degradare in modo esplicito e onesto
-piuttosto che simulare un risultato: una tratta che conserva la geometria approssimata,
-o una risposta che dichiara di non aver trovato collegamenti, sono preferibili a un dato
-verosimile ma inventato.
+L'architettura scelta --- una sola chiamata al modello linguistico, per l'estrazione dei
+parametri, e codice deterministico per l'esecuzione degli strumenti e la formulazione
+della risposta --- rende il comportamento del sistema riproducibile e verificabile con
+una suite di test interamente offline.
 
 % =====================================================================
 \addcontentsline{toc}{chapter}{Bibliografia}

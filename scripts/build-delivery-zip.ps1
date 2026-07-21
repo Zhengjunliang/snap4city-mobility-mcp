@@ -61,9 +61,12 @@ foreach ($dir in 'docs/diagrams', 'screenshots', 'examples', 'src', 'tests', 'fr
     "{0,-16} {1,3} file" -f $dir, $n
 }
 
-$pdf = 'snap4city-mobility-mcp/relazione/relazione.pdf'
-if ($entries -notcontains $pdf) {
-    Write-Host "NOTE: relazione.pdf is not in the archive — compile it (see relazione/README.md), commit it, and re-run." -ForegroundColor Yellow
+# The compiled report: Overleaf names the PDF after the project, so accept any
+# relazione/*.pdf rather than one fixed filename.
+# (anchored to that directory: img/stemma.pdf must not count as the report)
+$pdf = $entries | Where-Object { $_ -match '^snap4city-mobility-mcp/relazione/[^/]+\.pdf$' }
+if (-not $pdf) {
+    Write-Host "NOTE: no relazione/*.pdf in the archive — compile it (see relazione/README.md), commit it, and re-run." -ForegroundColor Yellow
 }
 
 "{0} entries -> {1} ({2:N1} MB)" -f $entries.Count, $out, ((Get-Item $out).Length / 1MB)

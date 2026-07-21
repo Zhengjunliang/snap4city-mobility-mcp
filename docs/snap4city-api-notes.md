@@ -1,7 +1,7 @@
 # API Smart City Snap4City: osservazioni campo per campo
 
 Riferimento sul backend: appunti campo per campo raccolti interrogando dal vivo gli endpoint
-km4city che stanno dietro al server MCP del referente. La §1 tratta la semantica di geocodifica
+km4city che stanno dietro al server MCP remoto di Snap4City. La §1 tratta la semantica di geocodifica
 da cui l'advisor dipende, la §2 le firme degli strumenti remoti che invoca (nomi nudi: una
 configurazione a server singolo non aggiunge prefissi), la §3 le prove del perché la geocodifica
 diretta è servita localmente.
@@ -51,7 +51,7 @@ della risposta riportata qui sotto è quella restituita da entrambi, quindi il p
 
 ---
 
-## §2. Server MCP remoto del referente: firme degli strumenti (rilevate il 2026-05-28)
+## §2. Server MCP remoto Snap4City: firme degli strumenti (rilevate il 2026-05-28)
 
 Origine: `GET http://192.168.1.117:8000/apps.json` → `Client(cfg)` → `list_tools()`; [mcp_tools._build_config](../src/snap4city_mobility_mcp/mcp_tools.py) restringe la configurazione al server `native` e sostituisce l'indirizzo interno con `DASHBOARD_URL`. Ambito: il solo `snap4agentic_advisor_native` (25 strumenti esposti).
 

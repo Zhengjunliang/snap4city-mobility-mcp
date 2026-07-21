@@ -127,7 +127,8 @@ Due requisiti dell'ambiente, entrambi **fuori dal controllo di questo file**:
   flusso senza GPS. Se gli iframe dei widgetExternalContent di Snap4City abbiano quel
   permesso è un'impostazione della piattaforma: si verifica con i DevTools (eseguendo
   `navigator.permissions.query({name:'geolocation'})` nel contesto dell'iframe) e, se
-  risulta bloccato, va chiesto al referente di abilitarlo.
+  risulta bloccato, va chiesto agli amministratori della piattaforma Snap4City di
+  abilitarlo.
 
 ## Note
 
@@ -138,10 +139,12 @@ Due requisiti dell'ambiente, entrambi **fuori dal controllo di questo file**:
 - Tutti e tre i modi sono calcolati dallo strumento locale `route` del back-end (router
   What-If GraphHopper) e disegnati dalla sua geometria — verde a piedi, blu in auto,
   arancione per la tratta in autobus con i segnaposto alle fermate di salita e discesa.
-  Un itinerario di trasporto pubblico interamente pedonale (tragitto breve: camminare
-  batte qualunque autobus) torna ri-etichettato come percorso a piedi, quindi la mappa
-  disegna una normale linea verde.
-- **Selettore dei percorsi**: un turno multimodale (nessun modo indicato → 2-3 percorsi
+  A piedi e in auto sono itinerari **monomodali** (un'unica geometria); quello con il
+  trasporto pubblico è **multimodale**, quindi arriva suddiviso in `legs` ed è l'unico
+  disegnato a due colori. Un itinerario di trasporto pubblico interamente pedonale
+  (tragitto breve: camminare batte qualunque autobus) torna ri-etichettato come percorso
+  a piedi, quindi la mappa disegna una normale linea verde.
+- **Selettore dei percorsi**: un turno a più modi (nessun modo indicato → 2-3 percorsi
   restituiti) riempie il dock `#advChips` (una barra fissa fra la chat e la riga di
   input) con una chip per percorso, etichettata con il solo nome del modo ("A piedi" /
   "In auto" / "In autobus" — distanza e durata sono già nel testo della risposta), più
