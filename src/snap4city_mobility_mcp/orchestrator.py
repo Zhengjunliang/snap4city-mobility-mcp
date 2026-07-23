@@ -88,6 +88,8 @@ LEAVE ("alle 18", "domani alle 9"); '' when they give none — NEVER invent one.
 <examples>
 "portami al Duomo" → request_type=journey, origin_text='', destination_text="Duomo"
 "dov'è la farmacia più vicina?" → request_type=journey, origin_text='', destination_text="farmacia", destination_category="Pharmacy"
+"mostrami le farmacie qui intorno" → request_type=nearby, origin_text='', destination_category="Pharmacy"
+"quali supermercati ci sono vicino a Pisa?" → request_type=nearby, origin_text="Pisa", destination_category="Supermarket"
 "portami al Duomo e mostrami i ristoranti lungo il percorso" → request_type=journey, origin_text='', destination_text="Duomo", services_category="Restaurant"
 "e in bus?" (follow-up to the piazza Duomo → piazza Dalmazia trip) → request_type=journey, origin_text="piazza Duomo, Firenze", destination_text="piazza Dalmazia, Firenze", mode=public_transport
 "da Santa Croce alla stazione in bus alle 18" → request_type=journey, origin_text="Santa Croce", destination_text="stazione", mode=public_transport, departure_time="18:00"
@@ -105,8 +107,8 @@ _EXTRACT_SLOTS_SCHEMA = {
             "properties": {
                 "request_type": {
                     "type": "string",
-                    "enum": ["journey", "other"],
-                    "description": "Classify by STRUCTURE, not vocabulary. 'journey' = the user wants to get somewhere: from an origin to a destination (named, carried over from earlier in the chat, or implicitly from their own position), including reaching the nearest place of some kind — use 'journey' even when transit words like bus/line/tram appear. 'other' = anything else (including network reference questions — which lines exist, stop timetables — that this advisor does not answer).",
+                    "enum": ["journey", "nearby", "other"],
+                    "description": "Classify by STRUCTURE, not vocabulary. 'journey' = the user wants to get somewhere: from an origin to a destination (named, carried over from earlier in the chat, or implicitly from their own position), including reaching the nearest place of some kind ('portami/dov'è la farmacia più vicina') — use 'journey' even when transit words like bus/line/tram appear. 'nearby' = the user wants to SEE or list services of a generic kind AROUND a point, NOT to travel there ('mostrami le farmacie qui intorno', 'quali supermercati ci sono vicino a me', 'farmacie vicino a Piazza Duomo'): fill destination_category with the km4city category and origin_text with the named place ('' = their own position). 'other' = anything else (including network reference questions — which lines exist, stop timetables — that this advisor does not answer).",
                 },
                 "origin_text": {
                     "type": "string",
@@ -118,7 +120,7 @@ _EXTRACT_SLOTS_SCHEMA = {
                 },
                 "destination_category": {
                     "type": "string",
-                    "description": "Only when the destination is a GENERIC KIND of place rather than a named one ('la farmacia più vicina', 'un supermercato'): the matching English km4city service category, e.g. Pharmacy, Hospital, Supermarket, Museum, Hotel, Restaurant, Car_park, Fuel_station. '' when the destination is a named place.",
+                    "description": "The generic KIND of place: for a 'journey' when the destination is a category not a named one ('la farmacia più vicina', 'un supermercato'), OR for a 'nearby' request the kind of service to show around the point. The matching English km4city service category, e.g. Pharmacy, Hospital, Supermarket, Museum, Hotel, Restaurant, Car_park, Fuel_station. '' when the destination is a named place.",
                 },
                 "services_category": {
                     "type": "string",
@@ -148,7 +150,7 @@ _EXTRACT_SLOTS_SCHEMA = {
 
 class AdvisorState(TypedDict, total=False):
     messages: list[dict[str, Any]]  # chat history (system/user/assistant) for multi-turn
-    intent: str  # route | other
+    intent: str  # route | nearby | other
     slots: dict[str, Any]  # understand output (request_type, intent, origin_text, ...)
     user_gps: dict[str, Any]  # browser GPS {lat,lng} (sanitized by api.py), absent/None without consent
     tool_results: list[dict[str, Any]]  # audit: [{name, args, result}] per call
@@ -157,13 +159,19 @@ class AdvisorState(TypedDict, total=False):
     labels: dict[str, Any]  # resolved endpoint labels {origin, destination} for the reply's "Da .. a .." lead
     parking: list[dict[str, Any]]  # car parks near the destination (car routes), with live free-spaces
     services: dict[str, list[dict[str, Any]]]  # along-route services per mode, when the user asked for a category
+    nearby: list[dict[str, Any]]  # pins-only near-search around a point (nearby intent): [{name,lat,lng,uri,distance_km}]
     departure: str  # requested departure "HH:MM" ('' = leave now), for the reply to state
     response: dict[str, Any]  # widget JSON assembled by respond
 
 
 def _request_to_intent(slots: dict[str, Any]) -> str:
     """Map the LLM classification to the internal `intent` string the graph dispatches on."""
-    return "route" if slots.get("request_type") == "journey" else "other"
+    rt = slots.get("request_type")
+    if rt == "journey":
+        return "route"
+    if rt == "nearby":
+        return "nearby"
+    return "other"
 
 
 # What a node is busy with, reported to whoever started the turn (the bridge relays it to the
@@ -387,6 +395,14 @@ def _rev_municipality(rev: Any) -> str | None:
 NEAREST_SERVICE_RADII_KM = (0.5, 2.0, 10.0)
 NEAREST_SERVICE_MAX = 10
 
+# Nearby services (pins-only, no route): the user asks to SEE up to NEARBY_MAX services of a
+# category around a point (their GPS or a named place). Same point+radius near-search as
+# _nearest_service, but keeps the whole distance-sorted batch (not just [0]) and widens only
+# when a rung comes back empty (start a touch wider than the nearest-one search: this wants a
+# neighbourhood of results, not the single closest).
+NEARBY_RADII_KM = (1.0, 3.0)
+NEARBY_MAX = 50
+
 # Along-route services (referente item 3): when the user names a category to SEE along
 # the trip ("con le farmacie lungo il percorso"), execute samples anchor points on each
 # found route's geometry and near-searches each one — the remote tool is point+radius
@@ -467,7 +483,8 @@ async def execute(
     # client. Tests pass only `client`, so lc falls back to it.
     lc = local_client or client
 
-    if slots.get("intent") != "route":
+    intent = slots.get("intent")
+    if intent not in ("route", "nearby"):
         return {"tool_results": results, "unsupported": True}
 
     origin_text = (slots.get("origin_text") or "").strip()
@@ -475,8 +492,11 @@ async def execute(
     dest_category = (slots.get("destination_category") or "").strip()
     # An endpoint is resolvable when the user gave text, or something covers it: GPS
     # covers a missing origin; GPS anchors a text-less category destination. Mirrors
-    # _missing_route_slots so respond asks exactly for what execute refused on.
-    if not (origin_text or user_gps) or not (dest_text or (dest_category and user_gps)):
+    # _missing_route_slots so respond asks exactly for what execute refused on. nearby has
+    # its own gate (category + a resolvable centre), checked in its branch below.
+    if intent == "route" and (
+        not (origin_text or user_gps) or not (dest_text or (dest_category and user_gps))
+    ):
         return {"tool_results": results, "unsupported": True}
 
     _emit(on_stage, "geocode")
@@ -569,6 +589,56 @@ async def execute(
 
     async def _gps_city() -> str | None:
         return _rev_municipality(await _gps_reverse()) if user_gps else None
+
+    # --- nearby (pins-only): show up to NEARBY_MAX services of a category AROUND a point,
+    # no route. The centre is the named place (origin_text) or the GPS position; the category
+    # is the destination_category slot. A missing category or an unresolvable centre returns
+    # unsupported with the resolved centre label, so respond asks for exactly what is missing
+    # (che tipo / dove). Otherwise near-search the centre (widening only on an empty rung) and
+    # keep the whole distance-sorted batch as pins — the front-end draws them, no route.
+    if intent == "nearby":
+        if origin_text:
+            center, _, center_label = await _geocode(origin_text, user_gps, anchor_city=_gps_city)
+        elif user_gps:
+            center = [user_gps["lng"], user_gps["lat"]]
+            center_label = None  # the reply says "qui vicino"; no reverse geocode needed
+        else:
+            center = None
+            center_label = None
+        if not dest_category or center is None:
+            return {"tool_results": results, "unsupported": True, "labels": {"center": center_label}}
+        _emit(on_stage, "nearby")
+        pins: list[dict[str, Any]] = []
+        entry: dict[str, Any] | None = None
+        for radius in NEARBY_RADII_KM:
+            n_args = {
+                "latitude": center[1],
+                "longitude": center[0],
+                "categories": dest_category,
+                "maxdistance": radius,
+                "maxresults": NEARBY_MAX,
+            }
+            result = await exec_tool(client, "service_search_near_gps_position", n_args)
+            entry = _audit("service_search_near_gps_position", n_args, result)
+            spots = parse_service_features(result)
+            if spots:
+                for s in spots:
+                    if s.get("lat") is None or s.get("lng") is None:
+                        continue
+                    pins.append({
+                        "name": s.get("name"),
+                        "lat": s["lat"],
+                        "lng": s["lng"],
+                        "uri": s.get("uri"),
+                        "distance_km": round(haversine_km(center[1], center[0], s["lat"], s["lng"]), 3),
+                    })
+                if pins:  # a rung with results but no usable coords keeps widening
+                    results.append(entry)
+                    break
+        else:
+            if entry is not None:
+                results.append(entry)  # every rung empty: respond explains "none found"
+        return {"tool_results": results, "nearby": pins, "labels": {"center": center_label}}
 
     # --- origin: user text, else the GPS position itself (labelled via reverse geocode).
     if origin_text:
@@ -1039,6 +1109,19 @@ def _category_it(category: str, *, plural: bool = False) -> str:
     return category.replace("_", " ").lower()
 
 
+_IT_ARTICLES = {"il", "lo", "la", "l'", "i", "gli", "le"}
+
+
+def _bare_plural(category: str) -> str:
+    """Plural Italian noun WITHOUT its article ('farmacie', 'supermercati'). Counting phrases
+    ('Ci sono 5 farmacie') read wrong with _category_it's article-carrying plural
+    ('le farmacie'), so strip a leading article; an unknown category (no article) passes
+    through unchanged."""
+    plural = _category_it(category, plural=True)  # "le farmacie", "i supermercati", ...
+    head, _, rest = plural.partition(" ")
+    return rest if rest and head.lower() in _IT_ARTICLES else plural
+
+
 def _endpoint_label(feature: dict[str, Any] | None) -> str | None:
     """A human 'Via Ciro Menotti 19, Firenze' from a picked geocode feature (address +
     civic + city, title-cased), or None when the feature carries no address. Lets the reply
@@ -1137,8 +1220,10 @@ def _compose_reply(
     results: list[dict[str, Any]],
     *,
     slots: dict[str, Any],
+    intent: str = "route",
     unsupported: bool,
     missing: list[str] | None,
+    nearby_missing: list[str] | None = None,
     departure: str,
     services_found: bool,
     first_turn: bool,
@@ -1165,6 +1250,24 @@ def _compose_reply(
             "(a piedi, in auto o con i mezzi) e ti trovo il percorso."
         )
     hi = "Ciao! " if first_turn else ""
+    if intent == "nearby":
+        # Pins-only: a short, human line. Ask for what's missing (category / place), else
+        # state how many were found "qui vicino" or "vicino a <place>". The pins on the map
+        # are the answer; the text just counts them.
+        nm = nearby_missing or []
+        if "category" in nm:
+            return hi + "Che tipo di servizi cerchi? Per esempio farmacie, ristoranti o supermercati."
+        if "place" in nm:
+            return hi + "Dimmi dove cercare (un indirizzo o una città) oppure attiva la posizione."
+        cat = (slots.get("destination_category") or "").strip()
+        center = (labels or {}).get("center")
+        around = f"vicino a {center}" if center else "qui vicino"
+        n = len(data.get("services") or [])
+        if n == 0:
+            return hi + f"Non ho trovato {_bare_plural(cat)} {around}."
+        if n == 1:
+            return hi + f"C'è 1 {_category_it(cat)} {around}."
+        return hi + f"Ci sono {n} {_bare_plural(cat)} {around}."
     if missing:
         labels = {
             "origin": "il punto di partenza (o la tua posizione)",
@@ -1388,6 +1491,14 @@ async def respond(
     # primary), read back from the routetype the route was computed with, so respond
     # adds nothing here. Pending referente confirmation of the widget data shape.
     data = _extract_data(results)
+    # Nearby (pins-only) ships its near-search hits as a TOP-LEVEL data.services list — distinct
+    # from a route turn's per-route routes[i].services — so the front-end tells a pins-only turn
+    # apart (no routes) and just drops the pins. Own front-end field (rule 8 precedent, like
+    # data.parking). Empty list = searched and found none (the front-end still wipes stale pins).
+    # Only on an actual search: a refused nearby (missing category/place → unsupported) leaves
+    # data empty so the map is untouched while respond asks 'che tipo?/dove?' (like a route ask).
+    if intent == "nearby" and not unsupported:
+        data["services"] = state.get("nearby") or []
     # Hand the precise geocoded endpoints to the front-end (route intent only) so it can pin
     # the start/finish markers on the real address instead of the WKT road-snap point.
     endpoints = state.get("endpoints") or {}
@@ -1436,6 +1547,18 @@ async def respond(
         if unsupported and intent == "route"
         else None
     ) or None
+    # nearby refused (execute sets this ONLY for a missing category or an unresolvable centre):
+    # tell respond which, so the reply asks "che tipo?" / "dove?" instead of the generic
+    # unsupported pitch. No category → ask the type; category present but still unsupported ⟹
+    # the centre could not be resolved (no place and no GPS, or a named place that didn't
+    # geocode) → ask where.
+    nearby_missing: list[str] = []
+    if unsupported and intent == "nearby":
+        slots_now = state.get("slots") or {}
+        if not (slots_now.get("destination_category") or "").strip():
+            nearby_missing.append("category")
+        else:
+            nearby_missing.append("place")
 
     # A greeting leads only on the FIRST turn (no prior assistant message, like the old
     # prompt); the latest user message also drives the bare-greeting welcome. messages here is
@@ -1451,8 +1574,10 @@ async def respond(
         data,
         results,
         slots=state.get("slots") or {},
+        intent=intent,
         unsupported=unsupported,
         missing=missing,
+        nearby_missing=nearby_missing,
         departure=state.get("departure") or "",
         services_found=bool(services_map),
         first_turn=first_turn,

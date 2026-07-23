@@ -127,6 +127,7 @@ async def test_understand_trims_history_to_recent_messages(make_llm):
 
 def test_request_to_intent():
     assert _request_to_intent({"request_type": "journey"}) == "route"
+    assert _request_to_intent({"request_type": "nearby"}) == "nearby"
     assert _request_to_intent({"request_type": "other"}) == "other"
     assert _request_to_intent({}) == "other"
 
@@ -140,6 +141,7 @@ def test_extract_slots_schema_requires_all_fields():
         "services_category", "mode", "departure_time",
     }
     assert "" in params["properties"]["mode"]["enum"]  # required mode needs an 'absent' value
+    assert set(params["properties"]["request_type"]["enum"]) == {"journey", "nearby", "other"}
 
 
 # --- _parse_departure ---------------------------------------------------------
@@ -1335,3 +1337,158 @@ def test_graph_compiles(make_client, make_llm):
     """StateGraph.compile() validates node/edge wiring — catches typos statically."""
     graph = _build_graph(make_client([]), make_llm([]))
     assert graph is not None
+
+
+# --- nearby (pins-only, no route) --------------------------------------------
+
+async def test_understand_classifies_nearby(make_llm):
+    """"mostrami le farmacie qui intorno" → request_type=nearby folded to the internal
+    nearby intent, with the category in destination_category (no destination_text)."""
+    llm = make_llm([_slots_response(
+        '{"request_type":"nearby","origin_text":"","destination_text":"",'
+        '"destination_category":"Pharmacy","mode":""}'
+    )])
+    out = await understand(
+        {"messages": [{"role": "user", "content": "mostrami le farmacie qui intorno"}]}, llm=llm
+    )
+    assert out["intent"] == "nearby"
+    assert out["slots"]["destination_category"] == "Pharmacy"
+
+
+async def test_execute_nearby_gps_pins_only(make_client, make_result):
+    """nearby + GPS + category → ONE service_search_near_gps_position around the GPS point,
+    maxresults=50, the WHOLE distance-sorted batch kept as pins, and NO route call. The GPS
+    centre carries no label (the reply says "qui vicino")."""
+    hits = _parking_search(  # same near-search envelope shape
+        ("Farmacia A", 11.2546, 43.7735),
+        ("Farmacia B", 11.2550, 43.7740),
+    )
+    client = make_client([make_result(structured=hits)])
+    slots = {"intent": "nearby", "origin_text": "", "destination_text": "",
+             "destination_category": "Pharmacy", "mode": ""}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["service_search_near_gps_position"]  # no geocode, no routing
+    near_args = json.loads(out["tool_results"][0]["args"])
+    assert near_args["categories"] == "Pharmacy"
+    assert near_args["maxresults"] == 50  # the "default 50" product requirement
+    assert near_args["latitude"] == 43.7731 and near_args["longitude"] == 11.2558
+    assert near_args["maxdistance"] == 1.0  # first rung of the nearby ladder
+    assert [p["name"] for p in out["nearby"]] == ["Farmacia A", "Farmacia B"]
+    assert all(p["uri"] and "distance_km" in p for p in out["nearby"])
+    assert out["labels"]["center"] is None
+
+
+async def test_execute_nearby_named_place_geocodes_center(make_client, make_result):
+    """nearby with a named place (origin_text) and no GPS → geocode the centre, then
+    near-search around the resolved coordinates; the address rides labels.center for the
+    reply ("vicino a ...")."""
+    client = make_client([
+        make_result(structured=_fc_with_addresses((10.40, 43.72, "PIAZZA GARIBALDI"), city="PISA")),
+        make_result(structured=_parking_search(("Super X", 10.401, 43.721))),
+    ])
+    slots = {"intent": "nearby", "origin_text": "Piazza Garibaldi, Pisa", "destination_text": "",
+             "destination_category": "Supermarket", "mode": ""}
+    out = await execute({"slots": slots}, client=client)  # no GPS
+    names = [e["name"] for e in out["tool_results"]]
+    assert names == ["address_search_location", "service_search_near_gps_position"]
+    near_args = json.loads(out["tool_results"][1]["args"])
+    assert near_args["latitude"] == 43.72 and near_args["longitude"] == 10.40
+    assert [p["name"] for p in out["nearby"]] == ["Super X"]
+    assert out["labels"]["center"] and "Pisa" in out["labels"]["center"]
+
+
+async def test_execute_nearby_no_category_is_unsupported(make_client):
+    """nearby without a category cannot search (the near tool is category-filtered): execute
+    refuses (unsupported) and makes no tool call, so respond can ask 'che tipo?'."""
+    client = make_client([])
+    slots = {"intent": "nearby", "origin_text": "", "destination_text": "",
+             "destination_category": "", "mode": ""}
+    out = await execute({"slots": slots, "user_gps": {"lat": 43.7731, "lng": 11.2558}}, client=client)
+    assert out["unsupported"] is True
+    assert "nearby" not in out
+    assert not client.calls
+
+
+async def test_respond_nearby_counts_pins():
+    """nearby ships its hits as TOP-LEVEL data.services and the reply is a short human count."""
+    state = {
+        "intent": "nearby",
+        "messages": [{"role": "user", "content": "mostrami le farmacie qui intorno"}],
+        "tool_results": [],
+        "nearby": [
+            {"name": "Farmacia A", "lat": 43.77, "lng": 11.25, "uri": "http://a", "distance_km": 0.2},
+            {"name": "Farmacia B", "lat": 43.78, "lng": 11.26, "uri": "http://b", "distance_km": 0.4},
+        ],
+        "labels": {"center": None},
+        "slots": {"intent": "nearby", "destination_category": "Pharmacy", "origin_text": ""},
+        "unsupported": False,
+    }
+    out = await respond(state)
+    response = out["response"]
+    assert response["request_type"] == "nearby"
+    assert [s["name"] for s in response["data"]["services"]] == ["Farmacia A", "Farmacia B"]
+    assert "Ci sono 2 farmacie qui vicino" in response["messages"][-1]["content"]
+
+
+async def test_respond_nearby_singular_and_named_place():
+    """One hit reads "C'è 1 ..." (singular) and a named centre reads "vicino a <place>"."""
+    state = {
+        "intent": "nearby",
+        "messages": [{"role": "user", "content": "supermercati vicino a Pisa"}],
+        "tool_results": [],
+        "nearby": [{"name": "Super X", "lat": 43.72, "lng": 10.40, "uri": "http://x", "distance_km": 0.1}],
+        "labels": {"center": "Piazza Garibaldi, Pisa"},
+        "slots": {"intent": "nearby", "destination_category": "Supermarket", "origin_text": "Pisa"},
+        "unsupported": False,
+    }
+    out = await respond(state)
+    assert "C'è 1 supermercato vicino a Piazza Garibaldi, Pisa" in out["response"]["messages"][-1]["content"]
+
+
+async def test_respond_nearby_none_found():
+    """The search came back empty → the reply says none were found, not a fake count."""
+    state = {
+        "intent": "nearby",
+        "messages": [{"role": "user", "content": "farmacie qui intorno"}],
+        "tool_results": [],
+        "nearby": [],
+        "labels": {"center": None},
+        "slots": {"intent": "nearby", "destination_category": "Pharmacy", "origin_text": ""},
+        "unsupported": False,
+    }
+    out = await respond(state)
+    assert out["response"]["data"]["services"] == []
+    assert "Non ho trovato farmacie qui vicino" in out["response"]["messages"][-1]["content"]
+
+
+async def test_respond_nearby_missing_category_asks_type():
+    """nearby refused for a missing category → the reply asks which kind, not the generic
+    unsupported pitch."""
+    state = {
+        "intent": "nearby",
+        "messages": [{"role": "user", "content": "servizi qui intorno"}],
+        "tool_results": [],
+        "labels": {"center": None},
+        "slots": {"intent": "nearby", "destination_category": "", "origin_text": ""},
+        "unsupported": True,
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert "Che tipo di servizi cerchi" in reply
+
+
+async def test_respond_nearby_missing_place_asks_where():
+    """nearby with a category but no resolvable centre (no place, no GPS) → the reply asks
+    where to search."""
+    state = {
+        "intent": "nearby",
+        "messages": [{"role": "user", "content": "farmacie"}],
+        "tool_results": [],
+        "labels": {"center": None},
+        "slots": {"intent": "nearby", "destination_category": "Pharmacy", "origin_text": ""},
+        "unsupported": True,
+    }
+    out = await respond(state)
+    reply = out["response"]["messages"][-1]["content"]
+    assert "Dimmi dove cercare" in reply

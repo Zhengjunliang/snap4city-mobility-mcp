@@ -491,6 +491,7 @@ geocode: "Cerco gli indirizzi…",
 routing: "Calcolo il percorso…",
 routing_bus: "Calcolo il percorso in bus (può richiedere un minuto)…",
 services: "Cerco i servizi lungo il percorso…",
+nearby: "Cerco i servizi nella zona…",
 respond: "Preparo la risposta…"
 };
 // The bubble text for a 202 body. The seconds only appear once the turn is visibly slow, so a
@@ -555,6 +556,15 @@ drawParkingPins(data.parking);
 // chips then narrow the set per route). Same lifecycle as parking - a turn without a
 // services request draws none, wiping the previous turn's.
 drawServicePins(allServices(routes));
+} else if (Array.isArray(data.services)) {
+// Nearby (pins-only, no route): drop the service pins around the point and leave the map where
+// it is - addSelectorPin does not move/zoom the map, and we deliberately do NOT recenter here
+// (accepted). Clear last turn's lines + parking so nothing stale lingers; drawServicePins clears
+// the previous service set first, so an empty list just wipes them (and the reply says none).
+$("#advChips").empty();
+clearAllTrajectories();
+clearParkingPins();
+drawServicePins(data.services);
 }
 }
 // One turn at a time: a turn now stays in flight for as long as the polling lasts (up to
