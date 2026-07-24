@@ -7,6 +7,20 @@
 % graphicx, hyperref, float, algorithm2e, mathrsfs. Qui serve solo il resto.
 \usepackage{booktabs}
 
+% Blocchi di output JSON (semplificati) negli scenari del capitolo "Casistica".
+% Stile leggero senza colori per non dipendere da altri pacchetti.
+\usepackage{listings}
+\lstdefinestyle{outjson}{%
+  basicstyle=\ttfamily\scriptsize,%
+  breaklines=true,%
+  breakatwhitespace=false,%
+  columns=fullflexible,%
+  keepspaces=true,%
+  showstringspaces=false,%
+  frame=single,%
+  xleftmargin=2mm,%
+  aboveskip=4pt,belowskip=4pt}
+
 % Le figure vivono nelle cartelle del progetto: nessuna copia duplicata.
 % "figures/" viene provata per prima, cosi' e' possibile creare un progetto
 % Overleaf autonomo copiando li' le immagini necessarie.
@@ -373,40 +387,321 @@ bridge \emph{same-origin} attraverso \texttt{jupyter-server-proxy}.
   \label{fig:deployment}
 \end{figure}
 
-La Figura~\ref{fig:tremodi} mostra il risultato finale nella dashboard: un turno senza
-modo indicato produce i tre percorsi, il testo di confronto e la barra di selezione.
+% =====================================================================
+\chapter{Casistica applicativa}
+\label{cap:casistica}
 
+Questo capitolo raccoglie gli scenari d'uso supportati dall'advisor, catturati
+sulla dashboard reale. Per ciascuno si riportano: la \emph{situazione}, la
+\emph{riproduzione} (la frase digitata dall'utente e le eventuali precondizioni, come il
+GPS del browser), l'\emph{output semplificato} --- lo stesso payload restituito, con la
+geometria \texttt{wkt} abbreviata e gli URI dei servizi omessi, mentre il file completo
+resta allegato in \texttt{examples/} --- e la relativa schermata. Gli indirizzi di prova
+usano il numero civico completo (cos\`i la risoluzione civica \`e esercitata in ogni
+scenario di percorso) e localit\`a toscane, dove i dati km4city sono validi. Le schermate
+sono indicizzate anche in \texttt{screenshots/README.md}.
+
+% ---------------------------------------------------------------------
+\section{Percorsi punto-punto}
+
+\subsection{S01 --- Tre modi (nessun modo indicato)}
+\textbf{Situazione.} Senza indicare il modo, l'advisor calcola e disegna insieme i tre
+itinerari (a piedi, in auto, trasporto pubblico) e offre le chip di selezione.
+\textbf{Riproduzione.} L'utente digita \emph{``da via Gramsci 50, Sesto Fiorentino a via
+della Stazione 1, Firenze''}.
+% TODO Pass 3: Output (semplificato) da examples/S01-tre-modi.json
+\textbf{Output completo:} \texttt{examples/S01-tre-modi.json}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{01-tre-modi.png}
-  \caption{Turno a tre modi: i due itinerari monomodali (a piedi, in auto) e quello
-           multimodale (trasporto pubblico) disegnati insieme sulla mappa della
-           dashboard.}
-  \label{fig:tremodi}
+  \includegraphics[width=\textwidth]{S01-tre-modi.png}
+  \caption{Turno a tre modi: le tre rotte disegnate insieme, il testo di confronto e il
+           dock delle chip.}
+  \label{fig:S01}
 \end{figure}
 
-La Figura~\ref{fig:servizi} mostra la funzionalit\`a dei servizi lungo il percorso.
-Poich\'e lo strumento remoto di ricerca accetta solo un punto e un raggio, il corridoio
-viene costruito lato client campionando ancore lungo la geometria del percorso ed
-eseguendo una ricerca attorno a ciascuna, con successiva deduplicazione dei risultati.
-
+\subsection{S02 --- Chip ``A piedi''}
+\textbf{Situazione.} Dallo stato a tre modi, la selezione di una chip ridisegna localmente
+la sola rotta scelta e apre la bolla di dettaglio, senza un nuovo turno verso il bridge.
+\textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{A piedi}.
+\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{04-servizi-lungo-percorso.png}
-  \caption{Servizi della categoria richiesta individuati lungo il percorso.}
-  \label{fig:servizi}
+  \includegraphics[width=\textwidth]{S02-tre-modi-piedi.png}
+  \caption{Selezione della chip pedonale: la sola rotta a piedi e la bolla di dettaglio.}
+  \label{fig:S02}
 \end{figure}
 
-Una variante \textbf{senza percorso} della stessa ricerca risponde a richieste come
-\emph{``mostrami le farmacie qui intorno''}: attorno al centro --- la posizione GPS
-oppure un indirizzo o una citt\`a indicati dall'utente --- vengono cercati fino a
-cinquanta servizi della categoria richiesta e restituiti come soli \emph{pin} sulla
-mappa, senza tracciare alcuna linea. Se manca la categoria o il luogo, l'advisor lo
-chiede prima di procedere.
+\subsection{S03 --- Chip ``In auto''}
+\textbf{Situazione.} La chip auto mostra la sola rotta in auto, il dettaglio e i pin dei
+parcheggi vicini alla destinazione.
+\textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{In auto}.
+\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S03-tre-modi-auto.png}
+  \caption{Chip in auto: rotta, dettaglio e pin dei parcheggi.}
+  \label{fig:S03}
+\end{figure}
 
-Le restanti schermate --- selezione delle singole modalit\`a tramite le chip, richieste
-a modo singolo e destinazione per categoria a partire dalla posizione GPS --- sono
-raccolte nella cartella \texttt{screenshots/} e descritte nel relativo indice.
+\subsection{S04 --- Chip ``In autobus''}
+\textbf{Situazione.} La chip autobus mostra il solo itinerario multimodale, con la
+geometria separata per tratta (a piedi + bus) e i pin delle fermate.
+\textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{In autobus}.
+\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S04-tre-modi-autobus.png}
+  \caption{Chip in autobus: itinerario per-tratta e pin delle fermate.}
+  \label{fig:S04}
+\end{figure}
+
+\subsection{S05 --- Chip ``Mostra tutte''}
+\textbf{Situazione.} Ripristina la vista a tre rotte insieme e l'unione dei servizi.
+\textbf{Riproduzione.} Dopo aver selezionato una singola chip (S02--S04), clic su
+\emph{Mostra tutte}.
+\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S05-tre-modi-tutte.png}
+  \caption{Ripristino della vista a tre modi.}
+  \label{fig:S05}
+\end{figure}
+
+\subsection{S06 --- Modo singolo, a piedi}
+\textbf{Situazione.} Indicando esplicitamente il modo, l'advisor calcola una sola rotta
+(non attende gli altri profili).
+\textbf{Riproduzione.} L'utente digita \emph{``da via Cavour 12 a via de' Ginori 7 a
+piedi''}.
+% TODO Pass 3: Output (semplificato) da examples/S06-modo-singolo-piedi.json
+\textbf{Output completo:} \texttt{examples/S06-modo-singolo-piedi.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S06-modo-singolo-piedi.png}
+  \caption{Richiesta esplicita a piedi: una sola rotta pedonale.}
+  \label{fig:S06}
+\end{figure}
+
+\subsection{S07 --- Modo singolo, in auto}
+\textbf{Situazione.} Come sopra, con il profilo auto.
+\textbf{Riproduzione.} L'utente digita \emph{``da viale Morgagni 40 a piazza Beccaria 3 in
+auto''}.
+% TODO Pass 3: Output (semplificato) da examples/S07-modo-singolo-auto.json
+\textbf{Output completo:} \texttt{examples/S07-modo-singolo-auto.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S07-modo-singolo-auto.png}
+  \caption{Richiesta esplicita in auto: una sola rotta.}
+  \label{fig:S07}
+\end{figure}
+
+\subsection{S08 --- Modo singolo, in autobus}
+\textbf{Situazione.} Il solo itinerario multimodale; \`e il caso pi\`u lento (il router
+ricostruisce il grafo del trasporto pubblico a ogni richiesta).
+\textbf{Riproduzione.} L'utente digita \emph{``da via Bolognese 20 a via de' Serragli 5 in
+autobus''}.
+% TODO Pass 3: Output (semplificato) da examples/S08-modo-singolo-autobus.json
+\textbf{Output completo:} \texttt{examples/S08-modo-singolo-autobus.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S08-modo-singolo-autobus.png}
+  \caption{Richiesta esplicita in autobus: itinerario multimodale con fermate.}
+  \label{fig:S08}
+\end{figure}
+
+% ---------------------------------------------------------------------
+\section{Risoluzione degli estremi}
+
+\subsection{S09 --- Origine dalla posizione GPS}
+\textbf{Situazione.} Se l'utente non indica l'origine, viene usata la posizione GPS del
+browser (etichettata tramite geocodifica inversa).
+\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``voglio andare a piazza
+del Duomo 1''} senza indicare la partenza.
+% TODO Pass 3: Output (semplificato) da examples/S09-origine-gps.json
+\textbf{Output completo:} \texttt{examples/S09-origine-gps.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S09-origine-gps.png}
+  \caption{Origine presa dal GPS, destinazione risolta da testo.}
+  \label{fig:S09}
+\end{figure}
+
+\subsection{S10 --- Citt\`a nominata nell'indirizzo}
+\textbf{Situazione.} Quando l'indirizzo nomina la citt\`a, la risoluzione le d\`a la
+priorit\`a rispetto alla vicinanza all'ancora.
+\textbf{Riproduzione.} L'utente digita \emph{``da via Roma 10 a Firenze a viale Morgagni
+40''}.
+% TODO Pass 3: Output (semplificato) da examples/S10-citta-nominata.json
+\textbf{Output completo:} \texttt{examples/S10-citta-nominata.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S10-citta-nominata.png}
+  \caption{Risoluzione con priorit\`a alla citt\`a indicata.}
+  \label{fig:S10}
+\end{figure}
+
+\subsection{S11 --- Follow-up multi-turno}
+\textbf{Situazione.} La selezione e le risposte vengono riscritte nella cronologia, cos\`i
+un turno successivo pu\`o riusare gli estremi gi\`a risolti.
+\textbf{Riproduzione.} Dopo S07 (in auto), l'utente digita \emph{``e in autobus?''}.
+% TODO Pass 3: Output (semplificato) da examples/S11-follow-up.json
+\textbf{Output completo:} \texttt{examples/S11-follow-up.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S11-follow-up.png}
+  \caption{Il turno successivo riusa origine e destinazione dal contesto.}
+  \label{fig:S11}
+\end{figure}
+
+% ---------------------------------------------------------------------
+\section{Destinazione per categoria}
+
+\subsection{S12 --- Supermercato pi\`u vicino}
+\textbf{Situazione.} La destinazione \`e una categoria: l'advisor cerca il servizio pi\`u
+vicino con una scala di raggio crescente (0,5 $\rightarrow$ 2 $\rightarrow$ 10 km).
+\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``portami al supermercato
+pi\`u vicino''}.
+% TODO Pass 3: Output (semplificato) da examples/S12-dest-categoria-supermercato.json
+\textbf{Output completo:} \texttt{examples/S12-dest-categoria-supermercato.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S12-dest-categoria-supermercato.png}
+  \caption{Destinazione = supermercato pi\`u vicino alla posizione.}
+  \label{fig:S12}
+\end{figure}
+
+\subsection{S13 --- Farmacia pi\`u vicina}
+\textbf{Situazione.} La stessa funzione con una categoria diversa.
+\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``qual \`e la farmacia
+pi\`u vicina?''}.
+% TODO Pass 3: Output (semplificato) da examples/S13-dest-categoria-farmacia.json
+\textbf{Output completo:} \texttt{examples/S13-dest-categoria-farmacia.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S13-dest-categoria-farmacia.png}
+  \caption{Destinazione per categoria: farmacia pi\`u vicina.}
+  \label{fig:S13}
+\end{figure}
+
+% ---------------------------------------------------------------------
+\section{Servizi lungo il percorso}
+
+\subsection{S14 --- Ristoranti lungo il percorso (in auto)}
+\textbf{Situazione.} Poich\'e lo strumento remoto accetta solo un punto e un raggio, il
+corridoio viene costruito lato client campionando ancore lungo la geometria del percorso
+ed eseguendo una ricerca attorno a ciascuna, con deduplicazione dei risultati.
+\textbf{Riproduzione.} L'utente digita \emph{``da via Luigi Castaldi 6 a via Goro Dati 8
+in auto e i ristoranti lungo il percorso''}.
+% TODO Pass 3: Output (semplificato) da examples/S14-servizi-percorso-ristoranti.json
+\textbf{Output completo:} \texttt{examples/S14-servizi-percorso-ristoranti.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S14-servizi-percorso-ristoranti.png}
+  \caption{Rotta in auto con i pin dei ristoranti campionati lungo il tragitto.}
+  \label{fig:S14}
+\end{figure}
+
+\subsection{S15 --- Servizi lungo il percorso in autobus}
+\textbf{Situazione.} In modo autobus il corridoio non segue tutta la linea: i servizi
+vengono campionati solo attorno alle fermate di salita/discesa e ai tratti percorsi a
+piedi.
+\textbf{Riproduzione.} L'utente digita \emph{``da via Bolognese 20 a via de' Serragli 5 in
+autobus e le farmacie lungo il percorso''}.
+% TODO Pass 3: Output (semplificato) da examples/S15-servizi-percorso-autobus.json
+\textbf{Output completo:} \texttt{examples/S15-servizi-percorso-autobus.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S15-servizi-percorso-autobus.png}
+  \caption{Servizi campionati attorno a fermate e tratti a piedi dell'itinerario bus.}
+  \label{fig:S15}
+\end{figure}
+
+% ---------------------------------------------------------------------
+\section{Servizi vicini (senza percorso)}
+
+\subsection{S16 --- Farmacie qui intorno (da GPS)}
+\textbf{Situazione.} Una ricerca \emph{pins-only}: attorno al centro vengono cercati fino a
+cinquanta servizi della categoria e restituiti come soli pin, senza tracciare alcuna
+linea. Il tipo di richiesta \`e \texttt{nearby} e i servizi stanno in \texttt{data.services}.
+\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``mostrami le farmacie qui
+intorno''}.
+% TODO Pass 3: Output (semplificato) da examples/S16-nearby-farmacie.json
+\textbf{Output completo:} \texttt{examples/S16-nearby-farmacie.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S16-nearby-farmacie.png}
+  \caption{Solo i pin delle farmacie attorno alla posizione, senza rotta.}
+  \label{fig:S16}
+\end{figure}
+
+\subsection{S17 --- Servizi vicini a un luogo nominato}
+\textbf{Situazione.} Il centro della ricerca pu\`o essere un indirizzo o una citt\`a
+indicati dall'utente invece della posizione GPS.
+\textbf{Riproduzione.} L'utente digita \emph{``i ristoranti vicino a piazza Dalmazia''}.
+% TODO Pass 3: Output (semplificato) da examples/S17-nearby-centro-nominato.json
+\textbf{Output completo:} \texttt{examples/S17-nearby-centro-nominato.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S17-nearby-centro-nominato.png}
+  \caption{Ricerca centrata su un indirizzo indicato, non sul GPS.}
+  \label{fig:S17}
+\end{figure}
+
+\subsection{S18 --- Parcheggi qui vicino}
+\textbf{Situazione.} La stessa ricerca senza percorso con la categoria parcheggi.
+\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``dove posso parcheggiare
+qui vicino?''}.
+% TODO Pass 3: Output (semplificato) da examples/S18-nearby-parcheggi.json
+\textbf{Output completo:} \texttt{examples/S18-nearby-parcheggi.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S18-nearby-parcheggi.png}
+  \caption{Pin dei parcheggi attorno alla posizione.}
+  \label{fig:S18}
+\end{figure}
+
+% ---------------------------------------------------------------------
+\section{Tempo e robustezza}
+
+\subsection{S19 --- Orario di partenza}
+\textbf{Situazione.} L'orario indicato alimenta solo la pianificazione del trasporto
+pubblico (i profili a piedi e auto non hanno un modello tempo-variante).
+\textbf{Riproduzione.} L'utente digita \emph{``da via Cavour 12 a via de' Serragli 5 in
+autobus alle 18''}.
+% TODO Pass 3: Output (semplificato) da examples/S19-orario-partenza.json
+\textbf{Output completo:} \texttt{examples/S19-orario-partenza.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S19-orario-partenza.png}
+  \caption{Itinerario di trasporto pubblico con l'orario di partenza indicato.}
+  \label{fig:S19}
+\end{figure}
+
+\subsection{S20 --- Richiesta non supportata}
+\textbf{Situazione.} Le richieste fuori ambito (orari o linee del treno) ricevono una
+risposta cortese che indica la funzione non supportata, senza dati geografici.
+\textbf{Riproduzione.} L'utente digita \emph{``a che ora passa il treno?''}.
+% TODO Pass 3: Output (semplificato) da examples/S20-non-supportato.json
+\textbf{Output completo:} \texttt{examples/S20-non-supportato.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S20-non-supportato.png}
+  \caption{Risposta cortese per una richiesta non supportata.}
+  \label{fig:S20}
+\end{figure}
+
+\subsection{S21 --- Chiarimento di uno slot mancante (opzionale)}
+\textbf{Situazione.} Se manca il luogo o la categoria, l'advisor chiede un chiarimento
+prima di procedere, senza cancellare la mappa.
+\textbf{Riproduzione.} L'utente digita \emph{``mostrami le farmacie''} (senza luogo) oppure
+\emph{``cosa c'\`e qui intorno?''} (senza categoria).
+% TODO Pass 3: Output (semplificato) da examples/S21-chiarimento.json
+\textbf{Output completo:} \texttt{examples/S21-chiarimento.json}.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{S21-chiarimento.png}
+  \caption{Domanda di chiarimento (``dove?'' / ``che tipo?'').}
+  \label{fig:S21}
+\end{figure}
 
 % =====================================================================
 \chapter{Test e validazione}
@@ -439,22 +734,24 @@ predefinita; la Tabella~\ref{tab:test} ne riassume la composizione.
 
 \section{Validazione sul campo}
 
-Il sistema \`e stato verificato end-to-end sulla dashboard. La
-Tabella~\ref{tab:misure} riporta i valori di alcuni turni reali, i cui output completi
+Il sistema \`e stato verificato end-to-end sulla dashboard; il
+Capitolo~\ref{cap:casistica} raccoglie gli scenari con le relative schermate e gli output.
+La Tabella~\ref{tab:misure} riepiloga alcune misure di turni reali, i cui output completi
 sono allegati nella cartella \texttt{examples/}.
 
 \begin{table}[htbp]
   \centering
+  % TODO Pass 3: sostituire i valori con quelli delle catture ricreate (examples/S01, S08, S14)
   \begin{tabular}{llrr}
     \toprule
     \textbf{Scenario} & \textbf{Modo} & \textbf{Distanza} & \textbf{Durata} \\
     \midrule
-    Turno a tre modi         & auto              & 2,872 km  & 0:04:07 \\
-                             & trasporto pubblico& 2,715 km  & 0:16:59 \\
-                             & a piedi           & 2,010 km  & 0:24:07 \\
+    S01 --- Tre modi         & auto              & -- & -- \\
+                             & trasporto pubblico& -- & -- \\
+                             & a piedi           & -- & -- \\
     \midrule
-    Tragitto pi\`u lungo     & trasporto pubblico& 6,936 km  & 0:32:10 \\
-    Auto + servizi lungo il percorso & auto      & 40,478 km & 0:33:58 \\
+    S08 --- Autobus (tragitto pi\`u lungo)   & trasporto pubblico & -- & -- \\
+    S14 --- Auto + servizi lungo il percorso & auto               & -- & -- \\
     \bottomrule
   \end{tabular}
   \caption{Misure da turni reali (output completi in \texttt{examples/}).}
