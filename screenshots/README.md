@@ -2,7 +2,7 @@
 
 Sottocartella con le immagini degli snapshot delle schermate (istruzione di consegna).
 Sono catture reali dell'advisor in funzione sulla dashboard Snap4City, eseguito dalla
-**Snap4City JupyterHub** con i due processi attivi (vedi `README.md` §3). La relazione in
+**Snap4City JupyterHub** con il bridge attivo (il server MCP mobility è ospitato sul server Snap4City; vedi `README.md` §3). La relazione in
 `relazione/` richiama queste immagini.
 
 ## Immagini presenti
@@ -18,6 +18,7 @@ Sono catture reali dell'advisor in funzione sulla dashboard Snap4City, eseguito 
 | `02-modo-singolo-multimodale.png` | Richiesta esplicita "in autobus" | idem, itinerario multimodale (non paga l'attesa degli altri modi) |
 | `03-gps-vicino.png` | Destinazione per categoria vicino alla posizione | origine presa dal GPS del browser, destinazione risolta come servizio più vicino della categoria richiesta |
 | `04-servizi-lungo-percorso.png` | Servizi lungo il percorso | rotta con i pin viola dei servizi della categoria richiesta, campionati lungo il tragitto |
+| `05-servizi-vicini.png` | Servizi vicini senza percorso ("mostrami le farmacie qui intorno") | solo i pin dei servizi della categoria richiesta attorno alla posizione o al luogo indicato, senza alcuna rotta disegnata |
 
 ## Note
 

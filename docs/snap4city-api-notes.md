@@ -4,7 +4,7 @@ Riferimento sul backend: appunti campo per campo raccolti interrogando dal vivo 
 km4city che stanno dietro al server MCP remoto di Snap4City. La §1 tratta la semantica di geocodifica
 da cui l'advisor dipende, la §2 le firme degli strumenti remoti che invoca (nomi nudi: una
 configurazione a server singolo non aggiunge prefissi), la §3 le prove del perché la geocodifica
-diretta è servita localmente.
+diretta è servita dal server MCP mobility (ospitato sul server Snap4City).
 
 Sorgente delle specifiche: `ascapi-openapiv3.json` (OAS3, copia su https://www.km4city.org/swagger/external/ascapi-openapiv3.json).
 URL di base del backend: `https://www.snap4city.org/superservicemap/api/v1/` (è quello che gli strumenti remoti chiamano internamente; noi non lo tocchiamo direttamente).
@@ -13,8 +13,9 @@ URL di base del backend: `https://www.snap4city.org/superservicemap/api/v1/` (è
 
 ## §1. Geocodifica: `address_search_location` / km4city `/location/`
 
-Servita dal nostro server MCP **locale** (`mcp_server.py`), che incapsula la ServiceMap pubblica
-di km4city — lo strumento remoto con lo stesso nome è difettoso lato server (vedi §3). La forma
+Servita dal nostro server MCP **mobility** (`mcp_server.py`, ospitato sul server Snap4City), che
+incapsula la ServiceMap pubblica di km4city — lo strumento remoto con lo stesso nome è difettoso
+lato server (vedi §3). La forma
 della risposta riportata qui sotto è quella restituita da entrambi, quindi il parsing del client
 è identico nei due casi.
 
@@ -67,10 +68,10 @@ I nomi compaiono **senza prefisso del server** con una configurazione a server s
 | `service_search_near_gps_position` | `latitude` + `longitude` | `categories`, `maxdistance` (km), `maxresults` | Punti di interesse più vicini per categoria: parcheggi e destinazioni del tipo "farmacia più vicina" |
 | `service_info_dev` | `serviceUri` | `fromTime` | Ultimo dato in tempo reale sui posti liberi di un parcheggio |
 
-La geocodifica diretta (`address_search_location`) e il calcolo dei percorsi (`route`, per tutti i modi) arrivano invece dal server MCP **locale** (§1, §3). Gli strumenti rilevati accettano un parametro opzionale `authentication` (Bearer); la rilevazione non ha mostrato alcun requisito di token, quindi l'advisor lo omette (il backend km4city interrogato è pubblico).
+La geocodifica diretta (`address_search_location`) e il calcolo dei percorsi (`route`, per tutti i modi) arrivano invece dal server MCP **mobility** (§1, §3). Gli strumenti rilevati accettano un parametro opzionale `authentication` (Bearer); la rilevazione non ha mostrato alcun requisito di token, quindi l'advisor lo omette (il backend km4city interrogato è pubblico).
 
 ---
 
-## §3. Perché la geocodifica diretta è servita localmente
+## §3. Perché la geocodifica diretta è servita dal server MCP mobility
 
-**`address_search_location` (remoto) è difettoso lato server** — confronto fra interrogazioni diverse, stessa ricerca `via zara 3`: la ServiceMap pubblica restituisce al primo posto `VIA ZARA, FIRENZE` (punteggio 12,64), mentre lo strumento MCP remoto restituisce **zero risultati toscani** (in testa Anversa e Grecia, punteggio 3–7) **e non ordina per punteggio**. Lo schema non espone alcun parametro di ordinamento, di riquadro geografico o di regione, e portare `maxresults` a 5000 non fa comparire il risultato toscano: semplicemente non è nell'insieme restituito. Da qui la scelta dello strumento di geocodifica locale. SuperServiceMap, il backend federato, ha lo stesso difetto di ordinamento ("via zara firenze" mette al primo posto una fermata di Maastricht). Il client può tornare a usarlo cambiando una sola variabile d'ambiente (`S4C_SERVICEMAP_BASE`) se l'ordinamento verrà corretto.
+**`address_search_location` (remoto) è difettoso lato server** — confronto fra interrogazioni diverse, stessa ricerca `via zara 3`: la ServiceMap pubblica restituisce al primo posto `VIA ZARA, FIRENZE` (punteggio 12,64), mentre lo strumento MCP remoto restituisce **zero risultati toscani** (in testa Anversa e Grecia, punteggio 3–7) **e non ordina per punteggio**. Lo schema non espone alcun parametro di ordinamento, di riquadro geografico o di regione, e portare `maxresults` a 5000 non fa comparire il risultato toscano: semplicemente non è nell'insieme restituito. Da qui la scelta dello strumento di geocodifica del server mobility. SuperServiceMap, il backend federato, ha lo stesso difetto di ordinamento ("via zara firenze" mette al primo posto una fermata di Maastricht). Il client può tornare a usarlo cambiando una sola variabile d'ambiente (`S4C_SERVICEMAP_BASE`) se l'ordinamento verrà corretto.

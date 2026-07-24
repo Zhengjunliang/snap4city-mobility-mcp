@@ -84,7 +84,10 @@ piattaforma: l'utente pone una domanda di viaggio in linguaggio naturale
 (\emph{``da Piazza del Duomo a Santa Croce''}) e il sistema risponde con il confronto
 fra i modi di trasporto disponibili --- due itinerari \textbf{monomodali}, a piedi e in
 auto, e uno \textbf{multimodale} con il trasporto pubblico --- disegnando i percorsi su
-una mappa della dashboard.
+una mappa della dashboard. Oltre ai percorsi, l'advisor risponde anche a richieste di
+\emph{soli servizi vicini} (\emph{``mostrami le farmacie qui intorno''}): senza calcolare
+alcun itinerario, mostra sulla mappa i punti della categoria richiesta attorno alla
+posizione dell'utente o a un luogo indicato.
 
 \section{Obiettivo}
 
@@ -102,8 +105,9 @@ sulla rete interna del DISIT: non fa parte di questa consegna. Questo progetto f
 \begin{itemize}
   \item il \textbf{client MCP} e l'\textbf{orchestratore LangGraph}
         (\texttt{orchestrator.py});
-  \item un \textbf{server MCP locale} (\texttt{mcp\_server.py}) che espone
-        geocodifica diretta e calcolo percorsi per tutti i modi;
+  \item il \textbf{server MCP mobility} (\texttt{mcp\_server.py}), che espone
+        geocodifica diretta e calcolo percorsi per tutti i modi ed \`e ora ospitato
+        sul server Snap4City;
   \item un \textbf{bridge HTTP} FastAPI (\texttt{api.py}) fra la dashboard e
         l'orchestratore;
   \item il \textbf{front-end} della dashboard (\texttt{frontend/}), una chat box
@@ -125,10 +129,12 @@ scopre a runtime e li invoca. In questo progetto il client \`e realizzato con Fa
 \cite{fastmcp} e dialoga con due server distinti:
 
 \begin{itemize}
-  \item il server \textbf{remoto} della piattaforma Snap4City
+  \item il server advisor \textbf{nativo} della piattaforma Snap4City
         (\texttt{snap4agentic\_advisor\_native}), scoperto automaticamente tramite
         l'endpoint \texttt{/apps.json} della dashboard;
-  \item il server \textbf{locale} sviluppato in questo elaborato.
+  \item il server \textbf{mobility} sviluppato in questo elaborato
+        (\texttt{snap4agentic-mobility-advisor}), anch'esso ora ospitato sul server
+        Snap4City e raggiunto a un URL fisso.
 \end{itemize}
 
 \section{LangGraph}
@@ -208,14 +214,14 @@ La Figura~\ref{fig:component} mostra la struttura complessiva.
 \end{figure}
 
 La ripartizione degli strumenti fra i due server MCP non \`e arbitraria.
-La geocodifica diretta e il routing sono serviti \textbf{localmente} perch\'e i
-corrispondenti tool remoti non erano utilizzabili:
+La geocodifica diretta e il routing sono serviti dal \textbf{server mobility} perch\'e i
+corrispondenti tool nativi non erano utilizzabili:
 
 \begin{itemize}
   \item il tool remoto \texttt{address\_search\_location} restituisce, per una via
         fiorentina, zero risultati toscani (i primi sono ad Anversa e in Grecia) e non
         ordina per punteggio di rilevanza; nessun parametro dello schema permette di
-        correggerlo. Il server locale interroga direttamente la ServiceMap pubblica,
+        correggerlo. Il server mobility interroga direttamente la ServiceMap pubblica,
         che sulla stessa interrogazione restituisce il risultato corretto in prima
         posizione;
   \item il tool remoto \texttt{routing} non ha mai restituito trasporto pubblico reale
@@ -249,7 +255,10 @@ Il nodo \texttt{understand} invia la domanda dell'utente, insieme agli ultimi tu
 conversazione, con una chiamata a strumento forzata. Lo schema estrae:
 intento, testo dell'origine, testo della destinazione, modo di trasporto, categoria di
 destinazione (per richieste generiche come \emph{``la farmacia pi\`u vicina''}),
-categoria dei servizi da mostrare lungo il percorso e orario di partenza.
+categoria dei servizi da mostrare lungo il percorso e orario di partenza. Fra i valori
+dell'intento rientra anche la \textbf{ricerca di soli servizi vicini} (\emph{pins-only}),
+che riusa la categoria di destinazione come categoria da cercare e il testo dell'origine
+come centro, senza aggiungere nuovi parametri allo schema.
 
 La cronologia inviata al modello \`e limitata agli ultimi otto messaggi: il contesto
 per un \emph{follow-up} sta negli ultimi turni, mentre una cronologia illimitata
@@ -350,16 +359,17 @@ per le domande successive senza gonfiare i prompt seguenti.
 \chapter{Distribuzione e integrazione}
 
 Il sistema gira sulla \textbf{JupyterHub di Snap4City}, unico ambiente da cui sono
-raggiungibili sia il server MCP remoto (rete interna) sia l'endpoint del modello.
-Come mostra la Figura~\ref{fig:deployment}, servono due processi: il server MCP locale
-sulla porta 8020 e il bridge FastAPI sulla porta 8010. Il browser raggiunge il bridge
-\emph{same-origin} attraverso \texttt{jupyter-server-proxy}.
+raggiungibili sia i due server MCP (ospitati sul server Snap4City, rete interna) sia
+l'endpoint del modello. Come mostra la Figura~\ref{fig:deployment}, la JupyterHub esegue
+\textbf{un solo processo}, il bridge FastAPI sulla porta 8010; il server mobility \`e
+ospitato sul server Snap4City e non va pi\`u avviato a mano. Il browser raggiunge il
+bridge \emph{same-origin} attraverso \texttt{jupyter-server-proxy}.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.95\textwidth]{deployment.png}
-  \caption{Distribuzione: due processi nell'ambiente JupyterHub, la dashboard nel
-           browser, i servizi esterni.}
+  \caption{Distribuzione: un solo processo (il bridge) nell'ambiente JupyterHub, i due
+           server MCP sul server Snap4City, la dashboard nel browser, i servizi esterni.}
   \label{fig:deployment}
 \end{figure}
 
@@ -386,6 +396,13 @@ eseguendo una ricerca attorno a ciascuna, con successiva deduplicazione dei risu
   \caption{Servizi della categoria richiesta individuati lungo il percorso.}
   \label{fig:servizi}
 \end{figure}
+
+Una variante \textbf{senza percorso} della stessa ricerca risponde a richieste come
+\emph{``mostrami le farmacie qui intorno''}: attorno al centro --- la posizione GPS
+oppure un indirizzo o una citt\`a indicati dall'utente --- vengono cercati fino a
+cinquanta servizi della categoria richiesta e restituiti come soli \emph{pin} sulla
+mappa, senza tracciare alcuna linea. Se manca la categoria o il luogo, l'advisor lo
+chiede prima di procedere.
 
 Le restanti schermate --- selezione delle singole modalit\`a tramite le chip, richieste
 a modo singolo e destinazione per categoria a partire dalla posizione GPS --- sono

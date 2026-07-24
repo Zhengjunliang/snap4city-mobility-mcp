@@ -47,14 +47,17 @@ va in errore dentro `addCustomTrajectoryToMap` (`Cannot read properties of undef
 
 ## Avvio del bridge (JupyterHub)
 
-Il bridge ha bisogno di Llama4 e dei server MCP, raggiungibili solo dalla JupyterHub. Si
-avvia per primo il server MCP locale (fornisce la geocodifica e TUTTO il calcolo dei
-percorsi, con lo strumento `route`):
+Il bridge ha bisogno di Llama4 (raggiungibile solo dalla JupyterHub) e dei due server MCP di
+Snap4City (advisor nativo + mobility), ora ospitati sul server Snap4City. Serve quindi **un
+solo processo** sulla JupyterHub:
 
 ```
-python -m snap4city_mobility_mcp.mcp_server   # :8020, terminal 1
-uvicorn api:app --host 0.0.0.0 --port 8010    # terminal 2
+uvicorn api:app --host 0.0.0.0 --port 8010
 ```
+
+Per collaudare in locale una copia del server MCP mobility: avviarlo con
+`python -m snap4city_mobility_mcp.mcp_server` (serve `:8020`) e puntare il client con
+`export S4C_LOCAL_MCP_URL=http://127.0.0.1:8020/mcp`.
 
 **Job + poll**: la POST si limita ad *avviare* il turno (risponde subito con
 `{job_id}`) e il widget interroga `GET /advise/{job_id}` finché non ottiene 200. Un

@@ -26,7 +26,7 @@ package "Client MCP layer (mcp_tools.py)" {
   [exec_tool · two-pass geocode] as mcptools
 }
 
-package "Local MCP server — mcp_server.py (:8020)" {
+cloud "Server Snap4City — MCP mobility\nsnap4agentic-mobility-advisor (mcp_server.py)" {
   [address_search_location\n(forward geocode)] as geocode
   [route (foot / car / bus)] as route
   [gtfs_shapes] as gtfs
@@ -36,7 +36,7 @@ cloud "LLM" {
   [Llama4\nllama4-agentic-inference] as llm
 }
 
-cloud "Remote MCP server (referente)\nsnap4agentic_advisor_native" {
+cloud "Server Snap4City — MCP native advisor\nsnap4agentic_advisor_native" {
   [coordinates_to_address\n(reverse geocode)] as revgeo
   [service_search_near_gps_position\n(near search)] as near
   [service_info_dev\n(live parking)] as parking

@@ -1,6 +1,6 @@
-"""Local MCP server — our own tools, hosted alongside the client.
+"""Mobility MCP server — our own tools, now hosted on the Snap4City server.
 
-referente's remote `address_search_location` returns a broken result set (a query for
+The Snap4City remote `address_search_location` returns a broken result set (a query for
 "chiesa ..., Firenze" comes back as 100 Spanish/Greek/Belgian hits and zero Tuscan;
 see docs/lessons.md L28/L29). So forward geocoding is served here instead, by wrapping
 the *public* km4city ServiceMap API (servicemap.disit.org — the same index the native
@@ -12,10 +12,12 @@ tool did, so the client's existing 2-pass / pick-coord logic is reused unchanged
 This server is generic on purpose (named `mcp_server`, not `geocode_server`): it hosts
 the geocode tool (L29) and the all-modes What-If `route` tool (L19/L46).
 
-Run it on the JupyterHub (it only needs outbound HTTP to the public ServiceMap):
-    python -m snap4city_mobility_mcp.mcp_server
-It serves Streamable HTTP at http://0.0.0.0:8020/mcp/ ; the client reaches it via
-S4C_LOCAL_MCP_URL (orchestrator._local_config), defaulting to http://127.0.0.1:8020/mcp.
+It is deployed on the Snap4City server; the client reaches it (via S4C_LOCAL_MCP_URL,
+orchestrator._local_config) at {DASHBOARD_URL}/snap4agentic-mobility-advisor/mcp. To self-test
+a local copy, run this file (it only needs outbound HTTP to the public ServiceMap) and point
+the client at it:
+    python -m snap4city_mobility_mcp.mcp_server            # serves http://0.0.0.0:8020/mcp/
+    export S4C_LOCAL_MCP_URL=http://127.0.0.1:8020/mcp
 """
 import logging
 import os
@@ -37,11 +39,11 @@ logger = logging.getLogger(__name__)
 # text-search ordering (byte-identical output with/without), so proximity ranking is done
 # client-side (orchestrator._pick_coord haversine against the user's GPS).
 # DELIBERATELY the single-region Tuscany index, not the federated SuperServiceMap
-# (https://www.snap4city.org/superservicemap/api/v1) that referente's stack uses: the SSM
+# (https://www.snap4city.org/superservicemap/api/v1) that the Snap4City stack uses: the SSM
 # does carry more regions (Antwerp/Helsinki/València/GardaLake), but its ranking is broken
 # — probed 2026-07-09, "via zara firenze" ranks a Maastricht bus stop first (the L28
-# failure mode this local tool exists to escape). Override via S4C_SERVICEMAP_BASE once
-# referente fixes the SSM ranking and multi-region routing.
+# failure mode this tool exists to escape). Override via S4C_SERVICEMAP_BASE once the SSM
+# ranking and multi-region routing are fixed.
 SERVICEMAP_BASE = os.environ.get(
     "S4C_SERVICEMAP_BASE", "https://servicemap.disit.org/WebAppGrafo/api/v1"
 )
@@ -49,10 +51,10 @@ HTTP_TIMEOUT_S = 40.0
 
 # Snap4City What-If GraphHopper router — ALL routing (foot/car/bus) goes through it via
 # the local `route` tool, so every mode shares one request/response shape. It fully
-# replaced the referente remote `routing` tool (retired 2026-07-13, L46): that tool's
+# replaced the Snap4City native `routing` tool (retired 2026-07-13, L46): that tool's
 # public_transport mode never returned transit (L19) and its km4city backend needed a
 # stale-retry ladder (L3/L8). Same source the Gea-Night What-If dashboard draws from.
-# S4C_WHATIF_ROUTER_URL overrides the base. The default is the ONLINE instance: referente
+# S4C_WHATIF_ROUTER_URL overrides the base. The default is the ONLINE instance: Snap4City
 # loaded the Tuscany GTFS on it (2026-07-10) — set the env var to
 # "http://localhost:8080/whatif-router/route" only to test a locally-built router.
 # The online instance reloads the PT graph on every vehicle=bus request (~30-40s

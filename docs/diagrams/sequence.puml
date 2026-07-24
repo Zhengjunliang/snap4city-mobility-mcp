@@ -7,7 +7,7 @@ participant "Chat box" as FE
 participant "Bridge (api.py)" as BR
 participant "Orchestrator\n(run_advisor)" as OR
 participant "Llama4" as LLM
-participant "MCP tools\n(local + remote)" as MCP
+participant "MCP tools\n(server Snap4City)" as MCP
 
 Utente -> FE : domanda ("da A a B")
 FE -> BR : POST /advise {query, history, gps}

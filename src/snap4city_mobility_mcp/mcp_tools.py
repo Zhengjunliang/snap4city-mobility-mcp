@@ -1,7 +1,7 @@
 """Client-side MCP layer.
 
-This module implements no tools: they live on referente's remote
-snap4agentic_advisor_native server and on our local mcp_server.py. Here we only
+This module implements no tools: they live on the Snap4City server — the native
+snap4agentic_advisor_native server and our mobility mcp_server.py. Here we only
 connect and run the graph's tool calls via client.call_tool, unwrapping the response.
 The route flow drives its tool chain in Python; no LLM ever picks a tool.
 
@@ -45,11 +45,11 @@ EXPOSED_TOOLS = (
 )
 TOOL_NAMES = frozenset(EXPOSED_TOOLS)
 
-# Tools served only by our local MCP server (mcp_server.py), with no referente remote
-# equivalent — so they are NOT expected in the referente probe. `route` wraps the What-If
-# router for every mode (L19/L46 — the referente remote `routing` tool is retired);
-# geocode reuses referente's `address_search_location` name (it exists remotely, just
-# broken) so it is NOT local-only here.
+# Tools served only by our mobility MCP server (mcp_server.py, now hosted on the Snap4City
+# server), with no Snap4City native-advisor equivalent — so they are NOT expected in the
+# native-server probe. `route` wraps the What-If router for every mode (L19/L46 — the native
+# remote `routing` tool is retired); geocode reuses the `address_search_location` name (it
+# exists on the native server, just broken) so it is NOT local-only here.
 LOCAL_ONLY_TOOLS = frozenset({"route"})
 
 # Parking discovery (car routes): search car parks near the destination for MAP PINS only.
@@ -82,11 +82,17 @@ async def _build_config() -> dict[str, Any]:
     }
 
 
-# Our own local MCP server (mcp_server.py) hosts forward geocoding (referente's remote
-# address_search_location is server-side broken, L28/L29). It is a separate single-server
-# client so the remote client stays single-server with bare tool names (no FastMCP server
-# prefix, L6); the single "local" key here likewise yields bare names.
-LOCAL_MCP_URL = os.environ.get("S4C_LOCAL_MCP_URL", "http://192.168.1.117:8000/snap4agentic-mobility-advisor/mcp")
+# Our mobility MCP server (mcp_server.py) hosts forward geocoding (the Snap4City remote
+# address_search_location is server-side broken, L28/L29) + the What-If `route` tool. It is a
+# separate single-server client so the remote client stays single-server with bare tool names
+# (no FastMCP server prefix, L6); the single "local" key here likewise yields bare names.
+# Default = the copy of this server hosted on the Snap4City server (path
+# /snap4agentic-mobility-advisor/mcp; probe-confirmed tools address_search_location + route),
+# derived off DASHBOARD_URL so one env (S4C_DASHBOARD_URL) moves both MCP endpoints to the
+# same host. Override S4C_LOCAL_MCP_URL with http://127.0.0.1:8020/mcp for a self-run :8020.
+LOCAL_MCP_URL = os.environ.get(
+    "S4C_LOCAL_MCP_URL", f"{DASHBOARD_URL}/snap4agentic-mobility-advisor/mcp"
+)
 
 
 def _local_config() -> dict[str, Any]:

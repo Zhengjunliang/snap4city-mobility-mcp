@@ -5,7 +5,7 @@ respond -> END.
 
 - understand (LLM, forced tool call): extracts the request slots (intent, origin,
   destination, category, mode, departure time) from the latest user turn, place text only.
-  Follow-ups like "那坐公交呢?" resolve against the conversation history.
+  Follow-ups like "E con il bus?" resolve against the conversation history.
 - execute (plain Python, no LLM): for a route intent, resolves both endpoints then routes the
   requested modes concurrently. A missing origin defaults to the user's GPS position (browser
   geolocation, threaded through run_advisor); a generic-category destination ("farmacia più

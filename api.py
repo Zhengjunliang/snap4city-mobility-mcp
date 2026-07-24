@@ -1,8 +1,8 @@
 """FastAPI bridge exposing the mobility advisor to the Snap4City dashboard.
 
 The dashboard chat box (frontend/mobility_advisor_dashboard.html) can't reach the
-JupyterHub-only Llama4 + MCP server from the browser, so this thin HTTP layer wraps
-run_advisor. It is a JOB + POLL protocol (never one long request, see below):
+JupyterHub-only Llama4 from the browser (nor drive the MCP tool turn), so this thin HTTP
+layer wraps run_advisor. It is a JOB + POLL protocol (never one long request, see below):
     POST /advise {query, history, gps} -> {"job_id": ...}   (returns at once)
     GET  /advise/{job_id}              -> 202 {"status":"pending","stage":...,"elapsed_s":...}
                                           while running, then 200 with the widget JSON
@@ -27,11 +27,12 @@ takes the turn OUT of the request lifetime instead — every HTTP call here is s
 so no proxy (this one, or whatever fronts the referente deployment later) can time it out.
 Do not "optimize" this back into a single long request.
 
-Run on the JupyterHub (where Llama4 + the MCP server are reachable), reached from the
-browser same-origin through jupyter-server-proxy (see frontend/README.md):
+Run on the JupyterHub (where Llama4 is reachable), reached from the browser same-origin
+through jupyter-server-proxy (see frontend/README.md):
     uvicorn api:app --host 0.0.0.0 --port 8010
-Needs user_credentials.json in the repo root and the intranet MCP server reachable.
-CORS below is permissive for development and must be tightened before any real exposure.
+Needs user_credentials.json in the repo root and the two Snap4City MCP endpoints reachable
+(the native advisor + our mobility server, both on the Snap4City server). CORS below is
+permissive for development and must be tightened before any real exposure.
 
 Diagnostics: each /advise turn OVERWRITES both files so they hold only the latest turn
 (easy to inspect "why this query did X"): tool-level DEBUG -> debug.log, full output JSON
