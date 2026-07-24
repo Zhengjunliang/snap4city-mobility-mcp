@@ -1,0 +1,15 @@
+{
+  "status": "success",
+  "request_type": "other",
+  "data": {},
+  "messages": [
+    {
+      "role": "user",
+      "content": "a che ora passa il treno?"
+    },
+    {
+      "role": "assistant",
+      "content": "Ciao! Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto o con i mezzi pubblici), anche verso il luogo più vicino di un certo tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla farmacia più vicina'."
+    }
+  ]
+}

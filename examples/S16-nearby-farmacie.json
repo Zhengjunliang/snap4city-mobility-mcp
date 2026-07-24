@@ -1,0 +1,81 @@
+{
+  "status": "success",
+  "request_type": "nearby",
+  "data": {
+    "services": [
+      {
+        "name": "LUPI",
+        "lat": 43.73040008544922,
+        "lng": 10.80430030822754,
+        "uri": "http://www.disit.org/km4city/resource/f24b9a3d7b7aa908271b3034a8cd9ee6",
+        "distance_km": 1.002
+      },
+      {
+        "name": "LUPI",
+        "lat": 43.73040008544922,
+        "lng": 10.80430030822754,
+        "uri": "http://www.disit.org/km4city/resource/edc36bd2f5a3f38d9c0207dec191e6bf",
+        "distance_km": 1.002
+      },
+      {
+        "name": "FARMACIA LUPI DI LUPI RICO",
+        "lat": 43.73039245605469,
+        "lng": 10.80426979064941,
+        "uri": "http://www.disit.org/km4city/resource/afbae01a9d332a515eb1aaaf586a47a4",
+        "distance_km": 1.003
+      },
+      {
+        "name": "SERAFINI",
+        "lat": 43.72760009765625,
+        "lng": 10.80910015106201,
+        "uri": "http://www.disit.org/km4city/resource/0c4ecb21c1cc08657ec02e47fde0f321",
+        "distance_km": 1.378
+      },
+      {
+        "name": "SERAFINI",
+        "lat": 43.72760009765625,
+        "lng": 10.80910015106201,
+        "uri": "http://www.disit.org/km4city/resource/f25ae4e5fd41b4f85734b71c2d41e727",
+        "distance_km": 1.378
+      },
+      {
+        "name": "FARMACIA SERAFINI DOTT. PAOLA VASSALLO CHELINI",
+        "lat": 43.72756195068359,
+        "lng": 10.80907154083252,
+        "uri": "http://www.disit.org/km4city/resource/1010bf07f92f638e7e6427b7f066daa6",
+        "distance_km": 1.381
+      },
+      {
+        "name": "FARMACIA CIARDINI S.A.S. DEL DR. GIULIO PANZANI E C.",
+        "lat": 43.72711563110352,
+        "lng": 10.80945873260498,
+        "uri": "http://www.disit.org/km4city/resource/24b68bcdd0abf5088ea159f02a52c962",
+        "distance_km": 1.438
+      },
+      {
+        "name": "CIARDINI",
+        "lat": 43.72710037231445,
+        "lng": 10.80949974060059,
+        "uri": "http://www.disit.org/km4city/resource/4721b061de8aea5d473f199194455b1e",
+        "distance_km": 1.44
+      },
+      {
+        "name": "CIARDINI",
+        "lat": 43.72710037231445,
+        "lng": 10.80949974060059,
+        "uri": "http://www.disit.org/km4city/resource/402e58e2b02efb4be3f86baa2f4ab9b2",
+        "distance_km": 1.44
+      }
+    ]
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "mostrami le farmacie qui intorno"
+    },
+    {
+      "role": "assistant",
+      "content": "Ciao! Ci sono 9 farmacie qui vicino."
+    }
+  ]
+}

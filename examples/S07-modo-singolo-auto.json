@@ -1,0 +1,79 @@
+{
+  "status": "success",
+  "request_type": "route",
+  "data": {
+    "mode": "car",
+    "wkt": "LINESTRING (11.245018 43.801239, 11.2452 43.801634, 11.245803 43.803133, 11.245886 43.80321, 11.245992 43.803257, 11.246084 43.803273, 11.246279 43.803263, 11.247087 43.803089, 11.247177 43.803055, 11.247279 43.803002, 11.247367 43.802995, 11.247451 43.803015, 11.247538 43.80309, 11.247549 43.803177, 11.247512 43.803236, 11.247444 43.803278, 11.247313 43.803294, 11.247246 43.803278, 11.246155 43.803506, 11.245973 43.803501, 11.245826 43.803462, 11.245505 43.803529, 11.245202 43.803698, 11.244992 43.803818, 11.244848 43.803869, 11.24271 43.804543, 11.24139 43.804928, 11.241222 43.804964, 11.241133 43.805058, 11.240935 43.805579, 11.240673 43.806011, 11.240618 43.806195, 11.240586 43.806241, 11.239352 43.807283, 11.238869 43.807637, 11.238563 43.807627, 11.236193 43.807611, 11.236292 43.806374, 11.236334 43.806217, 11.236557 43.805719, 11.236584 43.805466, 11.237172 43.805161, 11.237065 43.80505)",
+    "distance_km": 1.831,
+    "duration": "0:03:00",
+    "routes": [
+      {
+        "mode": "car",
+        "wkt": "LINESTRING (11.245018 43.801239, 11.2452 43.801634, 11.245803 43.803133, 11.245886 43.80321, 11.245992 43.803257, 11.246084 43.803273, 11.246279 43.803263, 11.247087 43.803089, 11.247177 43.803055, 11.247279 43.803002, 11.247367 43.802995, 11.247451 43.803015, 11.247538 43.80309, 11.247549 43.803177, 11.247512 43.803236, 11.247444 43.803278, 11.247313 43.803294, 11.247246 43.803278, 11.246155 43.803506, 11.245973 43.803501, 11.245826 43.803462, 11.245505 43.803529, 11.245202 43.803698, 11.244992 43.803818, 11.244848 43.803869, 11.24271 43.804543, 11.24139 43.804928, 11.241222 43.804964, 11.241133 43.805058, 11.240935 43.805579, 11.240673 43.806011, 11.240618 43.806195, 11.240586 43.806241, 11.239352 43.807283, 11.238869 43.807637, 11.238563 43.807627, 11.236193 43.807611, 11.236292 43.806374, 11.236334 43.806217, 11.236557 43.805719, 11.236584 43.805466, 11.237172 43.805161, 11.237065 43.80505)",
+        "distance_km": 1.831,
+        "duration": "0:03:00",
+        "detail": "Viale Giovan Battista Morgagni (0.34 km)\nLargo Giovanni Alessandro Brambilla (0.587 km)\nVia Giulio Caccini (0.014 km)\nVia delle Panche (0.359 km)\nLargo Enrico Caruso (0.025 km)\nVia Carlo Del Greco (0.19 km)\nVia Leopoldo Pellas (0.242 km)\nVia Vittorio Locchi (0.058 km)\nPiazza dei Cavalieri di Vittorio Veneto (0.015 km)\nTotale: 1.831 km · 0:03:00"
+      }
+    ],
+    "origin": {
+      "lat": 43.801212,
+      "lng": 11.245131
+    },
+    "destination": {
+      "lat": 43.805035,
+      "lng": 11.237094
+    },
+    "parking": [
+      {
+        "name": "parkingSlot_193785",
+        "lat": 43.80806,
+        "lng": 11.241107,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_193785",
+        "free_spaces": null,
+        "distance_km": 0.466
+      },
+      {
+        "name": "parkingSlot_193783",
+        "lat": 43.808052,
+        "lng": 11.241168,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_193783",
+        "free_spaces": null,
+        "distance_km": 0.468
+      },
+      {
+        "name": "parkingSlot_193759",
+        "lat": 43.808136,
+        "lng": 11.24105,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_193759",
+        "free_spaces": null,
+        "distance_km": 0.469
+      },
+      {
+        "name": "parkingSlot_193784",
+        "lat": 43.808044,
+        "lng": 11.241229,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_193784",
+        "free_spaces": null,
+        "distance_km": 0.471
+      },
+      {
+        "name": "parkingSlot_193758",
+        "lat": 43.80813,
+        "lng": 11.241111,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_193758",
+        "free_spaces": null,
+        "distance_km": 0.472
+      }
+    ]
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "da viale Morgagni 40 a piazza Beccaria 3 in auto Firenze"
+    },
+    {
+      "role": "assistant",
+      "content": "Ciao! Da Viale Giovan Battista Morgagni 40, Firenze a Piazza Dei Cavalieri Di Vittorio Vene 3, Firenze:\nIn auto: 1.8 km, circa 3 minuti"
+    }
+  ]
+}

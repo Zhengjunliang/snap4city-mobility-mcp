@@ -20,7 +20,7 @@ solo li'). Ad ogni turno il bridge scrive `outputs.txt`: copiarlo nel file omoni
 | `S02-tre-modi-piedi.png` | Chip "A piedi" | dopo S01, clic sulla chip *A piedi* | la sola rotta pedonale ridisegnata + bolla di dettaglio |
 | `S03-tre-modi-auto.png` | Chip "In auto" | dopo S01, clic sulla chip *In auto* | la sola rotta in auto + dettaglio + pin dei parcheggi (blu) |
 | `S04-tre-modi-autobus.png` | Chip "In autobus" | dopo S01, clic sulla chip *In autobus* | il solo itinerario multimodale con geometria per-tratta (piedi+bus) e pin delle fermate |
-| `S05-tre-modi-tutte.png` | Chip "Mostra tutte" | dopo S02-S04, clic su *Mostra tutte* | ripristino delle tre rotte insieme e dell'unione dei servizi |
+| `S05-senza-citta.png` | Destinazione senza citta' (candidato piu' vicino) | GPS attivo (es. a Firenze), poi `portami in via Giuseppe Verdi 10` | fra le vie omonime in piu' comuni toscani viene scelta quella piu' vicina alla posizione; indicando la citta' (S10) vince la citta' |
 | `S06-modo-singolo-piedi.png` | Modo singolo esplicito, a piedi | `da via Cavour 12 a via de' Ginori 7 a piedi` | una sola rotta pedonale calcolata (non attende gli altri modi) |
 | `S07-modo-singolo-auto.png` | Modo singolo esplicito, in auto | `da viale Morgagni 40 a piazza Beccaria 3 in auto` | una sola rotta in auto |
 | `S08-modo-singolo-autobus.png` | Modo singolo esplicito, in autobus | `da via Bolognese 20 a via de' Serragli 5 in autobus` | il solo itinerario multimodale |
@@ -41,7 +41,7 @@ solo li'). Ad ogni turno il bridge scrive `outputs.txt`: copiarlo nel file omoni
 ## Note
 
 - Le immagini sono catture della finestra della dashboard (chat box + widgetMap).
-- S02-S05 sono sotto-stati interattivi dello stesso turno di S01: si catturano cliccando le
-  chip dopo aver eseguito S01.
+- S02-S04 sono sotto-stati interattivi dello stesso turno di S01: si catturano cliccando le
+  chip dopo aver eseguito S01. S05 e' invece un turno a se' (risoluzione degli estremi).
 - I nomi dei file sono richiamati come figure nella relazione: se si rinominano, aggiornare
   di conseguenza i `\includegraphics` in `relazione/relazione.tex`.

@@ -1,0 +1,384 @@
+{
+  "status": "success",
+  "request_type": "nearby",
+  "data": {
+    "services": [
+      {
+        "name": "GARAGE TANUCCI DI FEI FRANCO E C. - SOCIETA' IN ACCOMANDITA SEMPL ICE",
+        "lat": 43.79030227661133,
+        "lng": 11.24503421783447,
+        "uri": "http://www.disit.org/km4city/resource/7fdea00c4256649af7f62d929e145f29",
+        "distance_km": 0.66
+      },
+      {
+        "name": "COOPERATIVA SOCIALE SERVIZI AUTO POSTEGGI CUSTODITI FIRENZE - SOC IETA' COOPERATIVA SOCIALE  IN SIGLA S.A.P. SOC. COOP. SOCIALE",
+        "lat": 43.78932571411133,
+        "lng": 11.24427795410156,
+        "uri": "http://www.disit.org/km4city/resource/e12ae6d3d5587a5ae97e3f5c2c549926",
+        "distance_km": 0.73
+      },
+      {
+        "name": "parkingSlot_53695",
+        "lat": 43.787918,
+        "lng": 11.244448,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53695",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_56471",
+        "lat": 43.787926,
+        "lng": 11.244477,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_56471",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57998",
+        "lat": 43.78794,
+        "lng": 11.244537,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57998",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53694",
+        "lat": 43.787933,
+        "lng": 11.244508,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53694",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57376",
+        "lat": 43.78787,
+        "lng": 11.244262,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57376",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53693",
+        "lat": 43.78798,
+        "lng": 11.244691,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53693",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57997",
+        "lat": 43.787884,
+        "lng": 11.244322,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57997",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_59287",
+        "lat": 43.787964,
+        "lng": 11.244631,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_59287",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57377",
+        "lat": 43.787876,
+        "lng": 11.244292,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57377",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_56472",
+        "lat": 43.787907,
+        "lng": 11.244418,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_56472",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53691",
+        "lat": 43.787987,
+        "lng": 11.244721,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53691",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57378",
+        "lat": 43.787853,
+        "lng": 11.244203,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57378",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57999",
+        "lat": 43.78797,
+        "lng": 11.244661,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57999",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57379",
+        "lat": 43.78786,
+        "lng": 11.244232,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57379",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57381",
+        "lat": 43.787846,
+        "lng": 11.244172,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57381",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_57380",
+        "lat": 43.787838,
+        "lng": 11.244143,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_57380",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53692",
+        "lat": 43.787994,
+        "lng": 11.244751,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53692",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53689",
+        "lat": 43.788002,
+        "lng": 11.244781,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53689",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_53690",
+        "lat": 43.78801,
+        "lng": 11.244811,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_53690",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_58000",
+        "lat": 43.78783,
+        "lng": 11.244113,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_58000",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_59288",
+        "lat": 43.788017,
+        "lng": 11.244841,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_59288",
+        "distance_km": 0.881
+      },
+      {
+        "name": "parkingSlot_84825",
+        "lat": 43.787804,
+        "lng": 11.244234,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84825",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84824",
+        "lat": 43.78779,
+        "lng": 11.244175,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84824",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84828",
+        "lat": 43.787846,
+        "lng": 11.2444105,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84828",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84829",
+        "lat": 43.78786,
+        "lng": 11.24447,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84829",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84830",
+        "lat": 43.787876,
+        "lng": 11.244528,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84830",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84831",
+        "lat": 43.78789,
+        "lng": 11.244587,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84831",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84827",
+        "lat": 43.78783,
+        "lng": 11.244351,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84827",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_84826",
+        "lat": 43.787815,
+        "lng": 11.244293,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_84826",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_90784",
+        "lat": 43.787773,
+        "lng": 11.244116,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_90784",
+        "distance_km": 0.887
+      },
+      {
+        "name": "parkingSlot_56836",
+        "lat": 43.788616,
+        "lng": 11.246685,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_56836",
+        "distance_km": 0.889
+      },
+      {
+        "name": "parkingSlot_56835",
+        "lat": 43.788597,
+        "lng": 11.246706,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_56835",
+        "distance_km": 0.892
+      },
+      {
+        "name": "parkingSlot_56834",
+        "lat": 43.78858,
+        "lng": 11.246727,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_56834",
+        "distance_km": 0.894
+      },
+      {
+        "name": "parkingSlot_92521",
+        "lat": 43.787792,
+        "lng": 11.244494,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92521",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92525",
+        "lat": 43.78782,
+        "lng": 11.244603,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92525",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92520",
+        "lat": 43.787785,
+        "lng": 11.244468,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92520",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_94339",
+        "lat": 43.787758,
+        "lng": 11.24436,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_94339",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92519",
+        "lat": 43.787777,
+        "lng": 11.244441,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92519",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92518",
+        "lat": 43.78777,
+        "lng": 11.244413,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92518",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_94338",
+        "lat": 43.78775,
+        "lng": 11.244332,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_94338",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_94334",
+        "lat": 43.787724,
+        "lng": 11.244225,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_94334",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92523",
+        "lat": 43.787804,
+        "lng": 11.244549,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92523",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_94337",
+        "lat": 43.787743,
+        "lng": 11.244306,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_94337",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_94335",
+        "lat": 43.78773,
+        "lng": 11.244251,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_94335",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92524",
+        "lat": 43.78781,
+        "lng": 11.2445755,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92524",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92529",
+        "lat": 43.787846,
+        "lng": 11.244711,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92529",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92522",
+        "lat": 43.787796,
+        "lng": 11.244522,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92522",
+        "distance_km": 0.895
+      },
+      {
+        "name": "parkingSlot_92530",
+        "lat": 43.787853,
+        "lng": 11.244738,
+        "uri": "http://www.disit.org/km4city/resource/iot/orionUNIFI/DISIT/parkingSlot_92530",
+        "distance_km": 0.895
+      }
+    ]
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "i ristoranti vicino a piazza Dalmazia firenze"
+    },
+    {
+      "role": "assistant",
+      "content": "Ciao! Ci sono 50 ristoranti vicino a Piazza Dalmazia 31, Firenze."
+    },
+    {
+      "role": "user",
+      "content": "dove posso parcheggiare qui vicino piazza Dalmazia Firenze?"
+    },
+    {
+      "role": "assistant",
+      "content": "Dimmi dove cercare (un indirizzo o una città) oppure attiva la posizione."
+    },
+    {
+      "role": "user",
+      "content": "dove posso parcheggiare vicino a piazza Dalmazia Firenze?"
+    },
+    {
+      "role": "assistant",
+      "content": "Ci sono 50 parcheggi vicino a Piazza Dalmazia 31, Firenze."
+    }
+  ]
+}

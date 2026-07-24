@@ -1,0 +1,368 @@
+{
+  "status": "success",
+  "request_type": "nearby",
+  "data": {
+    "services": [
+      {
+        "name": "Trattoria In Piazza Di Mohamed Abou Elkhir Mohamed Mahgoub",
+        "lat": 43.79540634155273,
+        "lng": 11.23988246917725,
+        "uri": "http://www.disit.org/km4city/resource/62558504e9d11105b28300da4825fea3",
+        "distance_km": 0.073
+      },
+      {
+        "name": "Bar*l'angolino S.a.s. Di Spagnoletto Francesco E C.",
+        "lat": 43.79435348510742,
+        "lng": 11.24131298065186,
+        "uri": "http://www.disit.org/km4city/resource/9a3e7d377d05e24c558b34c742df9400",
+        "distance_km": 0.122
+      },
+      {
+        "name": "RADIO CLASH DI CACIAGLI ANDREA",
+        "lat": 43.79669952392578,
+        "lng": 11.24089050292969,
+        "uri": "http://www.disit.org/km4city/resource/931af19c7f44ca7def4db39fb241855a",
+        "distance_km": 0.147
+      },
+      {
+        "name": "AUGELLI GIUSEPPE",
+        "lat": 43.79669952392578,
+        "lng": 11.24089050292969,
+        "uri": "http://www.disit.org/km4city/resource/836035c2cba06e8aa70c97a97dfd3760",
+        "distance_km": 0.147
+      },
+      {
+        "name": "G & A Group S.r.l. Semplificata",
+        "lat": 43.79669952392578,
+        "lng": 11.24089050292969,
+        "uri": "http://www.disit.org/km4city/resource/af3bfb932d402cc52ac038ccef4d13a1",
+        "distance_km": 0.147
+      },
+      {
+        "name": "Pagoda S.r.l. - In Liquidazione",
+        "lat": 43.79671478271484,
+        "lng": 11.24261474609375,
+        "uri": "http://www.disit.org/km4city/resource/c6c0231db1ff20edd2d713434fb6dcad",
+        "distance_km": 0.209
+      },
+      {
+        "name": "FOODS  AND COOKS S.R.L.",
+        "lat": 43.79779052734375,
+        "lng": 11.24262809753418,
+        "uri": "http://www.disit.org/km4city/resource/ad7f5c59f2d9de615f60d861da3af139",
+        "distance_km": 0.306
+      },
+      {
+        "name": "Rio Freddo",
+        "lat": 43.79779815673828,
+        "lng": 11.24269962310791,
+        "uri": "http://www.disit.org/km4city/resource/68b8a796d5f49912bff158f34aa1aaef",
+        "distance_km": 0.309
+      },
+      {
+        "name": "Ristorante Rio Freddo",
+        "lat": 43.79779815673828,
+        "lng": 11.24269962310791,
+        "uri": "http://www.disit.org/km4city/resource/9164ee60329b22467443226290545590",
+        "distance_km": 0.309
+      },
+      {
+        "name": "Rio Freddo",
+        "lat": 43.79782485961914,
+        "lng": 11.24266815185547,
+        "uri": "http://www.disit.org/km4city/resource/RIS562",
+        "distance_km": 0.311
+      },
+      {
+        "name": "H & H Srls",
+        "lat": 43.79698181152344,
+        "lng": 11.24423885345459,
+        "uri": "http://www.disit.org/km4city/resource/a749e807ef3e43c19371615d755b7963",
+        "distance_km": 0.329
+      },
+      {
+        "name": "Firpo S.n.c. Di Silvestri Stefano E C.",
+        "lat": 43.79387283325195,
+        "lng": 11.23690700531006,
+        "uri": "http://www.disit.org/km4city/resource/4aa20e7c9c4bb43a0284e30ef2351fda",
+        "distance_km": 0.354
+      },
+      {
+        "name": "Beatrice S.r.l.",
+        "lat": 43.79758071899414,
+        "lng": 11.24405574798584,
+        "uri": "http://www.disit.org/km4city/resource/4bb1fb258b81107de73b1365e0c47280",
+        "distance_km": 0.359
+      },
+      {
+        "name": "PARADISE DI CONTEGIACOMO MASSIMILIANO & C. S.A.S.",
+        "lat": 43.79701995849609,
+        "lng": 11.24465370178223,
+        "uri": "http://www.disit.org/km4city/resource/02ddcbc843edf075033b97ec5f8e4378",
+        "distance_km": 0.36
+      },
+      {
+        "name": "Bata S.a.s. Di Muca Bledar & C.",
+        "lat": 43.79705810546875,
+        "lng": 11.24469089508057,
+        "uri": "http://www.disit.org/km4city/resource/f74eb7629bb88ee7eea7003e0aedae98",
+        "distance_km": 0.365
+      },
+      {
+        "name": "CENTRO COMMERCIALE*TOSCANO 85 S.R.L.",
+        "lat": 43.79705810546875,
+        "lng": 11.24469089508057,
+        "uri": "http://www.disit.org/km4city/resource/c46147edd183aa45c809b90b3cc8634f",
+        "distance_km": 0.365
+      },
+      {
+        "name": "Da Franco",
+        "lat": 43.79710006713867,
+        "lng": 11.24470043182373,
+        "uri": "http://www.disit.org/km4city/resource/a94300fff56038ff22eb30324e40f0eb",
+        "distance_km": 0.368
+      },
+      {
+        "name": "ADRIA S.A.S. DI BARDI ROSSELLA",
+        "lat": 43.79779052734375,
+        "lng": 11.24462795257568,
+        "uri": "http://www.disit.org/km4city/resource/953bed84072181a79b9b83f24c8753f1",
+        "distance_km": 0.408
+      },
+      {
+        "name": "Enoteca Le Scuderie del Granduca",
+        "lat": 43.79769897460938,
+        "lng": 11.24499988555908,
+        "uri": "http://www.disit.org/km4city/resource/fa183c2c05ad5713d9bb37fb4e52d7a8",
+        "distance_km": 0.425
+      },
+      {
+        "name": "Enoteca Le Scuderie Del Granduca",
+        "lat": 43.79774856567383,
+        "lng": 11.24501323699951,
+        "uri": "http://www.disit.org/km4city/resource/RIS143",
+        "distance_km": 0.429
+      },
+      {
+        "name": "Cri.ma. Societa' A Responsabilita' Limitata Semplificata",
+        "lat": 43.79174041748047,
+        "lng": 11.24380779266357,
+        "uri": "http://www.disit.org/km4city/resource/51121e30bf779fca2c5f9c2edfeeb6c7",
+        "distance_km": 0.472
+      },
+      {
+        "name": "DEI MARCHESI C. S.R.L.",
+        "lat": 43.79219055175781,
+        "lng": 11.23666381835938,
+        "uri": "http://www.disit.org/km4city/resource/47807e91bc869635a4d541d3f70e9309",
+        "distance_km": 0.485
+      },
+      {
+        "name": "Ta.sa.ci. S.r.l.",
+        "lat": 43.79342651367188,
+        "lng": 11.24629783630371,
+        "uri": "http://www.disit.org/km4city/resource/7588743a485f3ee37c4674d3790db78b",
+        "distance_km": 0.493
+      },
+      {
+        "name": "Ristorante Michelaccio S.r.l.",
+        "lat": 43.79299545288086,
+        "lng": 11.23537921905518,
+        "uri": "http://www.disit.org/km4city/resource/78d8f4c31a293634eb9ecf22299cb1d0",
+        "distance_km": 0.509
+      },
+      {
+        "name": "Carazas Edith",
+        "lat": 43.79299545288086,
+        "lng": 11.23537921905518,
+        "uri": "http://www.disit.org/km4city/resource/ed676bcbbe941dd50e1cb66234730712",
+        "distance_km": 0.509
+      },
+      {
+        "name": "Ristorante Michelaccio",
+        "lat": 43.79144287109375,
+        "lng": 11.23712158203125,
+        "uri": "http://www.disit.org/km4city/resource/RIS1046",
+        "distance_km": 0.528
+      },
+      {
+        "name": "Ristorante \"Michelaccio\"",
+        "lat": 43.79140090942383,
+        "lng": 11.23709964752197,
+        "uri": "http://www.disit.org/km4city/resource/8f2e33d86d483dbcb3955f0775e6fe71",
+        "distance_km": 0.533
+      },
+      {
+        "name": "B.i.s.a.l. S.a.s. Di Saligari Claudio",
+        "lat": 43.79147338867188,
+        "lng": 11.23692321777344,
+        "uri": "http://www.disit.org/km4city/resource/091d1b5e809d2cf44c83cb054a75918b",
+        "distance_km": 0.534
+      },
+      {
+        "name": "Il Nuovo Poggetto Di Biundo Giuseppe E C. Sas",
+        "lat": 43.79493713378906,
+        "lng": 11.24756908416748,
+        "uri": "http://www.disit.org/km4city/resource/725927ff3a20f26ed4749b9aa9533d78",
+        "distance_km": 0.547
+      },
+      {
+        "name": "CORCKY RICEVIMENTI DI PORA ELENA",
+        "lat": 43.79861450195312,
+        "lng": 11.23546695709229,
+        "uri": "http://www.disit.org/km4city/resource/544717eb83039651aed503bab68f9f5d",
+        "distance_km": 0.558
+      },
+      {
+        "name": "One Up Di Barbara Calamai E Dario Beltrami S.n.c.",
+        "lat": 43.79861450195312,
+        "lng": 11.23546695709229,
+        "uri": "http://www.disit.org/km4city/resource/672e8888cab69ade1817328cd23be70c",
+        "distance_km": 0.558
+      },
+      {
+        "name": "GIOTTO - SOCIETA' A RESPONSABILITA' LIMITATA IN FORMA ABBREVIATA GIOTTO - S.R.L. IN LIQUIDAZIONE",
+        "lat": 43.79646301269531,
+        "lng": 11.23369312286377,
+        "uri": "http://www.disit.org/km4city/resource/cf13fe89a7edac59029fa0f1eca794dc",
+        "distance_km": 0.582
+      },
+      {
+        "name": "IL RISTORO",
+        "lat": 43.79259872436523,
+        "lng": 11.24699974060059,
+        "uri": "http://www.disit.org/km4city/resource/4c1c14ec9df49460788e415bc65101ee",
+        "distance_km": 0.587
+      },
+      {
+        "name": "I Sette Peccati",
+        "lat": 43.79919815063477,
+        "lng": 11.24600028991699,
+        "uri": "http://www.disit.org/km4city/resource/e1329cc98107345cffc37f39950b9d66",
+        "distance_km": 0.596
+      },
+      {
+        "name": "I Sette Peccati S.r.l.",
+        "lat": 43.7993049621582,
+        "lng": 11.24604892730713,
+        "uri": "http://www.disit.org/km4city/resource/94eb19c0f65c27129016b25902c0a224",
+        "distance_km": 0.607
+      },
+      {
+        "name": "CIRI BE' SRL",
+        "lat": 43.79299545288086,
+        "lng": 11.23391151428223,
+        "uri": "http://www.disit.org/km4city/resource/bee6cd206c531b0f3f3a1514092e6e7d",
+        "distance_km": 0.612
+      },
+      {
+        "name": "F.LLI DI GIACOMO S.R.L.",
+        "lat": 43.79768371582031,
+        "lng": 11.23354530334473,
+        "uri": "http://www.disit.org/km4city/resource/55053b7b566274af667e8bb0556df10c",
+        "distance_km": 0.635
+      },
+      {
+        "name": "Risto Campi Societa' A Responsabilita' Limitata Semplificata",
+        "lat": 43.79768371582031,
+        "lng": 11.23354530334473,
+        "uri": "http://www.disit.org/km4city/resource/8ce1d11ca69adf8b153ad0f5c6980dd8",
+        "distance_km": 0.635
+      },
+      {
+        "name": "LO ZIO FRANCO S.A.S DI BIANCHINI MASSIMO & C.",
+        "lat": 43.80101776123047,
+        "lng": 11.23921680450439,
+        "uri": "http://www.disit.org/km4city/resource/fb7b36d5028af7d8ce84f55faefe8b23",
+        "distance_km": 0.639
+      },
+      {
+        "name": "BUGLIONE VINCENZO E C. - SOCETA' IN NOME COLLETTIVO",
+        "lat": 43.7995491027832,
+        "lng": 11.23513507843018,
+        "uri": "http://www.disit.org/km4city/resource/03f62f6f1660f5b80a4345e525316c1c",
+        "distance_km": 0.648
+      },
+      {
+        "name": "Il Punto S.r.l.",
+        "lat": 43.78955078125,
+        "lng": 11.23927021026611,
+        "uri": "http://www.disit.org/km4city/resource/5cfb55e2f07954f50eae45677392936e",
+        "distance_km": 0.66
+      },
+      {
+        "name": "Biribo' Societa' A Responsabilita' Limitata Semplificata",
+        "lat": 43.80135726928711,
+        "lng": 11.24079895019531,
+        "uri": "http://www.disit.org/km4city/resource/25cd811c6be10c0e9992c0e3bc66d2ce",
+        "distance_km": 0.664
+      },
+      {
+        "name": "NELLA GABBIA S.R.L.",
+        "lat": 43.79200744628906,
+        "lng": 11.24766635894775,
+        "uri": "http://www.disit.org/km4city/resource/40679dfdc702c6d46d448588e6380b16",
+        "distance_km": 0.668
+      },
+      {
+        "name": "Cibando Societa' A Responsabilita' Limitata Semplificata - Impres A Sociale",
+        "lat": 43.79091262817383,
+        "lng": 11.23494434356689,
+        "uri": "http://www.disit.org/km4city/resource/a7f66e64cc12e7a18a29213fc09e879d",
+        "distance_km": 0.683
+      },
+      {
+        "name": "IL MURETTO S.R.L.",
+        "lat": 43.7947998046875,
+        "lng": 11.2495002746582,
+        "uri": "http://www.disit.org/km4city/resource/3c8be31c2d35369cc567e0c974efbc55",
+        "distance_km": 0.702
+      },
+      {
+        "name": "S.Z. DI VAHID ZARRABI SAID SAS",
+        "lat": 43.79079437255859,
+        "lng": 11.23414993286133,
+        "uri": "http://www.disit.org/km4city/resource/5bece13f5ae24ca569a72a1ee1170873",
+        "distance_km": 0.738
+      },
+      {
+        "name": "Demostene S.r.l.s.",
+        "lat": 43.78863143920898,
+        "lng": 11.23929309844971,
+        "uri": "http://www.disit.org/km4city/resource/2b5dff1cb35270c5fe6663d84775da73",
+        "distance_km": 0.76
+      },
+      {
+        "name": "Alta Quota Di Ammirati Massimiliano E C. S.a.s.",
+        "lat": 43.7963981628418,
+        "lng": 11.23115921020508,
+        "uri": "http://www.disit.org/km4city/resource/01bc00a8be870738dd40d9d2260f4c2e",
+        "distance_km": 0.781
+      },
+      {
+        "name": "Stan Srl",
+        "lat": 43.7886848449707,
+        "lng": 11.23767852783203,
+        "uri": "http://www.disit.org/km4city/resource/15b22249d1d6c4a7d9b2ec791c675ae4",
+        "distance_km": 0.785
+      },
+      {
+        "name": "Odissea Di Del Gatto Andrea - S.a.s",
+        "lat": 43.7886848449707,
+        "lng": 11.23767852783203,
+        "uri": "http://www.disit.org/km4city/resource/171ecc618b4186a692a5809b058976a3",
+        "distance_km": 0.785
+      }
+    ]
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "i ristoranti vicino a piazza Dalmazia firenze"
+    },
+    {
+      "role": "assistant",
+      "content": "Ciao! Ci sono 50 ristoranti vicino a Piazza Dalmazia 31, Firenze."
+    }
+  ]
+}

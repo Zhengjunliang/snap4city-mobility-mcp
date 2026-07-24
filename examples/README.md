@@ -14,6 +14,7 @@ non un nuovo turno verso il bridge.
 | File | Scenario | Contenuto principale |
 |---|---|---|
 | `S01-tre-modi.json` | Tre modi (nessun modo indicato) | tre rotte sullo stesso tragitto (a piedi, auto, trasporto pubblico), ciascuna con la propria geometria e il proprio `detail`; da qui derivano le viste delle chip |
+| `S05-senza-citta.json` | Destinazione senza citta' (candidato piu' vicino) | percorso la cui destinazione, priva di citta', e' risolta sul candidato omonimo piu' vicino all'ancora |
 | `S06-modo-singolo-piedi.json` | Modo singolo, a piedi | una sola rotta pedonale |
 | `S07-modo-singolo-auto.json` | Modo singolo, in auto | una sola rotta in auto |
 | `S08-modo-singolo-autobus.json` | Modo singolo, in autobus | un solo itinerario multimodale con i `legs` walk/ride separati (geometria per tratta e fermate) |
