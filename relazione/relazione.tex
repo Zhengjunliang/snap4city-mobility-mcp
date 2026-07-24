@@ -6,27 +6,9 @@
 % Tptesi2 carica gia': babel(italian), inputenc, fontenc, amsmath, amssymb,
 % graphicx, hyperref, float, algorithm2e, mathrsfs. Qui serve solo il resto.
 \usepackage{booktabs}
-
-% Blocchi di output JSON (semplificati) negli scenari del capitolo "Casistica".
-% Stile leggero senza colori per non dipendere da altri pacchetti.
-\usepackage{listings}
-\lstdefinestyle{outjson}{%
-  basicstyle=\ttfamily\scriptsize,%
-  breaklines=true,%
-  breakatwhitespace=false,%
-  columns=fullflexible,%
-  keepspaces=true,%
-  showstringspaces=false,%
-  frame=single,%
-  xleftmargin=2mm,%
-  aboveskip=4pt,belowskip=4pt,%
-  extendedchars=true,%
-  literate=%
-    {à}{{\`a}}1 {è}{{\`e}}1 {é}{{\'e}}1 {ì}{{\`i}}1 {í}{{\'i}}1%
-    {ò}{{\`o}}1 {ó}{{\'o}}1 {ù}{{\`u}}1 {ú}{{\'u}}1%
-    {À}{{\`A}}1 {È}{{\`E}}1 {É}{{\'E}}1 {°}{{\textdegree}}1%
-    {·}{{\textperiodcentered}}1%
-    {’}{{'}}1 {‘}{{'}}1 {“}{{"}}1 {”}{{"}}1}
+% Percorsi di file lunghi che possono andare a capo (evita overflow del margine).
+\usepackage{seqsplit}
+\newcommand{\exfile}[1]{\texttt{\seqsplit{examples/#1.json}}}
 
 % Le figure vivono nelle cartelle del progetto: nessuna copia duplicata.
 % "figures/" viene provata per prima, cosi' e' possibile creare un progetto
@@ -261,7 +243,7 @@ La Figura~\ref{fig:graphflow} descrive la logica interna del grafo.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.72\textwidth]{graph-flow.png}
+  \includegraphics[width=0.72\textwidth,height=0.82\textheight,keepaspectratio]{graph-flow.png}
   \caption{Grafo deterministico: il modello interviene solo nel nodo
            \texttt{understand}.}
   \label{fig:graphflow}
@@ -400,10 +382,9 @@ bridge \emph{same-origin} attraverso \texttt{jupyter-server-proxy}.
 
 Questo capitolo raccoglie gli scenari d'uso supportati dall'advisor, catturati
 sulla dashboard reale. Per ciascuno si riportano: la \emph{situazione}, la
-\emph{riproduzione} (la frase digitata dall'utente e le eventuali precondizioni, come il
-GPS del browser), l'\emph{output semplificato} --- lo stesso payload restituito, con la
-geometria \texttt{wkt} abbreviata e gli URI dei servizi omessi, mentre il file completo
-resta allegato in \texttt{examples/} --- e la relativa schermata. Gli indirizzi di prova
+\emph{riproduzione} (il tipo di richiesta e le eventuali precondizioni, come il
+GPS del browser), il \emph{riferimento} all'output completo allegato in \texttt{examples/} e la relativa
+schermata. Gli indirizzi di prova
 usano il numero civico completo (cos\`i la risoluzione civica \`e esercitata in ogni
 scenario di percorso) e localit\`a toscane, dove i dati km4city sono validi. Le schermate
 sono indicizzate anche in \texttt{screenshots/README.md}.
@@ -414,106 +395,11 @@ sono indicizzate anche in \texttt{screenshots/README.md}.
 \subsection{S01 --- Tre modi (nessun modo indicato)}
 \textbf{Situazione.} Senza indicare il modo, l'advisor calcola e disegna insieme i tre
 itinerari (a piedi, in auto, trasporto pubblico) e offre le chip di selezione.
-\textbf{Riproduzione.} L'utente digita \emph{``da via Gramsci 50, Sesto Fiorentino a via
-della Stazione 1, Firenze''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (11.249119 43.776602, ..., 11.255209 43.798767)",
-    "distance_km": 2.956,
-    "duration": "0:04:48",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (11.249119 43.776602, ..., 11.255209 43.798767)",
-        "distance_km": 2.956,
-        "duration": "0:04:48",
-        "detail": "Piazza della Stazione (0.786 km)\nViale Filippo Strozzi (0.695 km)\nPiazza Ludovico Antonio Muratori (0.054 km)\nVia Cesare Guasti (0.168 km)\nVia Atto Vannucci (0.401 km)\nPiazza Giovambattista Giorgini (0.034 km)\nVia Guglielmo Massaia (0.643 km)\nVia di Santa Marta (0.167 km)\nTotale: 2.956 km · 0:04:48"
-      },
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.248835 43.776542, ..., 11.255209 43.798767)",
-        "distance_km": 3.595,
-        "duration": "0:32:47",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.248835 43.776542, ..., 11.249197 43.777325)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.249197 43.777325, ..., 11.25382 43.779942)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.25382 43.779942, ..., 11.253915 43.780033)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.253915 43.780033, ..., 11.252417 43.78315)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.252417 43.78315, ..., 11.255209 43.798767)"
-          }
-        ],
-        "detail": "A piedi 0.142 km\nLinea 14 (at - Firenze urbano) -> A-IL GIRONE\n  STAZIONE PIAZZA ADUA  12:48\n  INDIPENDENZA XXVII APRILE  12:51\nA piedi 0.076 km\nLinea 32 (at - Firenze urbano) -> STAZIONE MONTELUNGO\n  INDIPENDENZA RIDOLFI  12:53\n  FORTEZZA T1 STROZZI  12:54\nA piedi 2.042 km\nTotale: 3.595 km · 0:32:47"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (11.248835 43.776542, ..., 11.255209 43.798767)",
-        "distance_km": 3.062,
-        "duration": "0:36:44",
-        "detail": "Piazza Adua (0.028 km)\nVia Bernardo Cennini (0.111 km)\nVia Faenza (0.077 km)\nPiazza del Crocifisso (0.028 km)\nVia del Pratello (0.005 km)\nViale Filippo Strozzi (0.086 km)\nViale Giovanni Milton (0.011 km)\nSottopasso dello Statuto (0.102 km)\nPiazza Ludovico Antonio Muratori (0.047 km)\nVia Atto Vannucci (0.054 km)\nVia Celestino Bianchi (0.058 km)\nVia Vittorio Emanuele Secondo (0.005 km)\nVia di Santa Marta (0.161 km)\nTotale: 3.062 km · 0:36:44"
-      }
-    ],
-    "origin": {
-      "lat": 43.77652,
-      "lng": 11.248755
-    },
-    "destination": {
-      "lat": 43.798786,
-      "lng": 11.255223
-    },
-    "parking": [
-      {
-        "name": "parkingSlotOffRoad_162",
-        "distance_km": 0.767,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlotOffRoad_163",
-        "distance_km": 0.768,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlotOffRoad_164",
-        "distance_km": 0.77,
-        "free_spaces": null
-      },
-      "... (+2 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da Piazza della Stazione Firenze a via santa marta 3 Firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Piazza Della Stazione 41/1, Firenze a Via Di Santa Marta 3, Firenze:\nIn auto: 3 km, circa 5 minuti\nCon i mezzi: 3.6 km, circa 33 minuti\nA piedi: 3.1 km, circa 37 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S01-tre-modi.json}.
+\textbf{Riproduzione.} L'utente chiede il percorso tra due indirizzi civici, senza indicare il modo.
+\textbf{Output completo:} \exfile{S01-tre-modi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S01-tre-modi.png}
+  \includegraphics[width=\textwidth]{S01-tre-modi.jpg}
   \caption{Turno a tre modi: le tre rotte disegnate insieme, il testo di confronto e il
            dock delle chip.}
   \label{fig:S01}
@@ -523,10 +409,10 @@ della Stazione 1, Firenze''}.
 \textbf{Situazione.} Dallo stato a tre modi, la selezione di una chip ridisegna localmente
 la sola rotta scelta e apre la bolla di dettaglio, senza un nuovo turno verso il bridge.
 \textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{A piedi}.
-\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\textbf{Output:} vista lato client del payload di \exfile{S01-tre-modi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S02-tre-modi-piedi.png}
+  \includegraphics[width=\textwidth]{S02-tre-modi-piedi.jpg}
   \caption{Selezione della chip pedonale: la sola rotta a piedi e la bolla di dettaglio.}
   \label{fig:S02}
 \end{figure}
@@ -535,10 +421,10 @@ la sola rotta scelta e apre la bolla di dettaglio, senza un nuovo turno verso il
 \textbf{Situazione.} La chip auto mostra la sola rotta in auto, il dettaglio e i pin dei
 parcheggi vicini alla destinazione.
 \textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{In auto}.
-\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\textbf{Output:} vista lato client del payload di \exfile{S01-tre-modi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S03-tre-modi-auto.png}
+  \includegraphics[width=\textwidth]{S03-tre-modi-auto.jpg}
   \caption{Chip in auto: rotta, dettaglio e pin dei parcheggi.}
   \label{fig:S03}
 \end{figure}
@@ -547,10 +433,10 @@ parcheggi vicini alla destinazione.
 \textbf{Situazione.} La chip autobus mostra il solo itinerario multimodale, con la
 geometria separata per tratta (a piedi + bus) e i pin delle fermate.
 \textbf{Riproduzione.} Dopo S01, clic sulla chip \emph{In autobus}.
-\textbf{Output:} vista lato client del payload di \texttt{examples/S01-tre-modi.json}.
+\textbf{Output:} vista lato client del payload di \exfile{S01-tre-modi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S04-tre-modi-autobus.png}
+  \includegraphics[width=\textwidth]{S04-tre-modi-autobus.jpg}
   \caption{Chip in autobus: itinerario per-tratta e pin delle fermate.}
   \label{fig:S04}
 \end{figure}
@@ -560,60 +446,13 @@ geometria separata per tratta (a piedi + bus) e i pin delle fermate.
 nome di via ricorre in pi\`u comuni toscani, viene scelto il candidato pi\`u vicino
 all'ancora (la posizione GPS per l'origine, l'origine gi\`a risolta per la destinazione).
 Nominando invece la citt\`a le si d\`a la priorit\`a (caso complementare di S10).
-\textbf{Riproduzione.} Con il GPS attivo a Firenze, l'utente digita \emph{``portami in via
-Giuseppe Verdi 10''} (via presente in pi\`u citt\`a): viene risolta quella pi\`u vicina alla
-posizione.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (10.804028 43.739316, ..., 10.812101 43.730455)",
-    "distance_km": 1.736,
-    "duration": "0:02:57",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (10.804028 43.739316, ..., 10.812101 43.730455)",
-        "distance_km": 1.736,
-        "duration": "0:02:57",
-        "detail": "Via di Burello (0.138 km)\nStrada Provinciale 11 Pisana (0.618 km)\nVia Napoleone Bonaparte (0.136 km)\nVia Sotto la Valle (0.587 km)\nVia Giuseppe Verdi (0.044 km)\nTotale: 1.736 km · 0:02:57"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (10.804028 43.739316, ..., 10.812101 43.730455)",
-        "distance_km": 1.705,
-        "duration": "0:20:27",
-        "detail": "Via di Burello (0.27 km)\nVia Martiri della Libertà (0.474 km)\nVia dell'Unità d'Italia (0.085 km)\nVia Napoleone Bonaparte (0.048 km)\nVia Sotto la Valle (0.572 km)\nVia Giuseppe Verdi (0.044 km)\nTotale: 1.705 km · 0:20:27"
-      }
-    ],
-    "origin": {
-      "lat": 43.73941,
-      "lng": 10.80392
-    },
-    "destination": {
-      "lat": 43.730453,
-      "lng": 10.812096
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "portami in via Giuseppe Verdi 10"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Dalla tua posizione a Via Giuseppe Verdi 10, Fucecchio:\nIn auto: 1.7 km, circa 3 minuti\nA piedi: 1.7 km, circa 20 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S05-senza-citta.json}.
+\textbf{Riproduzione.} Con il GPS attivo, l'utente indica come destinazione una via il cui
+nome ricorre in pi\`u comuni toscani, senza nominare la citt\`a: viene risolta quella pi\`u
+vicina alla posizione.
+\textbf{Output completo:} \exfile{S05-senza-citta}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S05-senza-citta.png}
+  \includegraphics[width=\textwidth]{S05-senza-citta.jpg}
   \caption{Destinazione senza citt\`a risolta sul candidato pi\`u vicino alla posizione.}
   \label{fig:S05}
 \end{figure}
@@ -621,122 +460,24 @@ posizione.
 \subsection{S06 --- Modo singolo, a piedi}
 \textbf{Situazione.} Indicando esplicitamente il modo, l'advisor calcola una sola rotta
 (non attende gli altri profili).
-\textbf{Riproduzione.} L'utente digita \emph{``da via Cavour 12 a via de' Ginori 7 a
-piedi''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "foot",
-    "wkt": "LINESTRING (11.24454 43.77462, ..., 11.262358 43.780507)",
-    "distance_km": 1.965,
-    "duration": "0:23:34",
-    "routes": [
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (11.24454 43.77462, ..., 11.262358 43.780507)",
-        "distance_km": 1.965,
-        "duration": "0:23:34",
-        "detail": "Via dell'Albero (0.004 km)\nVia della Scala (0.016 km)\nVia Santa Caterina da Siena (0.005 km)\nPiazza della Stazione (0.084 km)\nPiazza dell'Unità Italiana (0.024 km)\nVia Sant'Antonino (0.119 km)\nVia Rosina (0.047 km)\nVia Taddea (0.077 km)\nVia dei Ginori (0.097 km)\nVia Camillo Cavour (0.003 km)\nPiazza San Marco (0.505 km)\nVia Venezia (0.012 km)\nTotale: 1.965 km · 0:23:34"
-      }
-    ],
-    "origin": {
-      "lat": 43.774635,
-      "lng": 11.244554
-    },
-    "destination": {
-      "lat": 43.780525,
-      "lng": 11.262373
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via palazzuolo 104 firenze  a via Venezia 12 firenze a piedi"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Palazzuolo 104, Firenze a Via Venezia 12, Firenze:\nA piedi: 2 km, circa 24 minuti"
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S06-modo-singolo-piedi.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso tra due indirizzi civici in modo \emph{a
+piedi}.
+\textbf{Output completo:} \exfile{S06-modo-singolo-piedi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S06-modo-singolo-piedi.png}
+  \includegraphics[width=\textwidth]{S06-modo-singolo-piedi.jpg}
   \caption{Richiesta esplicita a piedi: una sola rotta pedonale.}
   \label{fig:S06}
 \end{figure}
 
 \subsection{S07 --- Modo singolo, in auto}
 \textbf{Situazione.} Come sopra, con il profilo auto.
-\textbf{Riproduzione.} L'utente digita \emph{``da viale Morgagni 40 a piazza Beccaria 3 in
-auto''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (11.245018 43.801239, ..., 11.237065 43.80505)",
-    "distance_km": 1.831,
-    "duration": "0:03:00",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (11.245018 43.801239, ..., 11.237065 43.80505)",
-        "distance_km": 1.831,
-        "duration": "0:03:00",
-        "detail": "Viale Giovan Battista Morgagni (0.34 km)\nLargo Giovanni Alessandro Brambilla (0.587 km)\nVia Giulio Caccini (0.014 km)\nVia delle Panche (0.359 km)\nLargo Enrico Caruso (0.025 km)\nVia Carlo Del Greco (0.19 km)\nVia Leopoldo Pellas (0.242 km)\nVia Vittorio Locchi (0.058 km)\nPiazza dei Cavalieri di Vittorio Veneto (0.015 km)\nTotale: 1.831 km · 0:03:00"
-      }
-    ],
-    "origin": {
-      "lat": 43.801212,
-      "lng": 11.245131
-    },
-    "destination": {
-      "lat": 43.805035,
-      "lng": 11.237094
-    },
-    "parking": [
-      {
-        "name": "parkingSlot_193785",
-        "distance_km": 0.466,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlot_193783",
-        "distance_km": 0.468,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlot_193759",
-        "distance_km": 0.469,
-        "free_spaces": null
-      },
-      "... (+2 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da viale Morgagni 40 a piazza Beccaria 3 in auto Firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Viale Giovan Battista Morgagni 40, Firenze a Piazza Dei Cavalieri Di Vittorio Vene 3, Firenze:\nIn auto: 1.8 km, circa 3 minuti"
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S07-modo-singolo-auto.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso tra due indirizzi civici in modo
+\emph{auto}.
+\textbf{Output completo:} \exfile{S07-modo-singolo-auto}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S07-modo-singolo-auto.png}
+  \includegraphics[width=\textwidth]{S07-modo-singolo-auto.jpg}
   \caption{Richiesta esplicita in auto: una sola rotta.}
   \label{fig:S07}
 \end{figure}
@@ -744,96 +485,12 @@ auto''}.
 \subsection{S08 --- Modo singolo, in autobus}
 \textbf{Situazione.} Il solo itinerario multimodale; \`e il caso pi\`u lento (il router
 ricostruisce il grafo del trasporto pubblico a ogni richiesta).
-\textbf{Riproduzione.} L'utente digita \emph{``da via Bolognese 20 a via de' Serragli 5 in
-autobus''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "public_transport",
-    "wkt": "LINESTRING (11.262581 43.787383, ..., 11.246339 43.768627)",
-    "distance_km": 3.938,
-    "duration": "0:20:35",
-    "legs": [
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.262581 43.787383, ..., 11.261422 43.786205)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.261422 43.786205, ..., 11.242415 43.774957)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.242415 43.774957, ..., 11.242005 43.773753)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.242005 43.773753, ..., 11.246447 43.769858)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.246447 43.769858, ..., 11.246339 43.768627)"
-      }
-    ],
-    "routes": [
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.262581 43.787383, ..., 11.246339 43.768627)",
-        "distance_km": 3.938,
-        "duration": "0:20:35",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.262581 43.787383, ..., 11.261422 43.786205)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.261422 43.786205, ..., 11.242415 43.774957)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.242415 43.774957, ..., 11.242005 43.773753)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.242005 43.773753, ..., 11.246447 43.769858)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.246447 43.769858, ..., 11.246339 43.768627)"
-          }
-        ],
-        "detail": "A piedi 0.222 km\nLinea 12 (at - Firenze urbano) -> IL PRATO BARBETTI\n  VENTI SETTEMBRE ORTICOLTURA  14:42\n  PUCCINOTTI  14:43\n  RUFFINI  14:45\n  POLIZIANO  14:46\n  SANTA CATERINA D'ALESSANDRIA  14:47\n  INDIPENDENZA NAZIONALE  14:49\n  STAZIONE SCALETTE  14:53\n  SCALA ORTI ORICELLARI  14:53\n  IL PRATO BARBETTI  14:55\nA piedi 0.161 km\nLinea 6 (at - Firenze urbano) -> A-OSPEDALE TORRE GALLI\n  CURTATONE  14:57\n  PESCAIA DI SANTA ROSA  14:59\nA piedi 0.135 km\nTotale: 3.938 km · 0:20:35"
-      }
-    ],
-    "origin": {
-      "lat": 43.78738,
-      "lng": 11.262609
-    },
-    "destination": {
-      "lat": 43.768623,
-      "lng": 11.246355
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via Bolognese 20 a via de' Serragli 5 in autobus Firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Bolognese 20, Firenze a Via Dei Serragli 5, Firenze:\nCon i mezzi: 3.9 km, circa 21 minuti"
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S08-modo-singolo-autobus.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso tra due indirizzi civici in modo
+\emph{autobus}.
+\textbf{Output completo:} \exfile{S08-modo-singolo-autobus}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S08-modo-singolo-autobus.png}
+  \includegraphics[width=\textwidth]{S08-modo-singolo-autobus.jpg}
   \caption{Richiesta esplicita in autobus: itinerario multimodale con fermate.}
   \label{fig:S08}
 \end{figure}
@@ -844,130 +501,12 @@ autobus''}.
 \subsection{S09 --- Origine dalla posizione GPS}
 \textbf{Situazione.} Se l'utente non indica l'origine, viene usata la posizione GPS del
 browser (etichettata tramite geocodifica inversa).
-\textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``voglio andare a piazza
-del Duomo 1''} senza indicare la partenza.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (10.812101 43.730455, ..., 11.256899 43.774442)",
-    "distance_km": 45.64,
-    "duration": "0:41:25",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (10.812101 43.730455, ..., 11.256899 43.774442)",
-        "distance_km": 45.64,
-        "duration": "0:41:25",
-        "detail": "Via Giuseppe Verdi (0.337 km)\nVia Umberto Giordano (0.177 km)\nStrada Provinciale 11 Pisana (0.868 km)\nVia Cesare Battisti (5.002 km)\nVia Provinciale La Motta (0.625 km)\nVia Val d'Elsa (1.839 km)\nVia Primo Maggio (0.255 km)\nRotonda Fi-Pi-Li Empoli Ovest (0.131 km)\nViale Etruria (1.474 km)\nViale Francesco Talenti (0.675 km)\nVia del Palazzo dei Diavoli (0.286 km)\nVia Bronzino (0.802 km)\nPiazza Taddeo Gaddi (0.793 km)\nPiazzale di Porta al Prato (1.075 km)\nVia Giuseppe Dolfi (0.059 km)\nVia di Barbano (0.111 km)\nVia Cosimo Ridolfi (0.07 km)\nPiazza dell'Indipendenza (0.105 km)\nVia Ventisette Aprile (0.195 km)\nVia Santa Reparata (0.18 km)\nVia Guelfa (0.65 km)\nVia della Pergola (0.256 km)\nVia Sant'Egidio (0.352 km)\nTotale: 45.64 km · 0:41:25"
-      },
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (10.812101 43.730455, ..., 11.256317 43.773497)",
-        "distance_km": 64.768,
-        "duration": "3:45:43",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (10.812101 43.730455, ..., 10.848062 43.809557)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (10.848062 43.809557, ..., 10.781245 43.879593)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (10.781245 43.879593, 10.781245 43.879593)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (10.781245 43.879593, ..., 11.208683 43.799932)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.208683 43.799932, ..., 11.207842 43.79924)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.207842 43.79924, ..., 11.229592 43.785265)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.229592 43.785265, 11.229592 43.785265)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.229592 43.785265, ..., 11.249607 43.780212)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.249607 43.780212, ..., 11.256317 43.773497)"
-          }
-        ],
-        "detail": "A piedi 10.259 km\nLinea 73 (at - Pistoia extraurbano) -> PESCIA Terminal\n  COLONNA DI LARCIANO Bivio  15:07\n  CASTELMARTINI Bivio Puntoni  15:09\n  CASTELMARTINI Via V. Gioberti  15:09\n  CASTELMARTINI Monumento  15:10\n  PAZZERA  15:11\n  CHIESINA PONZIANI Bivio  15:12\n  UGGIA  15:12\n  UGGIA Via S. Andrea  15:13\n  CINTOLESE Scuola Equitazione  15:13\n  CINTOLESE  15:14\n  CINTOLESE Via del Carro  15:15\n  I VIOLI  15:15\n  PODERE COLMATE  15:16\n  Via Francesca Sud (incr. Via Gagarin)  15:17\n  Via Francesca Sud (incr. Via Bixio)  15:17\n  VERGINE DEI PINI  15:18\n  MONSUMMANO T. Via della Bartolina  15:19\n  MONSUMMANO T. Via G. Matteotti  15:20\n  MONSUMMANO T. P.za Giusti  15:21\n  MONSUMMANO T. Via C. Cavour  15:22\n  MONSUMMANO T. Terminal  15:23\n  MONSUMMANO T. Via C. Cavour  15:24\n  MONSUMMANO T. Ceccherino  15:25\n  PIEVE A NIEVOLE Giardino Rastelli  15:26\n  Via Mimbelli  15:30\n  PIEVE A NIEVOLE  15:31\n  MONTECATINI T. Via Pistoiese  15:33\n  MONTECATINI T. P.za Italia [Stazione FS]  15:35\nLinea R03 (at - Regionali) -> FIRENZE T2 GUIDONI\n  MONTECATINI T. P.za Italia [Stazione FS]  15:47\n  FIRENZE T2 GUIDONI  16:30\nA piedi 0.161 km\nLinea 30 (at - Firenze urbano) -> B-LEOPOLDA PORTA AL PRATO\n  SANTONI T2 GUIDONI  16:43\n  BARACCA GORI  16:45\n  BARACCA VECCHI  16:46\n  BARACCA BARACCHINI  16:47\n  BARACCA MEDAGLIE D'ORO  16:48\n  BARACCA MICCINESI  16:49\n  BARACCA LEONCAVALLO  16:50\n  PUCCINI MANIFATTURA  16:52\n  PONTE ALLE MOSSE PUCCINI  16:53\nA piedi 1.047 km\nTotale: 64.768 km · 3:45:43"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (10.812101 43.730455, ..., 11.256317 43.773497)",
-        "distance_km": 45.783,
-        "duration": "9:09:31",
-        "detail": "Via Giuseppe Verdi (0.337 km)\nVia Umberto Giordano (0.312 km)\nVia di Valbugiana (2.999 km)\nVia di Petriolo (1.221 km)\nVia di Corliano (0.58 km)\nVia dei Fossi (0.222 km)\nVia Ripa (0.25 km)\nVia Streda (0.041 km)\nVia di Strognano (0.201 km)\nVia Provinciale di Mercatale (0.006 km)\nVia di San Donato (0.184 km)\nVia Pietramarina (0.013 km)\nVia Pietro Grocco (0.297 km)\nVia Conio (0.019 km)\nVia Castra (0.006 km)\nVia Ginestre (0.915 km)\nVia Arrendevole (0.048 km)\nVia le Fonti (0.293 km)\nVia la Volta (0.383 km)\nPiazza Cesare Battisti (0.017 km)\nVia Vittorio Veneto (0.009 km)\nVialetto della Poesia (0.478 km)\nVia Giuseppe Garibaldi (0.178 km)\nVia di Montefortini (0.037 km)\nVia Giacomo Leopardi (0.031 km)\nVia di Montefortini (1.193 km)\nVia Giovanni di Montagliari (0.064 km)\nVia Venticinque Aprile (0.144 km)\nVia Venti Settembre (0.098 km)\nLargo Capitelloni (0.032 km)\nVia Beata Giovanna (0.028 km)\nVia Roma (0.04 km)\nVia Argine Strada (0.003 km)\nVia dei Renai (0.195 km)\nVia Arte della Paglia (0.01 km)\nVia dei Renai (0.106 km)\nPista ciclabile dei Renai (0.739 km)\nCiclovia Cascine-Renai (6.926 km)\nVia di San Biagio a Petriolo (0.314 km)\nViale George Washington (2.126 km)\nPiazza Vittorio Veneto (0.004 km)\nLungarno Amerigo Vespucci (0.096 km)\nVia Melegnano (0.09 km)\nVia del Porcellana (0.073 km)\nVia della Scala (0.06 km)\nPiazza di Santa Maria Novella (0.01 km)\nPiazza Santa Maria Novella (0.037 km)\nPiazza di Santa Maria Novella (0.029 km)\nPiazza Santa Maria Novella (0.025 km)\nPiazza di Santa Maria Novella (0.179 km)\nVia dei Banchi (0.191 km)\nVia dei Martelli (0.011 km)\nTotale: 45.783 km · 9:09:31"
-      }
-    ],
-    "origin": {
-      "lat": 43.730453,
-      "lng": 10.812096
-    },
-    "destination": {
-      "lat": 43.773525,
-      "lng": 11.256317
-    },
-    "parking": [
-      {
-        "name": "Parcheggio S. Lorenzo",
-        "distance_km": 0.389,
-        "free_spaces": null
-      },
-      {
-        "name": "Piazza del Mercato Centrale",
-        "distance_km": 0.392,
-        "free_spaces": null
-      },
-      {
-        "name": "Garage Oriuolo S.r.l.",
-        "distance_km": 0.401,
-        "free_spaces": null
-      },
-      "... (+1 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "portami in via Giuseppe Verdi 10"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Dalla tua posizione a Via Giuseppe Verdi 10, Fucecchio:\nIn auto: 1.7 km, circa 3 minuti\nA piedi: 1.7 km, circa 20 minuti\nL'opzione più veloce è in auto."
-    },
-    {
-      "role": "user",
-      "content": "voglio andare a piazza del Duomo 1 Firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Da Via Giuseppe Verdi 10, Fucecchio a Piazza Del Duomo 1, Firenze:\nIn auto: 45.6 km, circa 41 minuti\nCon i mezzi: 64.8 km, circa 226 minuti\nA piedi: 45.8 km, circa 550 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S09-origine-gps.json}.
+\textbf{Riproduzione.} Con il GPS attivo, l'utente indica solo la destinazione (un indirizzo
+civico), senza la partenza.
+\textbf{Output completo:} \exfile{S09-origine-gps}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S09-origine-gps.png}
+  \includegraphics[width=\textwidth]{S09-origine-gps.jpg}
   \caption{Origine presa dal GPS, destinazione risolta da testo.}
   \label{fig:S09}
 \end{figure}
@@ -975,98 +514,12 @@ del Duomo 1''} senza indicare la partenza.
 \subsection{S10 --- Citt\`a nominata nell'indirizzo}
 \textbf{Situazione.} Quando l'indirizzo nomina la citt\`a, la risoluzione le d\`a la
 priorit\`a rispetto alla vicinanza all'ancora (caso complementare di S05).
-\textbf{Riproduzione.} L'utente digita \emph{``da via Roma 10 a Firenze a viale Morgagni
-40''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (11.252792 43.772141, ..., 11.245018 43.801239)",
-    "distance_km": 3.959,
-    "duration": "0:05:30",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (11.252792 43.772141, ..., 11.245018 43.801239)",
-        "distance_km": 3.959,
-        "duration": "0:05:30",
-        "detail": "Via dei Vecchietti (0.142 km)\nVia dei Cerretani (0.042 km)\nVia Panzani (0.197 km)\nPiazza dell'Unità Italiana (1.028 km)\nViale Filippo Strozzi (0.695 km)\nPiazza Ludovico Antonio Muratori (0.054 km)\nVia Cesare Guasti (0.371 km)\nPiazza Pietro Leopoldo (0.096 km)\nVia Angiolo Tavanti (0.261 km)\nVia Vittorio Emanuele Secondo (0.219 km)\nVia Taddeo Alderotti (0.308 km)\nVia Dino del Garbo (0.18 km)\nViale Giovan Battista Morgagni (0.365 km)\nTotale: 3.959 km · 0:05:30"
-      },
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.254511 43.772121, ..., 11.245101 43.80122)",
-        "distance_km": 4.621,
-        "duration": "0:38:08",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.254511 43.772121, ..., 11.248012 43.77542)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.248012 43.77542, ..., 11.236478 43.792405)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.236478 43.792405, ..., 11.245101 43.80122)"
-          }
-        ],
-        "detail": "A piedi 0.779 km\nLinea 23 (at - Firenze urbano) -> FIRENZE T2 GUIDONI\n  STAZIONE SCALETTE  14:48\n  SCALA ORTI ORICELLARI  14:49\n  SCALA PORTA AL PRATO  14:51\n  PORTE NUOVE BELFIORE  14:53\n  CARRA SCARLATTI  14:54\n  PONTE ALL'ASSE  14:56\n  CORSICA CIRCONDARIA  14:58\n  MASSAIO PONTE DI MEZZO  15:00\n  PONTE DI MEZZO MARITI  15:02\nA piedi 1.233 km\nTotale: 4.621 km · 0:38:08"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (11.254511 43.772121, ..., 11.245101 43.80122)",
-        "distance_km": 3.877,
-        "duration": "0:46:31",
-        "detail": "Piazza dell'Olio (0.005 km)\nVia dei Cerretani (0.014 km)\nVia Ferdinando Zannetti (0.097 km)\nVia dei Conti (0.064 km)\nPiazza Madonna degli Aldobrandini (0.029 km)\nVia Faenza (0.502 km)\nPiazza del Crocifisso (0.028 km)\nVia del Pratello (0.005 km)\nViale Filippo Strozzi (0.086 km)\nViale Giovanni Milton (0.011 km)\nSottopasso dello Statuto (0.102 km)\nPiazza Ludovico Antonio Muratori (0.047 km)\nVia Luigi Passerini (0.003 km)\nVia Cesare Guasti (0.11 km)\nVia Angiolo Tavanti (0.187 km)\nVia Celso (0.301 km)\nVia Bruno Borghi (0.126 km)\nViale Giovan Battista Morgagni (0.11 km)\nTotale: 3.877 km · 0:46:31"
-      }
-    ],
-    "origin": {
-      "lat": 43.77212,
-      "lng": 11.254551
-    },
-    "destination": {
-      "lat": 43.801212,
-      "lng": 11.245131
-    },
-    "parking": [
-      {
-        "name": "parkingSlotOffRoad_120",
-        "distance_km": 0.269,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlotOffRoad_119",
-        "distance_km": 0.269,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlotOffRoad_118",
-        "distance_km": 0.269,
-        "free_spaces": null
-      },
-      "... (+2 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via Roma 10 a Firenze a viale Morgagni 40"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Roma 10 R, Firenze a Viale Giovan Battista Morgagni 40, Firenze:\nIn auto: 4 km, circa 6 minuti\nCon i mezzi: 4.6 km, circa 38 minuti\nA piedi: 3.9 km, circa 47 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S10-citta-nominata.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso tra due indirizzi indicando
+esplicitamente la citt\`a di uno di essi.
+\textbf{Output completo:} \exfile{S10-citta-nominata}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S10-citta-nominata.png}
+  \includegraphics[width=\textwidth]{S10-citta-nominata.jpg}
   \caption{Risoluzione con priorit\`a alla citt\`a indicata.}
   \label{fig:S10}
 \end{figure}
@@ -1075,86 +528,10 @@ priorit\`a rispetto alla vicinanza all'ancora (caso complementare di S05).
 \textbf{Situazione.} La selezione e le risposte vengono riscritte nella cronologia, cos\`i
 un turno successivo pu\`o riusare gli estremi gi\`a risolti.
 \textbf{Riproduzione.} Dopo S07 (in auto), l'utente digita \emph{``e in autobus?''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "public_transport",
-    "wkt": "LINESTRING (11.254511 43.772121, ..., 11.245101 43.80122)",
-    "distance_km": 4.621,
-    "duration": "0:38:08",
-    "legs": [
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.254511 43.772121, ..., 11.248012 43.77542)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.248012 43.77542, ..., 11.236478 43.792405)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.236478 43.792405, ..., 11.245101 43.80122)"
-      }
-    ],
-    "routes": [
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.254511 43.772121, ..., 11.245101 43.80122)",
-        "distance_km": 4.621,
-        "duration": "0:38:08",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.254511 43.772121, ..., 11.248012 43.77542)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.248012 43.77542, ..., 11.236478 43.792405)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.236478 43.792405, ..., 11.245101 43.80122)"
-          }
-        ],
-        "detail": "A piedi 0.779 km\nLinea 23 (at - Firenze urbano) -> FIRENZE T2 GUIDONI\n  STAZIONE SCALETTE  14:48\n  SCALA ORTI ORICELLARI  14:49\n  SCALA PORTA AL PRATO  14:51\n  PORTE NUOVE BELFIORE  14:53\n  CARRA SCARLATTI  14:54\n  PONTE ALL'ASSE  14:56\n  CORSICA CIRCONDARIA  14:58\n  MASSAIO PONTE DI MEZZO  15:00\n  PONTE DI MEZZO MARITI  15:02\nA piedi 1.233 km\nTotale: 4.621 km · 0:38:08"
-      }
-    ],
-    "origin": {
-      "lat": 43.77212,
-      "lng": 11.254551
-    },
-    "destination": {
-      "lat": 43.801212,
-      "lng": 11.245131
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via Roma 10 a Firenze a viale Morgagni 40"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Roma 10 R, Firenze a Viale Giovan Battista Morgagni 40, Firenze:\nIn auto: 4 km, circa 6 minuti\nCon i mezzi: 4.6 km, circa 38 minuti\nA piedi: 3.9 km, circa 47 minuti\nL'opzione più veloce è in auto."
-    },
-    {
-      "role": "user",
-      "content": "e in autobus?"
-    },
-    {
-      "role": "assistant",
-      "content": "Da Via Roma 10 R, Firenze a Viale Giovan Battista Morgagni 40, Firenze:\nCon i mezzi: 4.6 km, circa 38 minuti"
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S11-follow-up.json}.
+\textbf{Output completo:} \exfile{S11-follow-up}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S11-follow-up.png}
+  \includegraphics[width=\textwidth]{S11-follow-up.jpg}
   \caption{Il turno successivo riusa origine e destinazione dal contesto.}
   \label{fig:S11}
 \end{figure}
@@ -1167,96 +544,10 @@ un turno successivo pu\`o riusare gli estremi gi\`a risolti.
 vicino con una scala di raggio crescente (0,5 $\rightarrow$ 2 $\rightarrow$ 10 km).
 \textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``portami al supermercato
 pi\`u vicino''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (11.255209 43.798767, ..., 11.245096 43.791777)",
-    "distance_km": 1.352,
-    "duration": "0:02:32",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (11.255209 43.798767, ..., 11.245096 43.791777)",
-        "distance_km": 1.352,
-        "duration": "0:02:32",
-        "detail": "Via di Santa Marta (0.167 km)\nVia Guglielmo Massaia (0.643 km)\nPiazza Giovambattista Giorgini (0.117 km)\nVia Sallustio Bandini (0.179 km)\nPiazza Pietro Leopoldo (0.122 km)\nVia Riguccio Galluzzi (0.116 km)\nTotale: 1.352 km · 0:02:32"
-      },
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.255209 43.798767, ..., 11.245624 43.792196)",
-        "distance_km": 1.483,
-        "duration": "0:10:46",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.255209 43.798767, ..., 11.254023 43.797448)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.254023 43.797448, ..., 11.251817 43.79218)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.251817 43.79218, ..., 11.245624 43.792196)"
-          }
-        ],
-        "detail": "A piedi 0.181 km\nLinea 55 (at - Firenze urbano) -> T1 CASCINE - CARLO MONNI\n  SCUOLA DI INGEGNERIA  14:47\n  MASSAIA  14:48\n  VITTORIO EMANUELE STIBBERT  14:49\nA piedi 0.523 km\nTotale: 1.483 km · 0:10:46"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (11.255209 43.798767, ..., 11.245624 43.792196)",
-        "distance_km": 1.343,
-        "duration": "0:16:06",
-        "detail": "Via di Santa Marta (0.161 km)\nVia Guglielmo Massaia (0.007 km)\nPiazza Giovambattista Giorgini (0.118 km)\nVia Sallustio Bandini (0.251 km)\nTotale: 1.343 km · 0:16:06"
-      }
-    ],
-    "origin": {
-      "lat": 43.798786,
-      "lng": 11.255223
-    },
-    "destination": {
-      "lat": 43.79227,
-      "lng": 11.24532
-    },
-    "parking": [
-      {
-        "name": "GARAGE TANUCCI DI FEI FRANCO E C. - SOCIETA' IN ACCOMANDITA SEMPL ICE",
-        "distance_km": 0.22,
-        "free_spaces": null
-      },
-      {
-        "name": "COOPERATIVA SOCIALE SERVIZI AUTO POSTEGGI CUSTODITI FIRENZE - SOC IETA' COOPERATIVA SOCIALE  IN SIGLA S.A.P. SOC. COOP. SOCIALE",
-        "distance_km": 0.338,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlot_57210",
-        "distance_km": 0.415,
-        "free_spaces": null
-      },
-      "... (+2 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "portami al supermercato piu' vicino a via santa marta 3 a firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Di Santa Marta 3, Firenze a building-test:\nIn auto: 1.4 km, circa 3 minuti\nCon i mezzi: 1.5 km, circa 11 minuti\nA piedi: 1.3 km, circa 16 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S12-dest-categoria-supermercato.json}.
+\textbf{Output completo:} \exfile{S12-dest-categoria-supermercato}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S12-dest-categoria-supermercato.png}
+  \includegraphics[width=\textwidth]{S12-dest-categoria-supermercato.jpg}
   \caption{Destinazione = supermercato pi\`u vicino alla posizione.}
   \label{fig:S12}
 \end{figure}
@@ -1265,57 +556,10 @@ pi\`u vicino''}.
 \textbf{Situazione.} La stessa funzione con una categoria diversa.
 \textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``qual \`e la farmacia
 pi\`u vicina?''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (10.804028 43.739316, ..., 10.804159 43.730305)",
-    "distance_km": 1.203,
-    "duration": "0:02:19",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (10.804028 43.739316, ..., 10.804159 43.730305)",
-        "distance_km": 1.203,
-        "duration": "0:02:19",
-        "detail": "Via di Burello (0.615 km)\nVia Napoleone Bonaparte (0.038 km)\nViale Bruno Buozzi (0.357 km)\nTotale: 1.203 km · 0:02:19"
-      },
-      {
-        "mode": "foot",
-        "wkt": "LINESTRING (10.804028 43.739316, ..., 10.804159 43.730305)",
-        "distance_km": 1.185,
-        "duration": "0:14:13",
-        "detail": "Via di Burello (0.589 km)\nVia Primo Settembre (0.026 km)\nVia Napoleone Bonaparte (0.037 km)\nViale Bruno Buozzi (0.34 km)\nTotale: 1.185 km · 0:14:13"
-      }
-    ],
-    "origin": {
-      "lat": 43.73941,
-      "lng": 10.80392
-    },
-    "destination": {
-      "lat": 43.73040008544922,
-      "lng": 10.80430030822754
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "portami alla farmacia piu vicina"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Dalla tua posizione a LUPI:\nIn auto: 1.2 km, circa 2 minuti\nA piedi: 1.2 km, circa 14 minuti\nL'opzione più veloce è in auto."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S13-dest-categoria-farmacia.json}.
+\textbf{Output completo:} \exfile{S13-dest-categoria-farmacia}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S13-dest-categoria-farmacia.png}
+  \includegraphics[width=\textwidth]{S13-dest-categoria-farmacia.jpg}
   \caption{Destinazione per categoria: farmacia pi\`u vicina.}
   \label{fig:S13}
 \end{figure}
@@ -1327,85 +571,12 @@ pi\`u vicina?''}.
 \textbf{Situazione.} Poich\'e lo strumento remoto accetta solo un punto e un raggio, il
 corridoio viene costruito lato client campionando ancore lungo la geometria del percorso
 ed eseguendo una ricerca attorno a ciascuna, con deduplicazione dei risultati.
-\textbf{Riproduzione.} L'utente digita \emph{``da via Luigi Castaldi 6 a via Goro Dati 8
-in auto e i ristoranti lungo il percorso''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "car",
-    "wkt": "LINESTRING (11.248014 43.796831, ..., 11.279228 43.771212)",
-    "distance_km": 5.688,
-    "duration": "0:08:34",
-    "routes": [
-      {
-        "mode": "car",
-        "wkt": "LINESTRING (11.248014 43.796831, ..., 11.279228 43.771212)",
-        "distance_km": 5.688,
-        "duration": "0:08:34",
-        "services": [
-          {
-            "name": "Brothers Societa' A Responsabilita' Limitata Semplificata",
-            "distance_km": 0.017
-          },
-          {
-            "name": "I Carcerieri Societa' A Responsabilita' Limitata Semplificata",
-            "distance_km": 0.017
-          },
-          {
-            "name": "Nerone Societa' A Responsabilita' Limitata A Capitale Ridotto",
-            "distance_km": 0.017
-          },
-          "... (+7 voci)"
-        ],
-        "detail": "Via Luigi Castaldi (0.081 km)\nVia Carlo Burci (0.222 km)\nVia della Villa Lorenzi (0.066 km)\nVia Niccolò Stenone (0.126 km)\nVia Taddeo Alderotti (0.545 km)\nVia Vittorio Emanuele Secondo (1.169 km)\nVia Trieste (0.495 km)\nVia Bolognese (0.452 km)\nPiazza della Libertà (1.127 km)\nPiazzale Donatello (0.128 km)\nVia Giuseppe La Farina (0.063 km)\nVia dei Della Robbia (0.376 km)\nVia Giovanni Bovio (0.258 km)\nVia Tommaso Campanella (0.466 km)\nVia Vespasiano da Bisticci (0.068 km)\nVia Goro Dati (0.045 km)\nTotale: 5.688 km · 0:08:34"
-      }
-    ],
-    "origin": {
-      "lat": 43.79684,
-      "lng": 11.247987
-    },
-    "destination": {
-      "lat": 43.771263,
-      "lng": 11.279263
-    },
-    "parking": [
-      {
-        "name": "parkingSlot_68421",
-        "distance_km": 0.093,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlot_43411",
-        "distance_km": 0.096,
-        "free_spaces": null
-      },
-      {
-        "name": "parkingSlot_68422",
-        "distance_km": 0.096,
-        "free_spaces": null
-      },
-      "... (+2 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via Luigi Castaldi 6 a via Goro Dati 8 in auto e i ristoranti lungo il percorso firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Luigi Castaldi 6, Firenze a Via Goro Dati 8, Firenze:\nIn auto: 5.7 km, circa 9 minuti\nHo segnato i ristoranti lungo il percorso sulla mappa."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S14-servizi-percorso-ristoranti.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso in auto tra due indirizzi e, insieme, i
+ristoranti lungo il tragitto.
+\textbf{Output completo:} \exfile{S14-servizi-percorso-ristoranti}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S14-servizi-percorso-ristoranti.png}
+  \includegraphics[width=\textwidth]{S14-servizi-percorso-ristoranti.jpg}
   \caption{Rotta in auto con i pin dei ristoranti campionati lungo il tragitto.}
   \label{fig:S14}
 \end{figure}
@@ -1414,111 +585,12 @@ in auto e i ristoranti lungo il percorso''}.
 \textbf{Situazione.} In modo autobus il corridoio non segue tutta la linea: i servizi
 vengono campionati solo attorno alle fermate di salita/discesa e ai tratti percorsi a
 piedi.
-\textbf{Riproduzione.} L'utente digita \emph{``da via Bolognese 20 a via de' Serragli 5 in
-autobus e le farmacie lungo il percorso''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "public_transport",
-    "wkt": "LINESTRING (11.262581 43.787383, ..., 11.246339 43.768627)",
-    "distance_km": 3.401,
-    "duration": "0:20:57",
-    "legs": [
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.262581 43.787383, ..., 11.262045 43.784968)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.262045 43.784968, ..., 11.248012 43.77542)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.248012 43.77542, 11.248012 43.77542)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.248012 43.77542, ..., 11.246447 43.769858)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.246447 43.769858, ..., 11.246339 43.768627)"
-      }
-    ],
-    "routes": [
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.262581 43.787383, ..., 11.246339 43.768627)",
-        "distance_km": 3.401,
-        "duration": "0:20:57",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.262581 43.787383, ..., 11.262045 43.784968)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.262045 43.784968, ..., 11.248012 43.77542)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.248012 43.77542, 11.248012 43.77542)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.248012 43.77542, ..., 11.246447 43.769858)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.246447 43.769858, ..., 11.246339 43.768627)"
-          }
-        ],
-        "services": [
-          {
-            "name": "Farmacia COMUNALE N. 1",
-            "distance_km": 0.02
-          },
-          {
-            "name": "Farmacia PONTE ROSSO",
-            "distance_km": 0.101
-          },
-          {
-            "name": "Farmacia COMUNALE N. 13",
-            "distance_km": 0.142
-          },
-          "... (+7 voci)"
-        ],
-        "detail": "A piedi 0.325 km\nLinea 17 (at - Firenze urbano) -> B-BOITO\n  PONTE ROSSO  14:54\n  XXVII APRILE SAN ZANOBI  14:58\n  INDIPENDENZA NAZIONALE  14:59\n  STAZIONE SCALETTE  15:05\nA piedi 0.135 km\nTotale: 3.401 km · 0:20:57"
-      }
-    ],
-    "origin": {
-      "lat": 43.78738,
-      "lng": 11.262609
-    },
-    "destination": {
-      "lat": 43.768623,
-      "lng": 11.246355
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via Bolognese 20 a via de' Serragli 5 in autobus e le farmacie lungo il percorso firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Bolognese 20, Firenze a Via Dei Serragli 5, Firenze:\nCon i mezzi: 3.4 km, circa 21 minuti\nHo segnato le farmacie lungo il percorso sulla mappa."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S15-servizi-percorso-autobus.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso in autobus tra due indirizzi e le farmacie
+lungo il tragitto.
+\textbf{Output completo:} \exfile{S15-servizi-percorso-autobus}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S15-servizi-percorso-autobus.png}
+  \includegraphics[width=\textwidth]{S15-servizi-percorso-autobus.jpg}
   \caption{Servizi campionati attorno a fermate e tratti a piedi dell'itinerario bus.}
   \label{fig:S15}
 \end{figure}
@@ -1532,44 +604,10 @@ cinquanta servizi della categoria e restituiti come soli pin, senza tracciare al
 linea. Il tipo di richiesta \`e \texttt{nearby} e i servizi stanno in \texttt{data.services}.
 \textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``mostrami le farmacie qui
 intorno''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "nearby",
-  "data": {
-    "services": [
-      {
-        "name": "LUPI",
-        "distance_km": 1.002
-      },
-      {
-        "name": "LUPI",
-        "distance_km": 1.002
-      },
-      {
-        "name": "FARMACIA LUPI DI LUPI RICO",
-        "distance_km": 1.003
-      },
-      "... (+6 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "mostrami le farmacie qui intorno"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Ci sono 9 farmacie qui vicino."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S16-nearby-farmacie.json}.
+\textbf{Output completo:} \exfile{S16-nearby-farmacie}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S16-nearby-farmacie.png}
+  \includegraphics[width=\textwidth]{S16-nearby-farmacie.jpg}
   \caption{Solo i pin delle farmacie attorno alla posizione, senza rotta.}
   \label{fig:S16}
 \end{figure}
@@ -1577,45 +615,11 @@ intorno''}.
 \subsection{S17 --- Servizi vicini a un luogo nominato}
 \textbf{Situazione.} Il centro della ricerca pu\`o essere un indirizzo o una citt\`a
 indicati dall'utente invece della posizione GPS.
-\textbf{Riproduzione.} L'utente digita \emph{``i ristoranti vicino a piazza Dalmazia''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "nearby",
-  "data": {
-    "services": [
-      {
-        "name": "Trattoria In Piazza Di Mohamed Abou Elkhir Mohamed Mahgoub",
-        "distance_km": 0.073
-      },
-      {
-        "name": "Bar*l'angolino S.a.s. Di Spagnoletto Francesco E C.",
-        "distance_km": 0.122
-      },
-      {
-        "name": "RADIO CLASH DI CACIAGLI ANDREA",
-        "distance_km": 0.147
-      },
-      "... (+47 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "i ristoranti vicino a piazza Dalmazia firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Ci sono 50 ristoranti vicino a Piazza Dalmazia 31, Firenze."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S17-nearby-centro-nominato.json}.
+\textbf{Riproduzione.} L'utente chiede i ristoranti vicino a un luogo indicato (una piazza), non alla posizione GPS.
+\textbf{Output completo:} \exfile{S17-nearby-centro-nominato}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S17-nearby-centro-nominato.png}
+  \includegraphics[width=\textwidth]{S17-nearby-centro-nominato.jpg}
   \caption{Ricerca centrata su un indirizzo indicato, non sul GPS.}
   \label{fig:S17}
 \end{figure}
@@ -1624,60 +628,10 @@ indicati dall'utente invece della posizione GPS.
 \textbf{Situazione.} La stessa ricerca senza percorso con la categoria parcheggi.
 \textbf{Riproduzione.} Con il GPS attivo, l'utente digita \emph{``dove posso parcheggiare
 qui vicino?''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "nearby",
-  "data": {
-    "services": [
-      {
-        "name": "GARAGE TANUCCI DI FEI FRANCO E C. - SOCIETA' IN ACCOMANDITA SEMPL ICE",
-        "distance_km": 0.66
-      },
-      {
-        "name": "COOPERATIVA SOCIALE SERVIZI AUTO POSTEGGI CUSTODITI FIRENZE - SOC IETA' COOPERATIVA SOCIALE  IN SIGLA S.A.P. SOC. COOP. SOCIALE",
-        "distance_km": 0.73
-      },
-      {
-        "name": "parkingSlot_53695",
-        "distance_km": 0.881
-      },
-      "... (+47 voci)"
-    ]
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "i ristoranti vicino a piazza Dalmazia firenze"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Ci sono 50 ristoranti vicino a Piazza Dalmazia 31, Firenze."
-    },
-    {
-      "role": "user",
-      "content": "dove posso parcheggiare qui vicino piazza Dalmazia Firenze?"
-    },
-    {
-      "role": "assistant",
-      "content": "Dimmi dove cercare (un indirizzo o una città) oppure attiva la posizione."
-    },
-    {
-      "role": "user",
-      "content": "dove posso parcheggiare vicino a piazza Dalmazia Firenze?"
-    },
-    {
-      "role": "assistant",
-      "content": "Ci sono 50 parcheggi vicino a Piazza Dalmazia 31, Firenze."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S18-nearby-parcheggi.json}.
+\textbf{Output completo:} \exfile{S18-nearby-parcheggi}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S18-nearby-parcheggi.png}
+  \includegraphics[width=\textwidth]{S18-nearby-parcheggi.jpg}
   \caption{Pin dei parcheggi attorno alla posizione.}
   \label{fig:S18}
 \end{figure}
@@ -1688,112 +642,12 @@ qui vicino?''}.
 \subsection{S19 --- Orario di partenza}
 \textbf{Situazione.} L'orario indicato alimenta solo la pianificazione del trasporto
 pubblico (i profili a piedi e auto non hanno un modello tempo-variante).
-\textbf{Riproduzione.} L'utente digita \emph{``da via Cavour 12 a via de' Serragli 5 in
-autobus alle 18''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "route",
-  "data": {
-    "mode": "public_transport",
-    "wkt": "LINESTRING (11.224085 43.786818, ..., 11.255335 43.784706)",
-    "distance_km": 6.098,
-    "duration": "0:25:31",
-    "legs": [
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.224085 43.786818, ..., 11.225548 43.785708)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.225548 43.785708, ..., 11.244092 43.789902)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.244092 43.789902, 11.244092 43.789902)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.244092 43.789902, ..., 11.246672 43.780735)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.246672 43.780735, ..., 11.246495 43.780755)"
-      },
-      {
-        "type": "bus",
-        "wkt": "LINESTRING (11.246495 43.780755, ..., 11.253755 43.78287)"
-      },
-      {
-        "type": "foot",
-        "wkt": "LINESTRING (11.253755 43.78287, ..., 11.255335 43.784706)"
-      }
-    ],
-    "routes": [
-      {
-        "mode": "public_transport",
-        "wkt": "LINESTRING (11.224085 43.786818, ..., 11.255335 43.784706)",
-        "distance_km": 6.098,
-        "duration": "0:25:31",
-        "legs": [
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.224085 43.786818, ..., 11.225548 43.785708)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.225548 43.785708, ..., 11.244092 43.789902)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.244092 43.789902, 11.244092 43.789902)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.244092 43.789902, ..., 11.246672 43.780735)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.246672 43.780735, ..., 11.246495 43.780755)"
-          },
-          {
-            "type": "bus",
-            "wkt": "LINESTRING (11.246495 43.780755, ..., 11.253755 43.78287)"
-          },
-          {
-            "type": "foot",
-            "wkt": "LINESTRING (11.253755 43.78287, ..., 11.255335 43.784706)"
-          }
-        ],
-        "detail": "Partenza: 18:00\nA piedi 0.202 km\nLinea 55 (at - Firenze urbano) -> CAPPUCCINI\n  CASCINE PAISIELLO  18:05\n  PONTE ALLE MOSSE PUCCINI  18:06\n  DONI  18:07\n  DALLAPICCOLA  18:08\n  MARAGLIANO BUSONI  18:08\n  MARAGLIANO REDI  18:09\n  VILLAGGIO FORLANINI  18:11\n  FORLANINI GUIDONI  18:12\n  PONTE DI MEZZO MARIGNOLLI  18:14\n  MASSAIO CORSICA  18:15\n  CIRCONDARIA A.V.  18:17\n  ROMITO TANUCCI  18:18\nA piedi 0.014 km\nLinea 307 A (at - Firenze extraurbano) -> BORGO S.L. KENNEDY\n  FIRENZE HUB Montelungo  18:25\n  LORENZO IL MAGNIFICO  18:26\nA piedi 0.259 km\nTotale: 6.098 km · 0:25:31"
-      }
-    ],
-    "origin": {
-      "lat": 43.786785,
-      "lng": 11.224066
-    },
-    "destination": {
-      "lat": 43.784733,
-      "lng": 11.255323
-    }
-  },
-  "messages": [
-    {
-      "role": "user",
-      "content": "da via giuseppe tartini 7 firenze a via venti settembre 84 in autobus alle 18"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Da Via Giuseppe Tartini 7, Firenze a Via Venti Settembre 84, Firenze, partenza alle 18:00:\nCon i mezzi: 6.1 km, circa 26 minuti"
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S19-orario-partenza.json}.
+\textbf{Riproduzione.} L'utente chiede un percorso in autobus tra due indirizzi indicando
+l'orario di partenza (\emph{``alle 18''}).
+\textbf{Output completo:} \exfile{S19-orario-partenza}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S19-orario-partenza.png}
+  \includegraphics[width=\textwidth]{S19-orario-partenza.jpg}
   \caption{Itinerario di trasporto pubblico con l'orario di partenza indicato.}
   \label{fig:S19}
 \end{figure}
@@ -1802,67 +656,23 @@ autobus alle 18''}.
 \textbf{Situazione.} Le richieste fuori ambito (orari o linee del treno) ricevono una
 risposta cortese che indica la funzione non supportata, senza dati geografici.
 \textbf{Riproduzione.} L'utente digita \emph{``a che ora passa il treno?''}.
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "other",
-  "data": {},
-  "messages": [
-    {
-      "role": "user",
-      "content": "a che ora passa il treno?"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto o con i mezzi pubblici), anche verso il luogo più vicino di un certo tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla farmacia più vicina'."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S20-non-supportato.json}.
+\textbf{Output completo:} \exfile{S20-non-supportato}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S20-non-supportato.png}
+  \includegraphics[width=\textwidth]{S20-non-supportato.jpg}
   \caption{Risposta cortese per una richiesta non supportata.}
   \label{fig:S20}
 \end{figure}
 
-\subsection{S21 --- Chiarimento di uno slot mancante (opzionale)}
+\subsection{S21 --- Chiarimento di uno slot mancante}
 \textbf{Situazione.} Se manca il luogo o la categoria, l'advisor chiede un chiarimento
 prima di procedere, senza cancellare la mappa.
 \textbf{Riproduzione.} L'utente digita \emph{``mostrami le farmacie''} (senza luogo) oppure
 \emph{``cosa c'\`e qui intorno?''} (senza categoria).
-\textbf{Output (semplificato).}
-\begin{lstlisting}[style=outjson]
-{
-  "status": "success",
-  "request_type": "nearby",
-  "data": {},
-  "messages": [
-    {
-      "role": "user",
-      "content": "a che ora passa il treno?"
-    },
-    {
-      "role": "assistant",
-      "content": "Ciao! Al momento rispondo a domande su percorsi punto-punto (a piedi, in auto o con i mezzi pubblici), anche verso il luogo più vicino di un certo tipo, es. 'da Piazza Duomo a Santa Croce a piedi' o 'portami alla farmacia più vicina'."
-    },
-    {
-      "role": "user",
-      "content": "mostrami le farmacie"
-    },
-    {
-      "role": "assistant",
-      "content": "Dimmi dove cercare (un indirizzo o una città) oppure attiva la posizione."
-    }
-  ]
-}
-\end{lstlisting}
-\textbf{Output completo:} \texttt{examples/S21-chiarimento.json}.
+\textbf{Output completo:} \exfile{S21-chiarimento}.
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{S21-chiarimento.png}
+  \includegraphics[width=\textwidth]{S21-chiarimento.jpg}
   \caption{Domanda di chiarimento (``dove?'' / ``che tipo?'').}
   \label{fig:S21}
 \end{figure}
